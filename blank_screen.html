@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>Holodori Phone Trackpad</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+    background: #000;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    position: fixed;
+    inset: 0;
+}
+#msg {
+    color: #222;
+    font-family: monospace;
+    font-size: 12px;
+    position: absolute;
+    bottom: 8px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    pointer-events: none;
+}
+</style>
+</head>
+<body>
+<div id="msg">phone trackpad active — tap to fullscreen</div>
+<script>
+// Prevent ALL touch behavior from propagating to the OS/browser
+const opts = { passive: false, capture: true };
+['touchstart','touchmove','touchend','touchcancel','contextmenu','selectstart','dragstart']
+    .forEach(evt => document.addEventListener(evt, e => e.preventDefault(), opts));
+
+// Enter immersive fullscreen on first touch
+let went_fullscreen = false;
+document.body.addEventListener('touchstart', function() {
+    if (!went_fullscreen) {
+        went_fullscreen = true;
+        const el = document.documentElement;
+        const rfs = el.requestFullscreen || el.webkitRequestFullscreen || el.msRequestFullscreen;
+        if (rfs) rfs.call(el).catch(() => {});
+        document.getElementById('msg').textContent = 'fullscreen active';
+        setTimeout(() => { document.getElementById('msg').style.display = 'none'; }, 2000);
+    }
+}, { once: false, passive: true });
+
+// Prevent back navigation
+window.addEventListener('popstate', e => { history.pushState(null, '', location.href); });
+history.pushState(null, '', location.href);
+
+// Keep screen awake via a hidden video trick (no-op if not supported)
+try {
+    if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(()=>{});
+} catch(e) {}
+</script>
+</body>
+</html>

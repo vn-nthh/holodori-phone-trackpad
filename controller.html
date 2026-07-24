@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>Holodori Phone Trackpad</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  background: #080810;
+  width: 100vw; height: 100vh;
+  overflow: hidden;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  position: fixed; inset: 0;
+  font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, sans-serif;
+  color: #fff;
+}
+
+/* ---- Play Zone ---- */
+#playzone {
+  position: absolute;
+  transform-origin: center center;
+}
+.pz-border {
+  position: absolute; inset: 0;
+  border: 2px solid rgba(0, 200, 255, 0.6);
+  border-radius: 6px;
+  pointer-events: none;
+  transition: border-color 0.25s, box-shadow 0.25s;
+  box-shadow: 0 0 12px rgba(0, 200, 255, 0.1), inset 0 0 12px rgba(0, 200, 255, 0.04);
+}
+.locked .pz-border {
+  border-color: rgba(0, 200, 255, 0.2);
+  box-shadow: none;
+}
+
+/* ---- Zone Columns ---- */
+.zone-col {
+  position: absolute; top: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.08s;
+}
+.zone-col + .zone-col { border-left: 1px solid rgba(0, 200, 255, 0.18); }
+.zone-col.active { background: rgba(0, 200, 255, 0.16); }
+.zone-label {
+  font-size: clamp(16px, 5vw, 32px);
+  font-weight: 700; letter-spacing: 2px;
+  color: rgba(0, 200, 255, 0.40);
+  text-transform: uppercase;
+  pointer-events: none;
+  transition: color 0.15s, text-shadow 0.15s;
+}
+.zone-col.active .zone-label {
+  color: rgba(0, 230, 255, 0.85);
+  text-shadow: 0 0 16px rgba(0, 200, 255, 0.5);
+}
+.locked .zone-label { color: rgba(0, 200, 255, 0.22); }
+.locked .zone-col.active .zone-label {
+  color: rgba(0, 230, 255, 0.65);
+  text-shadow: 0 0 12px rgba(0, 200, 255, 0.35);
+}
+
+/* ---- Corner + side handles ---- */
+.handle {
+  position: absolute;
+  width: 52px; height: 52px;
+  display: flex; align-items: center; justify-content: center;
+  z-index: 10;
+  transition: opacity 0.25s;
+}
+.handle::after {
+  content: ''; display: block;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 200, 255, 0.75);
+  box-shadow: 0 0 12px rgba(0, 200, 255, 0.5);
+  transition: transform 0.15s;
+}
+.handle:active::after { transform: scale(1.4); }
+/* Corners */
+.h-tl { top: -26px; left: -26px; }
+.h-tr { top: -26px; right: -26px; }
+.h-bl { bottom: -26px; left: -26px; }
+.h-br { bottom: -26px; right: -26px; }
+/* Sides — elongated hit targets for one-axis stretch */
+.handle-side::after {
+  width: 22px; height: 10px;
+  border-radius: 5px;
+}
+.handle-side.h-l::after,
+.handle-side.h-r::after {
+  width: 10px; height: 22px;
+}
+.h-t {
+  top: -26px; left: 0; right: 0;
+  margin: 0 auto; width: 42%; max-width: 160px; height: 52px;
+}
+.h-b {
+  bottom: -26px; left: 0; right: 0;
+  margin: 0 auto; width: 42%; max-width: 160px; height: 52px;
+}
+.h-l {
+  left: -26px; top: 0; bottom: 0;
+  margin: auto 0; width: 52px; height: 42%; max-height: 160px;
+}
+.h-r {
+  right: -26px; top: 0; bottom: 0;
+  margin: auto 0; width: 52px; height: 42%; max-height: 160px;
+}
+.locked .handle { opacity: 0; pointer-events: none; }
+
+/* ---- Lock Button ---- */
+#lock-btn {
+  position: fixed; top: 14px; right: 14px;
+  z-index: 200;
+  width: 52px; height: 52px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 200, 255, 0.45);
+  background: rgba(10, 10, 20, 0.85);
+  color: rgba(0, 200, 255, 0.80);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: all 0.3s;
+}
+#lock-btn:active { transform: scale(0.88); }
+#lock-btn.is-locked {
+  border-color: rgba(80, 255, 120, 0.50);
+  color: rgba(80, 255, 120, 0.85);
+  box-shadow: 0 0 14px rgba(80, 255, 120, 0.15);
+}
+#lock-btn svg { width: 22px; height: 22px; }
+
+/* ---- Fullscreen Button ---- */
+#fs-btn {
+  position: fixed; top: 14px; right: 78px;
+  z-index: 200;
+  width: 52px; height: 52px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 200, 255, 0.45);
+  background: rgba(10, 10, 20, 0.85);
+  color: rgba(0, 200, 255, 0.80);
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: all 0.3s;
+}
+#fs-btn:active { transform: scale(0.88); }
+#fs-btn.hidden { opacity: 0; pointer-events: none; }
+#fs-btn svg { width: 20px; height: 20px; }
+
+/* ---- Status ---- */
+#status {
+  position: fixed; bottom: 6px; left: 0; right: 0;
+  text-align: center; font-size: 11px;
+  color: rgba(255,255,255,0.15);
+  pointer-events: none;
+  transition: opacity 0.5s;
+}
+</style>
+</head>
+<body>
+
+<div id="playzone">
+  <div class="pz-border"></div>
+  <!-- zone columns inserted by JS -->
+  <!-- Corners first so they win hit-tests over side handles -->
+  <div class="handle h-tl" data-h="tl"></div>
+  <div class="handle h-tr" data-h="tr"></div>
+  <div class="handle h-bl" data-h="bl"></div>
+  <div class="handle h-br" data-h="br"></div>
+  <div class="handle handle-side h-t" data-h="t"></div>
+  <div class="handle handle-side h-r" data-h="r"></div>
+  <div class="handle handle-side h-b" data-h="b"></div>
+  <div class="handle handle-side h-l" data-h="l"></div>
+</div>
+
+<div id="lock-btn">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+       stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="11" width="18" height="11" rx="2"/>
+    <path id="shackle" d="M7 11V7a5 5 0 0 1 9.9-.5"/>
+  </svg>
+</div>
+
+<div id="fs-btn">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+       stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3"/>
+    <path d="M21 8V5a2 2 0 0 0-2-2h-3"/>
+    <path d="M3 16v3a2 2 0 0 0 2 2h3"/>
+    <path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
+  </svg>
+</div>
+
+<div id="status">corners: resize / rotate · sides: stretch one axis · drag zone: move</div>
+
+<script>
+/* =============================================================
+   STATE
+   ============================================================= */
+const S = {
+  pz: { x: 0.10, y: 0.75, w: 0.80, h: 0.15, r: 0 },
+  keys: ['s','d','f','j','k','l'],
+  locked: false,
+};
+
+/* =============================================================
+   DOM
+   ============================================================= */
+const $pz    = document.getElementById('playzone');
+const $lock  = document.getElementById('lock-btn');
+const $status = document.getElementById('status');
+const $shackle = document.getElementById('shackle');
+
+/* =============================================================
+   RENDER
+   ============================================================= */
+function render() {
+  const vw = innerWidth, vh = innerHeight;
+  $pz.style.left   = (S.pz.x * vw) + 'px';
+  $pz.style.top    = (S.pz.y * vh) + 'px';
+  $pz.style.width  = (S.pz.w * vw) + 'px';
+  $pz.style.height = (S.pz.h * vh) + 'px';
+  $pz.style.transform = 'rotate(' + S.pz.r + 'deg)';
+  $pz.classList.toggle('locked', S.locked);
+  $lock.classList.toggle('is-locked', S.locked);
+  $shackle.setAttribute('d', S.locked
+    ? 'M7 11V7a5 5 0 0 1 10 0v4'
+    : 'M7 11V7a5 5 0 0 1 9.9-.5');
+  renderCols();
+}
+
+function renderCols() {
+  $pz.querySelectorAll('.zone-col').forEach(e => e.remove());
+  const n = S.keys.length, frag = document.createDocumentFragment();
+  for (let i = 0; i < n; i++) {
+    const d = document.createElement('div');
+    d.className = 'zone-col'; d.dataset.i = i;
+    d.style.left = (i / n * 100) + '%';
+    d.style.width = (100 / n) + '%';
+    const lbl = document.createElement('span');
+    lbl.className = 'zone-label'; lbl.textContent = S.keys[i];
+    d.appendChild(lbl); frag.appendChild(d);
+  }
+  $pz.insertBefore(frag, $pz.querySelector('.handle'));
+}
+
+/* =============================================================
+   GEOMETRY HELPERS
+   ============================================================= */
+
+/** Get screen position of a corner from current playzone state */
+function cornerToScreen(which) {
+  const vw = innerWidth, vh = innerHeight;
+  const cx = (S.pz.x + S.pz.w / 2) * vw;
+  const cy = (S.pz.y + S.pz.h / 2) * vh;
+  const hw = S.pz.w * vw / 2, hh = S.pz.h * vh / 2;
+  const r = S.pz.r * Math.PI / 180;
+  const c = Math.cos(r), s = Math.sin(r);
+  let lx, ly;
+  switch (which) {
+    case 'tl': lx = -hw; ly = -hh; break;
+    case 'tr': lx =  hw; ly = -hh; break;
+    case 'bl': lx = -hw; ly =  hh; break;
+    case 'br': lx =  hw; ly =  hh; break;
+  }
+  return { x: cx + lx * c - ly * s, y: cy + lx * s + ly * c };
+}
+
+const OPP = { tl: 'br', tr: 'bl', bl: 'tr', br: 'tl' };
+const SIDES = new Set(['t', 'r', 'b', 'l']);
+const CORNERS = new Set(['tl', 'tr', 'bl', 'br']);
+
+/** Compute midpoint, distance, angle from two corner positions */
+function pairGeometry(a, b) {
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const dx = b.x - a.x, dy = b.y - a.y;
+  return { mid, dist: Math.sqrt(dx*dx + dy*dy), angle: Math.atan2(dy, dx) };
+}
+
+function hitHandle(x, y) {
+  // Corners first (DOM order), then sides — first hit wins
+  for (const h of $pz.querySelectorAll('.handle')) {
+    const r = h.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)
+      return h.dataset.h;
+  }
+  return null;
+}
+
+/** One-axis resize from an edge drag. Opposite edge stays fixed. */
+function applySideResize(edit, clientX, clientY) {
+  const sp = edit.startPz;
+  const vw = innerWidth, vh = innerHeight;
+  const rad = sp.r * Math.PI / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  const dx = clientX - edit.sx;
+  const dy = clientY - edit.sy;
+  // Screen delta → local playzone axes (respects rotation)
+  const localX =  dx * cos + dy * sin;
+  const localY = -dx * sin + dy * cos;
+
+  let w = sp.w, h = sp.h;
+  const startCX = (sp.x + sp.w / 2) * vw;
+  const startCY = (sp.y + sp.h / 2) * vh;
+  let newCX = startCX, newCY = startCY;
+
+  switch (edit.side) {
+    case 'r': {
+      w = Math.max(0.08, sp.w + localX / vw);
+      const half = (w - sp.w) * vw / 2;
+      newCX = startCX + half * cos;
+      newCY = startCY + half * sin;
+      break;
+    }
+    case 'l': {
+      w = Math.max(0.08, sp.w - localX / vw);
+      const half = (w - sp.w) * vw / 2;
+      newCX = startCX - half * cos;
+      newCY = startCY - half * sin;
+      break;
+    }
+    case 'b': {
+      h = Math.max(0.04, sp.h + localY / vh);
+      const half = (h - sp.h) * vh / 2;
+      // Local +Y axis in screen space: (-sin, cos)
+      newCX = startCX + half * (-sin);
+      newCY = startCY + half * cos;
+      break;
+    }
+    case 't': {
+      h = Math.max(0.04, sp.h - localY / vh);
+      const half = (h - sp.h) * vh / 2;
+      newCX = startCX - half * (-sin);
+      newCY = startCY - half * cos;
+      break;
+    }
+  }
+
+  S.pz.w = w;
+  S.pz.h = h;
+  S.pz.r = sp.r;
+  S.pz.x = newCX / vw - w / 2;
+  S.pz.y = newCY / vh - h / 2;
+}
+
+function hitZone(x, y) {
+  const vw = innerWidth, vh = innerHeight;
+  const cx = (S.pz.x + S.pz.w / 2) * vw, cy = (S.pz.y + S.pz.h / 2) * vh;
+  const a = -S.pz.r * Math.PI / 180;
+  const dx = x - cx, dy = y - cy;
+  const lx = dx * Math.cos(a) - dy * Math.sin(a);
+  const ly = dx * Math.sin(a) + dy * Math.cos(a);
+  const hw = S.pz.w * vw / 2, hh = S.pz.h * vh / 2;
+  if (Math.abs(lx) > hw || Math.abs(ly) > hh) return -1;
+  let col = Math.floor((lx + hw) / (S.pz.w * vw) * S.keys.length);
+  return Math.max(0, Math.min(S.keys.length - 1, col));
+}
+
+function touchById(touchList, id) {
+  for (let i = 0; i < touchList.length; i++)
+    if (touchList[i].identifier === id) return touchList[i];
+  return null;
+}
+
+/* =============================================================
+   TOUCH — UNLOCKED (corner transform)
+   ============================================================= */
+let edit = null;
+/*  Corner edit: {
+      type: 'corners',
+      cornerA, cornerB,        -- diagonal pair names (e.g. 'tr','bl')
+      idA, idB,                -- touch identifiers (null = fixed)
+      startA, startB,          -- screen positions at edit start
+      startMid, startDist, startAngle,
+      startPz,
+      lastA, lastB,            -- last known positions
+    }
+    Side edit: { type: 'side', side, tid, sx, sy, startPz }
+    Move edit: { type: 'move', tid, sx, sy, spz }
+*/
+
+function beginCornerEdit(corner) {
+  const opp = OPP[corner];
+  const posA = cornerToScreen(corner);
+  const posB = cornerToScreen(opp);
+  const { mid, dist, angle } = pairGeometry(posA, posB);
+  return {
+    type: 'corners',
+    cornerA: corner, cornerB: opp,
+    idA: null, idB: null,
+    startA: posA, startB: posB,
+    startMid: mid, startDist: dist, startAngle: angle,
+    startPz: { ...S.pz },
+    lastA: { ...posA }, lastB: { ...posB },
+  };
+}
+
+function onStart(e) {
+  e.preventDefault();
+  if (S.locked) { feedback(e.touches); return; }
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    const h = hitHandle(t.clientX, t.clientY);
+
+    if (h && SIDES.has(h)) {
+      // Edge drag: scale only toward that side
+      edit = {
+        type: 'side',
+        side: h,
+        tid: t.identifier,
+        sx: t.clientX, sy: t.clientY,
+        startPz: { ...S.pz },
+      };
+      return;
+    }
+
+    if (h && CORNERS.has(h)) {
+      if (!edit || edit.type !== 'corners') {
+        // Start new edit with this corner
+        edit = beginCornerEdit(h);
+        edit.idA = t.identifier;
+        return;
+      }
+      // Already editing — check if this is the opposite corner
+      if (h === edit.cornerB && edit.idB === null) {
+        edit.idB = t.identifier;
+        return;
+      }
+      // Different corner — start fresh with new pair
+      if (h !== edit.cornerA) {
+        edit = beginCornerEdit(h);
+        edit.idA = t.identifier;
+        return;
+      }
+    }
+  }
+
+  // Drag inside zone = simple move
+  if (!edit) {
+    const t = e.changedTouches[0];
+    if (hitZone(t.clientX, t.clientY) >= 0) {
+      edit = { type: 'move', tid: t.identifier,
+               sx: t.clientX, sy: t.clientY, spz: { ...S.pz } };
+    }
+  }
+}
+
+function onMove(e) {
+  e.preventDefault();
+  if (S.locked) { feedback(e.touches); return; }
+  if (!edit) return;
+
+  if (edit.type === 'move') {
+    const t = touchById(e.changedTouches, edit.tid);
+    if (!t) return;
+    S.pz.x = edit.spz.x + (t.clientX - edit.sx) / innerWidth;
+    S.pz.y = edit.spz.y + (t.clientY - edit.sy) / innerHeight;
+    render(); return;
+  }
+
+  if (edit.type === 'side') {
+    const t = touchById(e.touches, edit.tid) || touchById(e.changedTouches, edit.tid);
+    if (!t) return;
+    applySideResize(edit, t.clientX, t.clientY);
+    render(); return;
+  }
+
+  // Update last known positions from active touches
+  for (let i = 0; i < e.touches.length; i++) {
+    const t = e.touches[i];
+    if (t.identifier === edit.idA) edit.lastA = { x: t.clientX, y: t.clientY };
+    if (t.identifier === edit.idB) edit.lastB = { x: t.clientX, y: t.clientY };
+  }
+
+  // Current positions: dragged corners follow finger, fixed stay at start
+  const curA = edit.idA !== null ? edit.lastA : edit.startA;
+  const curB = edit.idB !== null ? edit.lastB : edit.startB;
+
+  // Compute transform from the pair
+  const { mid, dist, angle } = pairGeometry(curA, curB);
+  const sp = edit.startPz;
+  const vw = innerWidth, vh = innerHeight;
+
+  const scale = Math.max(0.15, dist / edit.startDist);
+  const dAngle = (angle - edit.startAngle) * 180 / Math.PI;
+
+  S.pz.w = Math.max(0.08, sp.w * scale);
+  S.pz.h = Math.max(0.04, sp.h * scale);
+  S.pz.r = sp.r + dAngle;
+
+  const startCX = (sp.x + sp.w / 2) * vw;
+  const startCY = (sp.y + sp.h / 2) * vh;
+  const newCX = startCX + (mid.x - edit.startMid.x);
+  const newCY = startCY + (mid.y - edit.startMid.y);
+  S.pz.x = newCX / vw - S.pz.w / 2;
+  S.pz.y = newCY / vh - S.pz.h / 2;
+
+  render();
+}
+
+function onEnd(e) {
+  e.preventDefault();
+  if (S.locked) { feedback(e.touches); return; }
+  if (!edit) return;
+
+  if (edit.type === 'move' || edit.type === 'side') {
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      if (e.changedTouches[i].identifier === edit.tid) {
+        edit = null; sync(); saveLocal(); return;
+      }
+    }
+    return;
+  }
+
+  // Release finished corner touches
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const tid = e.changedTouches[i].identifier;
+    if (edit.idA === tid) edit.idA = null;
+    if (edit.idB === tid) edit.idB = null;
+  }
+
+  // Both released — end edit
+  if (edit.idA === null && edit.idB === null) {
+    edit = null; sync(); saveLocal();
+  } else {
+    // One still held — reset baseline
+    edit.startA = { ...edit.lastA };
+    edit.startB = { ...edit.lastB };
+    edit.startPz = { ...S.pz };
+    const { mid, dist, angle } = pairGeometry(edit.startA, edit.startB);
+    edit.startMid = mid; edit.startDist = dist; edit.startAngle = angle;
+  }
+}
+
+document.addEventListener('touchstart',  onStart, { passive: false });
+document.addEventListener('touchmove',   onMove,  { passive: false });
+document.addEventListener('touchend',    onEnd,   { passive: false });
+document.addEventListener('touchcancel', onEnd,   { passive: false });
+
+/* =============================================================
+   TOUCH — LOCKED (visual feedback)
+   ============================================================= */
+function feedback(touches) {
+  const active = new Set();
+  for (let i = 0; i < touches.length; i++) {
+    const z = hitZone(touches[i].clientX, touches[i].clientY);
+    if (z >= 0) active.add(z);
+  }
+  $pz.querySelectorAll('.zone-col').forEach((c, i) =>
+    c.classList.toggle('active', active.has(i)));
+}
+
+/* =============================================================
+   LOCK BUTTON
+   ============================================================= */
+$lock.addEventListener('touchstart', function(e) {
+  e.preventDefault(); e.stopPropagation();
+  S.locked = !S.locked;
+  edit = null; // cancel any in-progress edit
+  render(); sync(); saveLocal();
+  flash(S.locked ? 'LOCKED - play mode' : 'UNLOCKED - configure zones');
+  // Immersive + wake lock when entering play mode (fewer system interruptions)
+  if (S.locked) {
+    goFullscreen();
+    keepAwake();
+  }
+}, { passive: false });
+$lock.addEventListener('touchmove',  e => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+$lock.addEventListener('touchend',   e => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+
+function flash(msg) {
+  $status.textContent = msg;
+  $status.style.opacity = 1;
+  clearTimeout(flash._t);
+  flash._t = setTimeout(() => { $status.style.opacity = 0; }, 2200);
+}
+
+/* =============================================================
+   CONFIG SYNC
+   ============================================================= */
+function getOrientation() {
+  if (screen.orientation && screen.orientation.angle !== undefined)
+    return screen.orientation.angle;
+  if (window.orientation !== undefined)
+    return (window.orientation + 360) % 360;
+  return 0;
+}
+
+/** Convert a screen-normalized point to hardware-normalized coords */
+function screenToHW(sx, sy) {
+  const a = getOrientation();
+  if (a === 90)  return { x: 1 - sy, y: sx };
+  if (a === 180) return { x: 1 - sx, y: 1 - sy };
+  if (a === 270) return { x: sy, y: 1 - sx };
+  return { x: sx, y: sy };
+}
+
+/** Compute per-zone hitboxes in hardware coordinates */
+function computeHWZones() {
+  const vw = innerWidth, vh = innerHeight;
+  const n = S.keys.length;
+  const zones = [];
+
+  // Playzone geometry in pixels
+  const pcx = (S.pz.x + S.pz.w / 2) * vw;
+  const pcy = (S.pz.y + S.pz.h / 2) * vh;
+  const pw  = S.pz.w * vw;
+  const ph  = S.pz.h * vh;
+  const r   = S.pz.r * Math.PI / 180;
+  const cr  = Math.cos(r), sr = Math.sin(r);
+
+  for (let i = 0; i < n; i++) {
+    // Zone corners in playzone-local pixel coords
+    const lx0 = pw * (i / n - 0.5), lx1 = pw * ((i + 1) / n - 0.5);
+    const ly0 = -ph / 2, ly1 = ph / 2;
+
+    // Rotate to screen pixels, then normalize to 0-1
+    const corners = [
+      { x: (pcx + lx0*cr - ly0*sr) / vw, y: (pcy + lx0*sr + ly0*cr) / vh },
+      { x: (pcx + lx1*cr - ly0*sr) / vw, y: (pcy + lx1*sr + ly0*cr) / vh },
+      { x: (pcx + lx0*cr - ly1*sr) / vw, y: (pcy + lx0*sr + ly1*cr) / vh },
+      { x: (pcx + lx1*cr - ly1*sr) / vw, y: (pcy + lx1*sr + ly1*cr) / vh },
+    ];
+
+    // Transform every corner to hardware coords, then take AABB
+    const hw = corners.map(c => screenToHW(c.x, c.y));
+    const xs = hw.map(c => c.x), ys = hw.map(c => c.y);
+
+    zones.push({
+      key: S.keys[i],
+      x_min: Math.min(...xs), x_max: Math.max(...xs),
+      y_min: Math.min(...ys), y_max: Math.max(...ys),
+    });
+  }
+
+  // Extend outermost zones to the screen edges
+  if (zones.length >= 2) {
+    const f = zones[0], l = zones[zones.length - 1];
+    const fcx = (f.x_min + f.x_max) / 2, fcy = (f.y_min + f.y_max) / 2;
+    const lcx = (l.x_min + l.x_max) / 2, lcy = (l.y_min + l.y_max) / 2;
+
+    if (Math.abs(lcx - fcx) > Math.abs(lcy - fcy)) {
+      // Zones arranged along X axis
+      if (fcx < lcx) { f.x_min = 0; l.x_max = 1; }
+      else            { f.x_max = 1; l.x_min = 0; }
+    } else {
+      // Zones arranged along Y axis
+      if (fcy < lcy) { f.y_min = 0; l.y_max = 1; }
+      else            { f.y_max = 1; l.y_min = 0; }
+    }
+  }
+
+  return zones;
+}
+
+async function sync() {
+  try {
+    await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        playzone: S.pz,
+        locked: S.locked,
+        hw_zones: computeHWZones(),
+      }),
+    });
+  } catch(e) {}
+}
+
+async function loadRemote() {
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) return;
+    const c = await r.json();
+    if (c.keys) S.keys = c.keys;
+    if (c.playzone) Object.assign(S.pz, c.playzone);
+    if (c.locked !== undefined) S.locked = c.locked;
+  } catch(e) {}
+}
+
+/* =============================================================
+   LOCAL PERSISTENCE
+   ============================================================= */
+function saveLocal() {
+  try { localStorage.setItem('ptk', JSON.stringify({ pz: S.pz, locked: S.locked })); } catch(e) {}
+}
+function loadLocal() {
+  try {
+    const d = JSON.parse(localStorage.getItem('ptk'));
+    if (d && d.pz) { Object.assign(S.pz, d.pz); S.locked = !!d.locked; }
+  } catch(e) {}
+}
+
+/* =============================================================
+   INIT
+   ============================================================= */
+document.addEventListener('contextmenu', e => e.preventDefault());
+// Block selection / long-press menus that interrupt play
+document.addEventListener('selectstart', e => e.preventDefault());
+document.addEventListener('dragstart', e => e.preventDefault());
+window.addEventListener('popstate', () => history.pushState(null, '', location.href));
+history.pushState(null, '', location.href);
+
+/* ---- Screen wake lock (re-acquire if OS steals it) ---- */
+let wakeLock = null;
+async function keepAwake() {
+  try {
+    if (!navigator.wakeLock || wakeLock) return;
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => {
+      // OS released it (tab backgrounded, etc.) — reclaim when visible
+      wakeLock = null;
+      if (document.visibilityState === 'visible') {
+        setTimeout(keepAwake, 200);
+      }
+    });
+  } catch (_) {
+    wakeLock = null;
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') keepAwake();
+});
+// Re-assert periodically — some browsers drop wake locks quietly
+setInterval(() => {
+  if (document.visibilityState === 'visible' && !wakeLock) keepAwake();
+}, 15000);
+keepAwake();
+
+/* ---- Fullscreen button ---- */
+const $fs = document.getElementById('fs-btn');
+
+function goFullscreen() {
+  const el = document.documentElement;
+  const rfs = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (rfs) rfs.call(el).catch(() => {});
+}
+
+$fs.addEventListener('touchstart', function(e) {
+  e.preventDefault(); e.stopPropagation();
+  goFullscreen();
+  keepAwake();
+}, { passive: false });
+$fs.addEventListener('touchmove',  e => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+$fs.addEventListener('touchend',   e => { e.preventDefault(); e.stopPropagation(); }, { passive: false });
+
+// Hide button when fullscreen, show when not
+function onFSChange() {
+  const isFS = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  $fs.classList.toggle('hidden', isFS);
+  if (isFS) keepAwake();
+}
+document.addEventListener('fullscreenchange', onFSChange);
+document.addEventListener('webkitfullscreenchange', onFSChange);
+
+window.addEventListener('resize', render);
+
+// Re-sync orientation on rotate
+window.addEventListener('orientationchange', () => setTimeout(sync, 250));
+if (screen.orientation) screen.orientation.addEventListener('change', () => setTimeout(sync, 250));
+
+loadLocal();
+loadRemote().then(render);
+render();
+// Send initial orientation
+setTimeout(sync, 500);
+</script>
+</body>
+</html>
