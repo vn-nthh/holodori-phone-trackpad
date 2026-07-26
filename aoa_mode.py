@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from aoa_transport import (
     ACTION_CANCEL,
     ACTION_DOWN,
+    ACTION_HEARTBEAT,
     ACTION_MOVE,
     ACTION_UP,
     AoaReceiver,
@@ -35,13 +36,21 @@ class AoaTouchRouter:
         self.sequence_gaps = 0
 
     def handle(self, event: TouchEvent) -> None:
-        self.stats["events"] += 1
         if self.last_sequence is not None:
             expected = (self.last_sequence + 1) & 0xFFFFFFFF
             if event.sequence != expected:
-                self.sequence_gaps += (event.sequence - expected) & 0xFFFFFFFF
+                gap = (event.sequence - expected) & 0xFFFFFFFF
+                self.sequence_gaps += gap
+                # The missing record may have been an UP or CANCEL. Clear the
+                # host state before applying the newest complete sample so a
+                # dropped edge can never leave a key held indefinitely.
+                self.release_all(reset_sequence=False)
         self.last_sequence = event.sequence
 
+        if event.action == ACTION_HEARTBEAT:
+            return
+
+        self.stats["events"] += 1
         if event.action == ACTION_CANCEL:
             self.release_all()
             return
@@ -105,14 +114,15 @@ class AoaTouchRouter:
 
         self.active_keys[event.pointer_id] = new_key
 
-    def release_all(self) -> None:
+    def release_all(self, reset_sequence: bool = True) -> None:
         for key in list(self.key_counts):
             if not self.test_mode:
                 self.release_key(key)
             self.stats["releases"] += 1
         self.key_counts.clear()
         self.active_keys.clear()
-        self.last_sequence = None
+        if reset_sequence:
+            self.last_sequence = None
         if self.overlay:
             self.overlay.publish_cancel()
 

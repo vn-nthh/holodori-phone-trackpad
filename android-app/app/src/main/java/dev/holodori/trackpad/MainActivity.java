@@ -1,5 +1,6 @@
 package dev.holodori.trackpad;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -10,6 +11,8 @@ import android.hardware.usb.UsbAccessory;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.view.WindowManager;
 
@@ -17,12 +20,36 @@ public final class MainActivity extends Activity
         implements UsbAccessoryTransport.Listener {
     private static final String ACTION_USB_PERMISSION =
             "dev.holodori.trackpad.USB_PERMISSION";
+    private static final long RECONNECT_MIN_MILLIS = 500;
+    private static final long RECONNECT_MAX_MILLIS = 4_000;
 
     private UsbManager usbManager;
     private UsbAccessoryTransport transport;
     private TrackpadView trackpadView;
     private UsbAccessory currentAccessory;
+    private final Handler reconnectHandler = new Handler(Looper.getMainLooper());
+    private long reconnectDelayMillis = RECONNECT_MIN_MILLIS;
+    private boolean reconnectScheduled;
     private boolean destroyed;
+
+    private final Runnable reconnectRunnable = () -> {
+        reconnectScheduled = false;
+        if (destroyed || transport.isRunning()) {
+            return;
+        }
+        UsbAccessory[] accessories = usbManager.getAccessoryList();
+        if (accessories == null || accessories.length == 0) {
+            return;
+        }
+        UsbAccessory accessory = accessories[0];
+        if (!usbManager.hasPermission(accessory)) {
+            return;
+        }
+        openAccessory(accessory);
+        if (!transport.isRunning()) {
+            scheduleReconnect();
+        }
+    };
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override
@@ -44,6 +71,7 @@ public final class MainActivity extends Activity
                 // Always close the transport. A writer failure may already
                 // have cleared currentAccessory while its exclusive parcel
                 // descriptor is still being unwound.
+                cancelReconnect();
                 transport.close();
                 currentAccessory = null;
                 onConnectionChanged(false, "Connect the USB cable");
@@ -51,6 +79,7 @@ public final class MainActivity extends Activity
         }
     };
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -95,6 +124,7 @@ public final class MainActivity extends Activity
     @Override
     protected void onDestroy() {
         destroyed = true;
+        cancelReconnect();
         unregisterReceiver(usbReceiver);
         transport.close();
         super.onDestroy();
@@ -164,10 +194,31 @@ public final class MainActivity extends Activity
     public void onConnectionChanged(boolean connected, String message) {
         runOnUiThread(() -> {
             trackpadView.setConnectionStatus(connected, message);
-            if (!connected && !destroyed) {
+            if (connected) {
+                cancelReconnect();
+                reconnectDelayMillis = RECONNECT_MIN_MILLIS;
+            } else if (!destroyed) {
                 currentAccessory = null;
+                scheduleReconnect();
             }
         });
+    }
+
+    private void scheduleReconnect() {
+        if (destroyed || reconnectScheduled || transport.isRunning()) {
+            return;
+        }
+        reconnectScheduled = true;
+        reconnectHandler.postDelayed(reconnectRunnable, reconnectDelayMillis);
+        reconnectDelayMillis = Math.min(
+                RECONNECT_MAX_MILLIS,
+                reconnectDelayMillis * 2
+        );
+    }
+
+    private void cancelReconnect() {
+        reconnectHandler.removeCallbacks(reconnectRunnable);
+        reconnectScheduled = false;
     }
 
 }
