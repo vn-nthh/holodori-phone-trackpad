@@ -6,6 +6,27 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 > **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game's Terms of Service.
 
+## Download v0.1.0
+
+Version 0.1.0 adds Android Open Accessory (AOA) support, so USB debugging is
+no longer required. Install the two apps, connect the phone with a data-capable
+USB cable, and approve Android's accessory prompt:
+
+- [Download the Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.exe)
+- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.apk)
+- [View the v0.1.0 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.0)
+
+The original ADB transport remains available if you prefer it. ADB mode still
+requires USB debugging; AOA mode does not.
+
+This release also includes an experimental PC touch overlay. The phone sends
+live touch positions rather than virtual button presses, and the overlay
+mirrors those positions in real time. It is an early proof of concept that
+direct touch transfer is practical; the PC maps the received coordinates to
+game keys only after they arrive.
+
+The project is free and open source under the [MIT License](LICENSE).
+
 ## Features
 
 - **No USB debugging required**: the native Android app communicates through Android Open Accessory (AOA)
@@ -29,7 +50,7 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 ## Quick start
 
-1. Download `HolodoriPhoneTrackpad.exe` and `HolodoriPhoneTrackpad.apk` from a project release.
+1. Download the [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.apk).
 2. Install the APK on the phone, then run the EXE on the PC.
 3. When running from source instead, install the PC dependency:
 
