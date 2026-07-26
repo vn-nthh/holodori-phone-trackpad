@@ -10,6 +10,12 @@ __pycache__/
 venv/
 .env
 
+# Android / Gradle
+.gradle/
+android-app/.gradle/
+android-app/app/build/
+android-app/local.properties
+
 # OS / editor
 .DS_Store
 Thumbs.db

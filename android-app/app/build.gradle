@@ -1,0 +1,23 @@
+plugins {
+    id "com.android.application"
+}
+android {
+    namespace "dev.holodori.trackpad"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "dev.holodori.trackpad"
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+        }
+    }
+}

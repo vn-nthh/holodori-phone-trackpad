@@ -1,55 +1,62 @@
 # Holodori Phone Trackpad
 
-**Community support script for [hololive Dreams (holodori)](https://store.steampowered.com/app/4282500/hololive_Dreams/)** — use an Android phone as a multi-touch rhythm controller for the PC (Steam) client.
+**Community support tool for [hololive Dreams (holodori)](https://store.steampowered.com/app/4282500/hololive_Dreams/)**: use an Android phone as a multi-touch rhythm controller for the PC game.
 
-Holodori’s keyboard layout is built for hands on a desk. This tool turns your phone screen into a configurable play zone that maps touches to keys (`S D F J K L` by default), so you can play with fingers on glass the way a mobile rhythm game expects.
+Holodori's keyboard layout is built for hands on a desk. This tool turns a phone screen into a configurable play zone that maps touches to keys (`S D F J K L` by default), so players can use fingers on glass as they would in a mobile rhythm game.
 
-> **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game’s Terms of Service.
+> **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game's Terms of Service.
 
 ## Features
 
-- **Phone as trackpad** — raw multi-touch via ADB (`getevent`), not a soft keyboard
-- **Play-zone UI on the phone** — drag, resize, and rotate the hit area; lock when ready
-- **Drag notes** — seamless key transitions when sliding across lanes (no mid-slide gaps)
-- **Up to 10 fingers** — multi-touch for chords and simultaneous notes
-- **Configurable keys** — default 6-key Holodori layout; override with `--keys`
-- **Low interruption mode** — keep screen on, immersive UI, quiet notifications during play
-- **Saved layout** — play zone and device settings stored in `config.json`
+- **No USB debugging required**: the native Android app communicates through Android Open Accessory (AOA)
+- **Low-latency native touch capture**: requests unbuffered Android input dispatch and sends compact binary events
+- **Phone play-zone editor**: drag to position, pinch to resize or rotate, then lock for play
+- **PC touch overlay**: mirrors fingertips inside a custom click-through zone over the game
+- **Drag notes**: presses the new lane before releasing the old lane during transitions
+- **Multi-touch chords**: tracks independent fingers and reference-counts fingers sharing a lane
+- **Configurable keys**: defaults to six Holodori lanes but supports custom layouts
+- **Legacy ADB fallback**: the original raw `getevent` transport remains available
 
 ## Requirements
 
 | Requirement | Notes |
-|-------------|--------|
-| **Windows PC** | Uses Win32 `keybd_event` for key injection |
-| **Python 3.7+** | Standard library only (no pip packages) |
-| **ADB** | Android Platform Tools, or any `adb` on `PATH` |
-| **Android phone** | USB Debugging enabled, USB cable |
-| **hololive Dreams (PC)** | Steam client (or any app that accepts the mapped keys) |
+|---|---|
+| **Windows PC** | Uses Win32 key injection and a topmost transparent overlay |
+| **Python 3.9+** | Install the included USB runtime |
+| **Android phone** | AOA-capable phone, companion APK, and data-capable USB cable |
+| **Windows USB access** | UsbDk for the initial handshake, or WinUSB already bound to the AOA interface |
+| **hololive Dreams (PC)** | Steam client, or another focused app accepting the mapped keys |
 
 ## Quick start
 
-1. Enable **Developer options** → **USB debugging** on your phone.
-2. Connect the phone with USB and accept the debugging prompt.
-3. Install [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) (or ensure `adb` is on your `PATH`).
-4. On the PC, open Holodori and focus the game window when ready.
-5. Run:
+1. Install the companion APK from a project release. For development, open `android-app/` in Android Studio and build or install the `app` module.
+2. Install the PC dependency:
 
-```bash
-python phone_trackpad.py
-```
+   ```text
+   python -m pip install -r requirements.txt
+   ```
 
-6. On the phone, position the play zone over your preferred touch area, then tap **LOCK**.
-7. Play. Quit with `Ctrl+C` on the PC.
+3. On Windows, install [UsbDk](https://gitlab.com/spice/win32/usbdk/-/releases) once, approve its administrator prompt, then restart Windows. This allows the PC to perform the initial AOA handshake without replacing the phone's normal MTP driver.
+4. Connect the phone with a data-capable USB cable. Accept the Android USB-access prompt and choose Holodori Trackpad if Android asks which app to open.
+5. Open Holodori in **Borderless Windowed** mode so the external overlay remains visible.
+6. Run:
 
-### Holodori default keys
+   ```text
+   python phone_trackpad.py
+   ```
 
-| Lanes (left → right) | Keys |
-|----------------------|------|
-| 6-key (default)      | `S` `D` `F` `J` `K` `L` |
+7. On the phone, position the play zone, pinch to resize or rotate, then tap the lock button.
+8. Position and resize the PC overlay from any edge or corner, then press `Enter`. During play, click **Edit zone** or use `Ctrl+Shift+O` to edit it later. Use `Ctrl+Shift+Q` to quit.
 
-Custom layout example:
+### Default keys
 
-```bash
+| Lanes, left to right | Keys |
+|---|---|
+| 6-key default | `S` `D` `F` `J` `K` `L` |
+
+Custom layout:
+
+```text
 python phone_trackpad.py --keys a s d f j k l
 ```
 
@@ -59,47 +66,72 @@ python phone_trackpad.py --keys a s d f j k l
 python phone_trackpad.py [options]
 
   --keys KEY [KEY ...]   Keys left-to-right (default: s d f j k l)
-  --device PATH          Touch device, e.g. /dev/input/event2
-  --adb PATH             Path to adb.exe if not on PATH
-  --test                 Print touch→key events; do not send keys
-  --selftest             Type "hello" into the focused window
-  --no-ui                Skip phone controller UI (full-screen fallback)
+  --transport aoa|adb    USB transport (default: aoa)
+  --no-overlay           Disable the PC touch-position overlay
+  --overlay-edit         Open the saved PC overlay zone for editing
+  --usb-vid VID          Add an unlisted Android USB vendor ID
+  --no-usbdk             Use an installed WinUSB driver instead of UsbDk
+  --test                 Show input events without sending keys
+
+Legacy ADB options:
+
+  --device PATH          Touch device, for example /dev/input/event2
+  --adb PATH             Path to adb.exe if it is not on PATH
+  --no-ui                Skip the legacy browser controller
 ```
 
 ## How it works
 
 ```text
-  Phone touchscreen  ──ADB getevent──►  PC script  ──keybd_event──►  Holodori (focused)
-         │                                  │
-         └── controller.html (HTTP) ────────┘  play zone + lock state
+Native Android app ──AOA USB bulk──► PC input router ──key event──► game
+        │                                  │
+        │ normalized touch coordinates    └──────────────► PC overlay
+        └── native play-zone editor
 ```
 
-1. ADB streams multitouch events from `/dev/input/event*`.
-2. Touches are mapped into columns of a user-defined play rectangle (position, size, rotation).
-3. Press/release (and drag lane changes) become Windows keyboard events.
-4. An optional local HTTP server serves the on-phone UI and receives zone updates.
+1. The Android view requests unbuffered touch dispatch and maps screen coordinates into its rotated play zone.
+2. Fixed 24-byte records carry finger ID, action, normalized coordinates, sequence, and source timestamp over AOA.
+3. The PC immediately maps records to key presses and releases.
+4. A separate queue mirrors coordinates to the visual overlay, so drawing never blocks the input path.
+5. If USB disconnects, the PC releases every held key and automatically looks for the phone again.
+
+## Legacy ADB fallback
+
+Use the original raw-event transport while testing AOA compatibility:
+
+```text
+python phone_trackpad.py --transport adb
+```
+
+ADB mode still requires Android Platform Tools, USB debugging, and the original browser controller.
 
 ## Files
 
 | File | Role |
-|------|------|
-| `phone_trackpad.py` | Main script (ADB, touch map, key inject, HTTP server) |
-| `controller.html` | Phone UI: resizable/rotatable play zone + lock |
-| `blank_screen.html` | Minimal fullscreen overlay when UI is disabled |
-| `config.json` | Auto-created local settings (gitignored) |
+|---|---|
+| `phone_trackpad.py` | Main entry point, key injection, and legacy ADB mode |
+| `aoa_transport.py` | AOA handshake, binary parser, and USB reconnect loop |
+| `aoa_mode.py` | Multi-touch key-state routing |
+| `touch_overlay.py` | Transparent, click-through PC touch overlay |
+| `android-app/` | Native Android companion app |
+| `controller.html` | Legacy ADB phone UI |
+| `tests/` | Protocol and input-state tests |
 
-## Tips
+## Troubleshooting
 
-- Run as **Administrator** if keys don’t reach the game (some titles need elevated input).
-- Keep the game window **focused** while playing.
-- If the touchscreen isn’t detected: `adb shell getevent -lp`, then pass `--device /dev/input/eventN`.
-- Use `--test` first to verify lanes without sending keys into Holodori.
-- Cable connection is recommended; wireless ADB works but adds latency.
+- If AOA cannot open the phone before switching modes, verify UsbDk is installed.
+- Restart Windows once after installing or reinstalling UsbDk; its USB filter does not attach to already-running USB controllers.
+- If it cannot claim `18D1:2D00`, bind WinUSB to the **Android Accessory** interface only.
+- Do not replace the phone's normal MTP driver with WinUSB. UsbDk avoids that device-wide replacement.
+- The overlay works over ordinary and borderless windows. True exclusive fullscreen can bypass desktop composition.
+- Run as Administrator if key events do not reach an elevated game.
+- Use `--test` before sending keys into the game.
+- For legacy ADB touchscreen detection, run `adb shell getevent -lp`, then pass `--device /dev/input/eventN`.
 
 ## Disclaimer
 
-This project is a **fan-made accessibility / input helper**. It does not modify game files or network traffic. Rhythm-game competitive integrity and ToS compliance are your responsibility. “hololive Dreams”, “holodori”, and related names are trademarks of their respective owners.
+This project is a fan-made accessibility and input helper. It does not modify game files or network traffic. Rhythm-game competitive integrity and Terms of Service compliance are the user's responsibility. “hololive Dreams,” “holodori,” and related names are trademarks of their respective owners.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
