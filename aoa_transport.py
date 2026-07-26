@@ -733,6 +733,8 @@ class AoaHost:
 class AoaReceiver:
     """Reconnect-capable background receiver."""
 
+    HEARTBEAT_TIMEOUT_SECONDS = 1.5
+
     def __init__(
         self,
         on_event: Callable[[TouchEvent], None],
@@ -751,7 +753,7 @@ class AoaReceiver:
         self._stop = threading.Event()
         self.finished = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._connection: Optional[AoaConnection] = None
+        self._connection: Optional[AoaConnection | WinUsbConnection] = None
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -785,7 +787,6 @@ class AoaReceiver:
             self.finished.set()
             return
 
-        parser = TouchPacketParser()
         last_error = ""
         try:
             while not self._stop.is_set():
@@ -798,11 +799,26 @@ class AoaReceiver:
                     # packets to the host; avoiding an idle reverse reader also
                     # avoids composite-driver teardown on affected devices.
                     last_error = ""
+                    parser = TouchPacketParser()
+                    last_packet_at = time.monotonic()
                     while not self._stop.is_set():
                         chunk = self._connection.read()
-                        for event in parser.feed(chunk):
-                            if event.action != ACTION_HEARTBEAT:
+                        events = list(parser.feed(chunk))
+                        now = time.monotonic()
+                        if events:
+                            last_packet_at = now
+                            for event in events:
+                                # Heartbeats participate in sequence tracking.
+                                # The router ignores them after verifying that
+                                # no wire record was skipped.
                                 self.on_event(event)
+                        elif (
+                            now - last_packet_at
+                            >= self.HEARTBEAT_TIMEOUT_SECONDS
+                        ):
+                            raise AoaError(
+                                "AOA heartbeat timed out; reconnecting"
+                            )
                 except Exception as exc:
                     if self._stop.is_set():
                         break
@@ -811,7 +827,7 @@ class AoaReceiver:
                         self.on_status(message, False)
                         last_error = message
                     self.on_disconnect()
-                    time.sleep(1)
+                    self._stop.wait(1)
                 finally:
                     if self._connection:
                         try:

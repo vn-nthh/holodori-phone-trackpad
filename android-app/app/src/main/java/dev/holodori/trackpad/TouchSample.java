@@ -14,6 +14,5 @@ final class TouchSample {
     int flags;
     int x;
     int y;
-    int sequence;
     long eventNanos;
 }

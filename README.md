@@ -6,6 +6,27 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 > **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game's Terms of Service.
 
+## Download v0.1.0
+
+Version 0.1.0 adds Android Open Accessory (AOA) support, so USB debugging is
+no longer required. Install the two apps, connect the phone with a data-capable
+USB cable, and approve Android's accessory prompt:
+
+- [Download the Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.exe)
+- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.apk)
+- [View the v0.1.0 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.0)
+
+The original ADB transport remains available if you prefer it. ADB mode still
+requires USB debugging; AOA mode does not.
+
+This release also includes an experimental PC touch overlay. The phone sends
+live touch positions rather than virtual button presses, and the overlay
+mirrors those positions in real time. It is an early proof of concept that
+direct touch transfer is practical; the PC maps the received coordinates to
+game keys only after they arrive.
+
+The project is free and open source under the [MIT License](LICENSE).
+
 ## Features
 
 - **No USB debugging required**: the native Android app communicates through Android Open Accessory (AOA)
@@ -29,24 +50,44 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 ## Quick start
 
-1. Install the companion APK from a project release. For development, open `android-app/` in Android Studio and build or install the `app` module.
-2. Install the PC dependency:
+1. Download the [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.apk).
+2. Install the APK on the phone, then run the EXE on the PC.
+3. When running from source instead, install the PC dependency:
 
    ```text
    python -m pip install -r requirements.txt
    ```
 
-3. On Windows, install [UsbDk](https://gitlab.com/spice/win32/usbdk/-/releases) once, approve its administrator prompt, then restart Windows. This allows the PC to perform the initial AOA handshake without replacing the phone's normal MTP driver.
-4. Connect the phone with a data-capable USB cable. Accept the Android USB-access prompt and choose Holodori Trackpad if Android asks which app to open.
-5. Open Holodori in **Borderless Windowed** mode so the external overlay remains visible.
-6. Run:
+4. On Windows, install [UsbDk](https://gitlab.com/spice/win32/usbdk/-/releases) once, approve its administrator prompt, then restart Windows. This allows the PC to perform the initial AOA handshake without replacing the phone's normal MTP driver.
+5. Connect the phone with a data-capable USB cable. Accept the Android USB-access prompt and choose Holodori Trackpad if Android asks which app to open.
+6. Open Holodori in **Borderless Windowed** mode so the external overlay remains visible.
+7. When running from source, launch:
 
    ```text
    python phone_trackpad.py
    ```
 
-7. On the phone, position the play zone, pinch to resize or rotate, then tap the lock button.
-8. Position and resize the PC overlay from any edge or corner, then press `Enter`. During play, click **Edit zone** or use `Ctrl+Shift+O` to edit it later. Use `Ctrl+Shift+Q` to quit.
+8. On the phone, position the play zone, pinch to resize or rotate, then tap the lock button.
+9. Position and resize the PC overlay from any edge or corner, then press `Enter`. During play, click **Edit zone** or use `Ctrl+Shift+O` to edit it later. Use `Ctrl+Shift+Q` to quit.
+
+## Build distributable packages
+
+Run the packaging script from PowerShell:
+
+```text
+.\packaging\build.ps1 -Target All
+```
+
+The Windows build creates a single-file `release\HolodoriPhoneTrackpad.exe`.
+Its settings are stored in `%LOCALAPPDATA%\Holodori Phone Trackpad`, so they
+survive the temporary extraction used by the single-file executable.
+
+The Android build requires JDK 17 or newer and an Android SDK containing
+Platform 35. Set `JAVA_HOME` and `ANDROID_SDK_ROOT`, or pass `-JavaHome` and
+`-AndroidSdk` to the script. It creates the installable, development-signed
+`release\HolodoriPhoneTrackpad.apk`.
+
+Build only one package with `-Target Windows` or `-Target Android`.
 
 ### Default keys
 

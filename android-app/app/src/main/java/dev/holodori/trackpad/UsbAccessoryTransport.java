@@ -14,6 +14,7 @@ import java.nio.ByteOrder;
 final class UsbAccessoryTransport {
     private static final String TAG = "HolodoriAOA";
     private static final long HEARTBEAT_MILLIS = 200;
+    private static final long MAX_QUEUE_AGE_NANOS = 100_000_000L;
 
     interface Listener {
         void onConnectionChanged(boolean connected, String message);
@@ -82,39 +83,94 @@ final class UsbAccessoryTransport {
             return;
         }
         synchronized (queueLock) {
+            if (queueIsStale(eventNanos)) {
+                // Once queued input is this old, replaying it is worse than
+                // dropping it. Tell the host to release every key, then resume
+                // from the newest sample.
+                replaceQueueWithCancel(eventNanos);
+            }
+
+            int normalizedPointerId = pointerId & 0xFF;
+            if (action == TouchSample.ACTION_MOVE
+                    && coalescePendingMove(
+                            normalizedPointerId,
+                            x,
+                            y,
+                            inside,
+                            locked,
+                            eventNanos
+                    )) {
+                return;
+            }
+
             int next = (head + 1) % CAPACITY;
             if (next == tail) {
-                if (action == TouchSample.ACTION_MOVE) {
-                    // Movement is state, not an edge. A later MOVE supersedes it.
-                    return;
-                }
-                // Never lose DOWN/UP. Reset queued state first so the PC cannot
-                // retain a key if USB was blocked for several seconds.
-                tail = head;
-                TouchSample cancel = queue[head];
-                cancel.action = TouchSample.ACTION_CANCEL;
-                cancel.pointerId = 0;
-                cancel.flags = 0;
-                cancel.x = 0;
-                cancel.y = 0;
-                cancel.sequence = sequence++;
-                cancel.eventNanos = eventNanos;
-                head = (head + 1) % CAPACITY;
+                replaceQueueWithCancel(eventNanos);
                 next = (head + 1) % CAPACITY;
             }
             TouchSample sample = queue[head];
             sample.action = action;
-            sample.pointerId = pointerId & 0xFF;
-            sample.flags =
-                    (inside ? TouchSample.FLAG_INSIDE : 0)
-                            | (locked ? TouchSample.FLAG_LOCKED : 0);
-            sample.x = clampFixed(x);
-            sample.y = clampFixed(y);
-            sample.sequence = sequence++;
-            sample.eventNanos = eventNanos;
+            sample.pointerId = normalizedPointerId;
+            updateSample(sample, x, y, inside, locked, eventNanos);
             head = next;
             queueLock.notify();
         }
+    }
+
+    private boolean queueIsStale(long eventNanos) {
+        return head != tail
+                && eventNanos - queue[tail].eventNanos > MAX_QUEUE_AGE_NANOS;
+    }
+
+    private boolean coalescePendingMove(
+            int pointerId,
+            float x,
+            float y,
+            boolean inside,
+            boolean locked,
+            long eventNanos
+    ) {
+        int index = head;
+        while (index != tail) {
+            index = (index - 1 + CAPACITY) % CAPACITY;
+            TouchSample pending = queue[index];
+            if (pending.action != TouchSample.ACTION_MOVE) {
+                break;
+            }
+            if (pending.pointerId == pointerId) {
+                updateSample(pending, x, y, inside, locked, eventNanos);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void replaceQueueWithCancel(long eventNanos) {
+        tail = head;
+        TouchSample cancel = queue[head];
+        cancel.action = TouchSample.ACTION_CANCEL;
+        cancel.pointerId = 0;
+        cancel.flags = 0;
+        cancel.x = 0;
+        cancel.y = 0;
+        cancel.eventNanos = eventNanos;
+        head = (head + 1) % CAPACITY;
+    }
+
+    private static void updateSample(
+            TouchSample sample,
+            float x,
+            float y,
+            boolean inside,
+            boolean locked,
+            long eventNanos
+    ) {
+        sample.flags =
+                (inside ? TouchSample.FLAG_INSIDE : 0)
+                        | (locked ? TouchSample.FLAG_LOCKED : 0);
+        sample.x = clampFixed(x);
+        sample.y = clampFixed(y);
+        sample.eventNanos = eventNanos;
     }
 
     private static int clampFixed(float value) {
@@ -160,7 +216,7 @@ final class UsbAccessoryTransport {
                         flags = sample.flags;
                         x = sample.x;
                         y = sample.y;
-                        currentSequence = sample.sequence;
+                        currentSequence = sequence++;
                         eventNanos = sample.eventNanos;
                         tail = (tail + 1) % CAPACITY;
                     }

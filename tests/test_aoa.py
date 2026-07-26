@@ -1,12 +1,16 @@
 import struct
+import time
 import unittest
+from unittest import mock
 
 from aoa_mode import AoaTouchRouter
 from aoa_transport import (
     ACTION_CANCEL,
     ACTION_DOWN,
+    ACTION_HEARTBEAT,
     ACTION_MOVE,
     ACTION_UP,
+    AoaReceiver,
     FLAG_INSIDE,
     FLAG_LOCKED,
     TOUCH_MAGIC,
@@ -85,6 +89,86 @@ class RouterTests(unittest.TestCase):
         self.router.handle(event(ACTION_DOWN, 2, 0.8, 0.5, 3))
         self.router.handle(event(ACTION_CANCEL, 0, 0, 0, 4, 0))
         self.assertEqual(self.up, ["a", "b"])
+
+    def test_heartbeat_participates_in_sequence_without_touching_keys(self):
+        self.router.handle(event(ACTION_DOWN, 1, 0.2, 0.5, 1))
+        self.router.handle(event(ACTION_HEARTBEAT, 0, 0, 0, 2, 0))
+        self.router.handle(event(ACTION_UP, 1, 0.2, 0.5, 3))
+
+        self.assertEqual(self.router.sequence_gaps, 0)
+        self.assertEqual(self.down, ["a"])
+        self.assertEqual(self.up, ["a"])
+        self.assertEqual(self.router.stats["events"], 2)
+
+    def test_sequence_gap_releases_stale_keys_before_latest_sample(self):
+        self.router.handle(event(ACTION_DOWN, 1, 0.2, 0.5, 1))
+        self.router.handle(event(ACTION_DOWN, 2, 0.8, 0.5, 3))
+
+        self.assertEqual(self.router.sequence_gaps, 1)
+        self.assertEqual(self.down, ["a", "b"])
+        self.assertEqual(self.up, ["a"])
+        self.assertEqual(self.router.active_keys, {2: "b"})
+        self.assertEqual(self.router.key_counts, {"b": 1})
+
+
+class ReceiverTests(unittest.TestCase):
+    def test_silent_connection_times_out_and_disconnects(self):
+        class SilentConnection:
+            def __init__(self):
+                self.closed = False
+
+            def read(self):
+                time.sleep(0.003)
+                return b""
+
+            def close(self):
+                self.closed = True
+
+        connection = SilentConnection()
+
+        class FakeHost:
+            instance = None
+
+            def __init__(self, **_kwargs):
+                self.usb = type("Usb", (), {"using_usbdk": False})()
+                self.closed = False
+                FakeHost.instance = self
+
+            def connect(self):
+                return connection
+
+            def close(self):
+                self.closed = True
+
+        statuses = []
+        disconnects = []
+        receiver = None
+
+        def disconnect():
+            disconnects.append(True)
+            receiver._stop.set()
+
+        receiver = AoaReceiver(
+            on_event=lambda _event: None,
+            on_status=lambda text, connected: statuses.append(
+                (text, connected)
+            ),
+            on_disconnect=disconnect,
+            lane_count=2,
+        )
+        receiver.HEARTBEAT_TIMEOUT_SECONDS = 0.01
+
+        with mock.patch("aoa_transport.AoaHost", FakeHost):
+            receiver._run()
+
+        self.assertEqual(disconnects, [True])
+        self.assertTrue(connection.closed)
+        self.assertTrue(FakeHost.instance.closed)
+        self.assertTrue(receiver.finished.is_set())
+        self.assertIn(
+            ("AOA heartbeat timed out; reconnecting", False),
+            statuses,
+        )
 
 
 if __name__ == "__main__":
