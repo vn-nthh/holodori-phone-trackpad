@@ -3,16 +3,26 @@ param(
     [ValidateSet("All", "Windows", "Android")]
     [string]$Target = "All",
     [string]$AndroidSdk = $env:ANDROID_SDK_ROOT,
-    [string]$JavaHome = $env:JAVA_HOME
+    [string]$JavaHome = $env:JAVA_HOME,
+    [string]$InnoSetupCompiler = ""
 )
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $ReleaseDir = Join-Path $ProjectRoot "release"
+$UsbDkInstaller = Join-Path $ProjectRoot "packaging\third_party\usbdk\UsbDk_1.0.22_x64.msi"
+$UsbDkSha256 = "91F6F695E1E13C656024E6D3B55620BF08D8835EF05EE0496935BA6BB62466A5"
 
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 
 if ($Target -in @("All", "Windows")) {
+    if (-not (Test-Path $UsbDkInstaller)) {
+        throw "Missing bundled UsbDk installer: $UsbDkInstaller"
+    }
+    if ((Get-FileHash -Algorithm SHA256 $UsbDkInstaller).Hash -ne $UsbDkSha256) {
+        throw "Bundled UsbDk installer checksum does not match the verified upstream asset."
+    }
+
     $VenvDir = Join-Path $ProjectRoot ".venv-package"
     $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 
@@ -42,6 +52,24 @@ if ($Target -in @("All", "Windows")) {
         throw "Windows build completed without producing $ExePath"
     }
     Write-Host "Windows package: $ExePath"
+
+    if (-not $InnoSetupCompiler) {
+        $InnoSetupCompiler = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+    }
+    if (-not (Test-Path $InnoSetupCompiler)) {
+        throw "Inno Setup 6 is required to build the Windows installer. Install it or pass -InnoSetupCompiler."
+    }
+
+    & $InnoSetupCompiler (Join-Path $ProjectRoot "packaging\windows\HolodoriPhoneTrackpad.iss")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Inno Setup failed to build the Windows installer."
+    }
+
+    $SetupPath = Join-Path $ReleaseDir "HolodoriPhoneTrackpadSetup.exe"
+    if (-not (Test-Path $SetupPath)) {
+        throw "Windows package completed without producing $SetupPath"
+    }
+    Write-Host "Windows setup: $SetupPath"
 }
 
 if ($Target -in @("All", "Android")) {

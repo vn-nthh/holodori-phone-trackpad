@@ -6,15 +6,17 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 > **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game's Terms of Service.
 
-## Download v0.1.0
+## Download v0.1.1
 
-Version 0.1.0 adds Android Open Accessory (AOA) support, so USB debugging is
-no longer required. Install the two apps, connect the phone with a data-capable
-USB cable, and approve Android's accessory prompt:
+Install the Windows setup and Android companion app, connect the phone with a
+data-capable USB cable, and approve Android's accessory prompt. The Windows
+setup includes the signed UsbDk USB driver needed for the normal AOA connection;
+approve its administrator prompt and restart only if setup asks you to.
 
-- [Download the Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.exe)
-- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.apk)
-- [View the v0.1.0 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.0)
+- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpadSetup.exe)
+- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpad.apk)
+- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpad.exe)
+- [View the v0.1.1 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.1)
 
 The original ADB transport remains available if you prefer it. ADB mode still
 requires USB debugging; AOA mode does not.
@@ -43,22 +45,22 @@ The project is free and open source under the [MIT License](LICENSE).
 | Requirement | Notes |
 |---|---|
 | **Windows PC** | Uses Win32 key injection and a topmost transparent overlay |
-| **Python 3.9+** | Install the included USB runtime |
+| **Windows setup** | Bundles the PC app and UsbDk; no Python installation required |
 | **Android phone** | AOA-capable phone, companion APK, and data-capable USB cable |
-| **Windows USB access** | UsbDk for the initial handshake, or WinUSB already bound to the AOA interface |
+| **Windows USB access** | The setup bundles UsbDk for the initial handshake, or use an AOA interface already bound to WinUSB |
 | **hololive Dreams (PC)** | Steam client, or another focused app accepting the mapped keys |
 
 ## Quick start
 
-1. Download the [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.0/HolodoriPhoneTrackpad.apk).
-2. Install the APK on the phone, then run the EXE on the PC.
-3. When running from source instead, install the PC dependency:
+1. Download the [Windows setup](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpadSetup.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpad.apk).
+2. Run the Windows setup. Leave **Install UsbDk USB connection support** selected unless you already use WinUSB for the Android Accessory interface. Approve the administrator prompt, then restart Windows only if setup asks you to.
+3. Install the APK on the phone, then launch Holodori Phone Trackpad from the Start menu or desktop shortcut.
+4. When running from source instead, install the PC dependency:
 
    ```text
    python -m pip install -r requirements.txt
    ```
 
-4. On Windows, install [UsbDk](https://gitlab.com/spice/win32/usbdk/-/releases) once, approve its administrator prompt, then restart Windows. This allows the PC to perform the initial AOA handshake without replacing the phone's normal MTP driver.
 5. Connect the phone with a data-capable USB cable. Accept the Android USB-access prompt and choose Holodori Trackpad if Android asks which app to open.
 6. Open Holodori in **Borderless Windowed** mode so the external overlay remains visible.
 7. When running from source, launch:
@@ -78,7 +80,9 @@ Run the packaging script from PowerShell:
 .\packaging\build.ps1 -Target All
 ```
 
-The Windows build creates a single-file `release\HolodoriPhoneTrackpad.exe`.
+The Windows build creates `release\HolodoriPhoneTrackpad.exe` plus
+`release\HolodoriPhoneTrackpadSetup.exe`, which bundles the signed UsbDk 1.0.22
+x64 installer. Building the setup requires [Inno Setup 6](https://jrsoftware.org/isinfo.php).
 Its settings are stored in `%LOCALAPPDATA%\Holodori Phone Trackpad`, so they
 survive the temporary extraction used by the single-file executable.
 
@@ -160,7 +164,7 @@ ADB mode still requires Android Platform Tools, USB debugging, and the original 
 
 ## Troubleshooting
 
-- If AOA cannot open the phone before switching modes, verify UsbDk is installed.
+- The Windows setup installs UsbDk automatically when it is not already present. If you use the portable EXE, install [UsbDk 1.0.22 x64](https://www.spice-space.org/download/windows/usbdk/UsbDk_1.0.22_x64.msi) separately.
 - Restart Windows once after installing or reinstalling UsbDk; its USB filter does not attach to already-running USB controllers.
 - If it cannot claim `18D1:2D00`, bind WinUSB to the **Android Accessory** interface only.
 - Do not replace the phone's normal MTP driver with WinUSB. UsbDk avoids that device-wide replacement.

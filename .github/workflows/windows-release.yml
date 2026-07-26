@@ -1,0 +1,50 @@
+name: Build Windows release
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build distributable packages
+        shell: pwsh
+        run: .\packaging\build.ps1 -Target All -AndroidSdk $env:ANDROID_HOME
+
+      - name: Run PC tests
+        shell: pwsh
+        run: .\.venv-package\Scripts\python.exe -m unittest discover -s tests -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HolodoriPhoneTrackpad-${{ github.sha }}
+          path: release/*
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME release/* --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file packaging\release-notes\v0.1.1.md
