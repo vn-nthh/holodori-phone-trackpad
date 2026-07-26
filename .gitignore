@@ -15,6 +15,14 @@ venv/
 android-app/.gradle/
 android-app/app/build/
 android-app/local.properties
+.android-sdk/
+
+# Packaging
+.venv-package/
+build/
+dist/
+release/
+.signing/
 
 # OS / editor
 .DS_Store

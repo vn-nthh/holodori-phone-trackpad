@@ -47,8 +47,19 @@ from typing import Dict, Optional, List, Tuple
 # ============================================================================
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
-CONTROLLER_HTML = os.path.join(SCRIPT_DIR, "controller.html")
+IS_BUNDLED = bool(getattr(sys, "frozen", False))
+RESOURCE_DIR = getattr(sys, "_MEIPASS", SCRIPT_DIR)
+
+if IS_BUNDLED:
+    CONFIG_DIR = os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+        "Holodori Phone Trackpad",
+    )
+else:
+    CONFIG_DIR = SCRIPT_DIR
+
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+CONTROLLER_HTML = os.path.join(RESOURCE_DIR, "controller.html")
 
 # Default Holodori / hololive Dreams 6-key keyboard layout (left → right)
 DEFAULT_KEYS = ["s", "d", "f", "j", "k", "l"]
@@ -571,6 +582,7 @@ def load_config() -> dict:
 
 
 def save_config(config: dict):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
 
