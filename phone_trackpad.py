@@ -2,9 +2,9 @@
 Holodori Phone Trackpad — community support script for hololive Dreams (holodori).
 
 Use an Android phone as a multi-touch rhythm controller for the PC (Steam)
-client. Reads raw touch events via ADB over USB, maps them to a configurable
-play zone, and injects keyboard events (default Holodori 6-key: S D F J K L)
-via the Windows keybd_event API.
+client. The default Android Open Accessory transport needs no USB debugging,
+maps a native phone play zone to keys, and mirrors touches to a PC overlay.
+The original raw ADB getevent transport remains available as a fallback.
 
 Unofficial fan tool. Not affiliated with COVER Corp., hololive production,
 or QualiArts.
@@ -14,13 +14,14 @@ transitions when dragging across zones), and a phone-side controller
 UI with resizable/rotatable play zone.
 
 Requirements:
-  - Windows + Python 3.7+
-  - ADB installed (auto-detected on PATH, or --adb / ADB_PATH)
-  - Android phone with USB Debugging enabled
-  - Phone connected via USB
+  - Windows + Python 3.9+
+  - Companion Android app
+  - libusb-package (see requirements.txt)
+  - AOA-capable Android phone connected over USB
 
 Usage:
-  python phone_trackpad.py              # Holodori default 6-zone layout
+  python phone_trackpad.py              # AOA + PC touch overlay
+  python phone_trackpad.py --transport adb  # Legacy raw ADB mode
   python phone_trackpad.py --test       # Test mode: print events without keys
   python phone_trackpad.py --selftest   # Verify key sending works
   python phone_trackpad.py --keys a s d f j k l   # Custom key layout
@@ -751,15 +752,58 @@ def main():
                         help="Don't launch phone controller UI")
     parser.add_argument("--adb", type=str, default=None,
                         help="Path to ADB executable (or set ADB_PATH env)")
+    parser.add_argument(
+        "--transport", choices=("aoa", "adb"), default="aoa",
+        help="USB transport. AOA is the default and does not require USB debugging",
+    )
+    parser.add_argument(
+        "--no-overlay", action="store_true",
+        help="Disable the click-through PC touch-position overlay",
+    )
+    parser.add_argument(
+        "--overlay-edit", action="store_true",
+        help="Start with the PC touch zone in position/resize mode",
+    )
+    parser.add_argument(
+        "--usb-vid", type=lambda value: int(value, 0), default=None,
+        help="Additional Android USB vendor ID, for example 0x1234",
+    )
+    parser.add_argument(
+        "--no-usbdk", action="store_true",
+        help="Use the device's installed WinUSB driver instead of UsbDk",
+    )
 
     args = parser.parse_args()
-
-    global ADB_PATH
-    ADB_PATH = resolve_adb_path(args.adb)
 
     if args.selftest:
         self_test_keys()
         return
+
+    config = load_config()
+    keys = args.keys or config.get("keys", DEFAULT_KEYS)
+    config["keys"] = keys
+    save_config(config)
+
+    if args.transport == "aoa":
+        from aoa_mode import run_aoa_mode
+
+        _boost_process_priority()
+        run_aoa_mode(
+            keys=keys,
+            test_mode=args.test,
+            overlay_enabled=not args.no_overlay,
+            overlay_edit=args.overlay_edit,
+            config=config,
+            save_config=save_config,
+            press_key=press_key,
+            release_key=release_key,
+            use_usbdk=not args.no_usbdk,
+            extra_vendor_id=args.usb_vid,
+        )
+        return
+
+    global ADB_PATH
+    ADB_PATH = resolve_adb_path(args.adb)
 
     # Check device
     print("[PHONE] Checking for connected Android device...")
@@ -774,7 +818,6 @@ def main():
     print("[OK] Device connected!")
 
     # Detect touch device
-    config = load_config()
     device = args.device or config.get("device")
     max_x = config.get("max_x", 0)
     max_y = config.get("max_y", 0)
@@ -797,7 +840,6 @@ def main():
     print(f"[OK] Touchscreen: {device} ({max_x} x {max_y})")
 
     # Setup keys and save config
-    keys = args.keys or config.get("keys", DEFAULT_KEYS)
     config.update({"device": device, "max_x": max_x, "max_y": max_y, "keys": keys})
     save_config(config)
 
