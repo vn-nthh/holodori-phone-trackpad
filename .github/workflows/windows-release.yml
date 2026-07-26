@@ -47,4 +47,6 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME release/* --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file packaging\release-notes\v0.1.1.md
+        run: |
+          $notesFile = Join-Path "packaging\release-notes" "$env:GITHUB_REF_NAME.md"
+          gh release create $env:GITHUB_REF_NAME release/* --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file $notesFile

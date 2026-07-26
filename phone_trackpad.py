@@ -20,7 +20,8 @@ Requirements:
   - AOA-capable Android phone connected over USB
 
 Usage:
-  python phone_trackpad.py              # AOA + PC touch overlay
+  python phone_trackpad.py              # AOA input, no PC overlay
+  python phone_trackpad.py --overlay    # AOA input + PC touch overlay
   python phone_trackpad.py --transport adb  # Legacy raw ADB mode
   python phone_trackpad.py --test       # Test mode: print events without keys
   python phone_trackpad.py --selftest   # Verify key sending works
@@ -768,9 +769,14 @@ def main():
         "--transport", choices=("aoa", "adb"), default="aoa",
         help="USB transport. AOA is the default and does not require USB debugging",
     )
-    parser.add_argument(
+    overlay_flags = parser.add_mutually_exclusive_group()
+    overlay_flags.add_argument(
+        "--overlay", action="store_true",
+        help="Show the click-through PC touch-position overlay (off by default)",
+    )
+    overlay_flags.add_argument(
         "--no-overlay", action="store_true",
-        help="Disable the click-through PC touch-position overlay",
+        help="Keep the PC touch-position overlay disabled (the default)",
     )
     parser.add_argument(
         "--overlay-edit", action="store_true",
@@ -786,6 +792,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.no_overlay and args.overlay_edit:
+        parser.error("--overlay-edit cannot be used with --no-overlay")
 
     if args.selftest:
         self_test_keys()
@@ -803,7 +812,7 @@ def main():
         run_aoa_mode(
             keys=keys,
             test_mode=args.test,
-            overlay_enabled=not args.no_overlay,
+            overlay_enabled=args.overlay or args.overlay_edit,
             overlay_edit=args.overlay_edit,
             config=config,
             save_config=save_config,

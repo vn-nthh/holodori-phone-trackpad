@@ -6,17 +6,19 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 > **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game's Terms of Service.
 
-## Download v0.1.1
+## Download v0.1.2
 
 Install the Windows setup and Android companion app, connect the phone with a
 data-capable USB cable, and approve Android's accessory prompt. The Windows
 setup includes the signed UsbDk USB driver needed for the normal AOA connection;
 approve its administrator prompt and restart only if setup asks you to.
+The PC touch overlay is off by default, keeping play unobstructed. Launch the
+separate **with Touch Overlay** Start-menu shortcut when you want it.
 
-- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpadSetup.exe)
-- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpad.apk)
-- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpad.exe)
-- [View the v0.1.1 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.1)
+- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.2/HolodoriPhoneTrackpadSetup.exe)
+- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.2/HolodoriPhoneTrackpad.apk)
+- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.2/HolodoriPhoneTrackpad.exe)
+- [View the v0.1.2 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.2)
 
 The original ADB transport remains available if you prefer it. ADB mode still
 requires USB debugging; AOA mode does not.
@@ -62,7 +64,7 @@ The project is free and open source under the [MIT License](LICENSE).
    ```
 
 5. Connect the phone with a data-capable USB cable. Accept the Android USB-access prompt and choose Holodori Trackpad if Android asks which app to open.
-6. Open Holodori in **Borderless Windowed** mode so the external overlay remains visible.
+6. Open Holodori in your preferred display mode.
 7. When running from source, launch:
 
    ```text
@@ -70,7 +72,7 @@ The project is free and open source under the [MIT License](LICENSE).
    ```
 
 8. On the phone, position the play zone, pinch to resize or rotate, then tap the lock button.
-9. Position and resize the PC overlay from any edge or corner, then press `Enter`. During play, click **Edit zone** or use `Ctrl+Shift+O` to edit it later. Use `Ctrl+Shift+Q` to quit.
+9. The PC overlay is off by default. To enable it, launch **Holodori Phone Trackpad (with Touch Overlay)** from the Start menu, or run `HolodoriPhoneTrackpad.exe --overlay`. Position and resize it from any edge or corner, then press `Enter`. During play, click **Edit zone** or use `Ctrl+Shift+O` to edit it later.
 
 ## Build distributable packages
 
@@ -112,7 +114,8 @@ python phone_trackpad.py [options]
 
   --keys KEY [KEY ...]   Keys left-to-right (default: s d f j k l)
   --transport aoa|adb    USB transport (default: aoa)
-  --no-overlay           Disable the PC touch-position overlay
+  --overlay              Show the PC touch-position overlay (off by default)
+  --no-overlay           Keep the PC touch-position overlay disabled (the default)
   --overlay-edit         Open the saved PC overlay zone for editing
   --usb-vid VID          Add an unlisted Android USB vendor ID
   --no-usbdk             Use an installed WinUSB driver instead of UsbDk

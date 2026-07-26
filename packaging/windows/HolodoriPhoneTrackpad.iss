@@ -3,7 +3,7 @@
 ; removes a USB driver another application may still use.
 
 #define MyAppName "Holodori Phone Trackpad"
-#define MyAppVersion "0.1.1"
+#define MyAppVersion "0.1.2"
 #define MyAppPublisher "Holodori Phone Trackpad contributors"
 #define MyAppExeName "HolodoriPhoneTrackpad.exe"
 
@@ -36,6 +36,7 @@ Source: "..\third_party\usbdk\LICENSE"; DestDir: "{app}\licenses"; DestName: "Us
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autoprograms}\{#MyAppName} (with Touch Overlay)"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--overlay"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
