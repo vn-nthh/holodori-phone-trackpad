@@ -35,6 +35,8 @@ The project is free and open source under the [MIT License](LICENSE).
 
 - **No USB debugging required**: the native Android app communicates through Android Open Accessory (AOA)
 - **Low-latency native touch capture**: requests unbuffered Android input dispatch and sends compact binary events
+- **Pipelined WinUSB receive path**: keeps two ordered overlapped reads posted into reusable buffers
+- **Queue safety telemetry**: warns at 8 ms and resynchronizes stale rhythm input at 25 ms
 - **Phone play-zone editor**: drag to position, pinch to resize or rotate, then lock for play
 - **PC touch overlay**: mirrors fingertips inside a custom click-through zone over the game
 - **Drag notes**: presses the new lane before releasing the old lane during transitions
@@ -119,6 +121,8 @@ python phone_trackpad.py [options]
   --overlay-edit         Open the saved PC overlay zone for editing
   --usb-vid VID          Add an unlisted Android USB vendor ID
   --no-usbdk             Use an installed WinUSB driver instead of UsbDk
+  --aoa-read-depth 1|2   Preposted WinUSB reads (default: 2)
+  --aoa-benchmark        Report clock-normalized AOA transport jitter
   --test                 Show input events without sending keys
 
 Legacy ADB options:
@@ -142,6 +146,22 @@ Native Android app ──AOA USB bulk──► PC input router ──key event�
 3. The PC immediately maps records to key presses and releases.
 4. A separate queue mirrors coordinates to the visual overlay, so drawing never blocks the input path.
 5. If USB disconnects, the PC releases every held key and automatically looks for the phone again.
+
+The phone records maximum queue age/depth and reports them in backward-compatible
+heartbeat fields. At 8 ms it records a warning; at 25 ms it drops the backlog,
+sends `CANCEL`, and resumes from current input. The original 100 ms limit remains
+as a separately counted failsafe.
+
+For an A/B check of the overlapped read pipeline, run comparable sessions with:
+
+```text
+python phone_trackpad.py --aoa-benchmark --aoa-read-depth 1
+python phone_trackpad.py --aoa-benchmark --aoa-read-depth 2
+```
+
+The benchmark aligns the unrelated phone and PC clock origins to the fastest
+sample in each connection. Its result is excess delay/jitter relative to that
+baseline, not absolute one-way latency.
 
 ## Legacy ADB fallback
 

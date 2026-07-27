@@ -17,7 +17,11 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
-from winusb_transport import WinUsbConnection, WinUsbError
+from winusb_transport import (
+    DEFAULT_READ_PIPELINE_DEPTH,
+    WinUsbConnection,
+    WinUsbError,
+)
 
 
 AOA_VENDOR_ID = 0x18D1
@@ -39,6 +43,11 @@ ACTION_UP = 3
 ACTION_CANCEL = 4
 FLAG_INSIDE = 0x01
 FLAG_LOCKED = 0x02
+FLAG_QUEUE_WARNING = 0x10
+FLAG_QUEUE_RESYNC = 0x20
+FLAG_QUEUE_FAILSAFE = 0x40
+FLAG_QUEUE_DIAGNOSTICS = 0x80
+QUEUE_AGE_REPORT_UNIT_NANOS = 10_000
 
 # Common Android OEM vendor IDs.  --usb-vid can add an unlisted device without
 # probing unrelated USB hardware with vendor-specific control requests.
@@ -153,6 +162,8 @@ class TouchEvent:
     y: float
     sequence: int
     phone_event_nanos: int
+    raw_x: int = 0
+    raw_y: int = 0
 
     @property
     def inside(self) -> bool:
@@ -161,6 +172,137 @@ class TouchEvent:
     @property
     def locked(self) -> bool:
         return bool(self.flags & FLAG_LOCKED)
+
+    @property
+    def has_queue_diagnostics(self) -> bool:
+        return bool(
+            self.action == ACTION_HEARTBEAT
+            and self.flags & FLAG_QUEUE_DIAGNOSTICS
+        )
+
+    @property
+    def queue_age_nanos(self) -> int:
+        if not self.has_queue_diagnostics:
+            return 0
+        return max(0, self.raw_x) * QUEUE_AGE_REPORT_UNIT_NANOS
+
+    @property
+    def queue_depth(self) -> int:
+        return self.pointer_id if self.has_queue_diagnostics else 0
+
+    @property
+    def queue_resyncs(self) -> int:
+        if not self.has_queue_diagnostics:
+            return 0
+        return max(0, self.raw_y)
+
+
+@dataclass(frozen=True)
+class LatencySnapshot:
+    samples: int
+    mean_excess_ms: float
+    max_excess_ms: float
+
+
+@dataclass(frozen=True)
+class QueueTelemetrySnapshot:
+    reports: int
+    max_age_ms: float
+    max_depth: int
+    warning_reports: int
+    resyncs: int
+    failsafe_reports: int
+
+
+class ClockNormalizedLatency:
+    """Measure excess delay without directly comparing clock epochs.
+
+    Phone event time and ``perf_counter_ns`` have unrelated origins. The
+    smallest observed host-minus-phone delta is treated as the session's clock
+    offset plus irreducible path delay; other samples are reported relative to
+    that baseline. This is useful for short benchmark comparisons, not for
+    claiming absolute one-way latency.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._baseline_offset_ns: Optional[int] = None
+        self._samples = 0
+        self._total_excess_ns = 0
+        self._max_excess_ns = 0
+
+    def observe(
+        self,
+        phone_event_nanos: int,
+        host_arrival_nanos: int,
+        include_sample: bool,
+    ) -> None:
+        if phone_event_nanos <= 0:
+            return
+        offset = host_arrival_nanos - phone_event_nanos
+        if self._baseline_offset_ns is None:
+            self._baseline_offset_ns = offset
+        elif offset < self._baseline_offset_ns:
+            shift = self._baseline_offset_ns - offset
+            self._total_excess_ns += shift * self._samples
+            if self._samples:
+                self._max_excess_ns += shift
+            self._baseline_offset_ns = offset
+
+        if not include_sample:
+            return
+        excess = max(0, offset - self._baseline_offset_ns)
+        self._samples += 1
+        self._total_excess_ns += excess
+        self._max_excess_ns = max(self._max_excess_ns, excess)
+
+    def snapshot(self) -> LatencySnapshot:
+        mean_ns = (
+            self._total_excess_ns / self._samples
+            if self._samples
+            else 0.0
+        )
+        return LatencySnapshot(
+            samples=self._samples,
+            mean_excess_ms=mean_ns / 1_000_000.0,
+            max_excess_ms=self._max_excess_ns / 1_000_000.0,
+        )
+
+
+class QueueTelemetry:
+    def __init__(self) -> None:
+        self.reports = 0
+        self.max_age_nanos = 0
+        self.max_depth = 0
+        self.warning_reports = 0
+        self.resyncs = 0
+        self.failsafe_reports = 0
+
+    def observe(self, event: TouchEvent) -> None:
+        if not event.has_queue_diagnostics:
+            return
+        self.reports += 1
+        self.max_age_nanos = max(
+            self.max_age_nanos, event.queue_age_nanos
+        )
+        self.max_depth = max(self.max_depth, event.queue_depth)
+        self.resyncs += event.queue_resyncs
+        if event.flags & FLAG_QUEUE_WARNING:
+            self.warning_reports += 1
+        if event.flags & FLAG_QUEUE_FAILSAFE:
+            self.failsafe_reports += 1
+
+    def snapshot(self) -> QueueTelemetrySnapshot:
+        return QueueTelemetrySnapshot(
+            reports=self.reports,
+            max_age_ms=self.max_age_nanos / 1_000_000.0,
+            max_depth=self.max_depth,
+            warning_reports=self.warning_reports,
+            resyncs=self.resyncs,
+            failsafe_reports=self.failsafe_reports,
+        )
 
 
 class TouchPacketParser:
@@ -196,6 +338,8 @@ class TouchPacketParser:
                 y=y / 10000.0,
                 sequence=seq,
                 phone_event_nanos=event_ns,
+                raw_x=x,
+                raw_y=y,
             )
 
 
@@ -470,9 +614,11 @@ class AoaHost:
         self,
         use_usbdk: bool = True,
         extra_vendor_id: Optional[int] = None,
+        winusb_read_depth: int = DEFAULT_READ_PIPELINE_DEPTH,
     ) -> None:
         self.prefer_usbdk = bool(use_usbdk and os.name == "nt")
         self.usb = Libusb(use_usbdk=use_usbdk)
+        self.winusb_read_depth = max(1, min(2, winusb_read_depth))
         self.vendor_ids = set(ANDROID_VENDOR_IDS)
         if extra_vendor_id is not None:
             self.vendor_ids.add(extra_vendor_id)
@@ -564,7 +710,9 @@ class AoaHost:
     ) -> Optional[AoaConnection | WinUsbConnection]:
         if os.name == "nt" and not self.usb.using_usbdk:
             try:
-                connection = WinUsbConnection.open_first()
+                connection = WinUsbConnection.open_first(
+                    read_depth=self.winusb_read_depth
+                )
             except WinUsbError as error:
                 raise AoaError(str(error)) from error
             if connection is not None:
@@ -743,6 +891,8 @@ class AoaReceiver:
         lane_count: int,
         use_usbdk: bool = True,
         extra_vendor_id: Optional[int] = None,
+        winusb_read_depth: int = DEFAULT_READ_PIPELINE_DEPTH,
+        benchmark: bool = False,
     ) -> None:
         self.on_event = on_event
         self.on_status = on_status
@@ -750,6 +900,10 @@ class AoaReceiver:
         self.lane_count = max(1, min(16, lane_count))
         self.use_usbdk = use_usbdk
         self.extra_vendor_id = extra_vendor_id
+        self.winusb_read_depth = max(1, min(2, winusb_read_depth))
+        self.benchmark = benchmark
+        self._latency = ClockNormalizedLatency()
+        self._queue_telemetry = QueueTelemetry()
         self._stop = threading.Event()
         self.finished = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -766,6 +920,12 @@ class AoaReceiver:
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
 
+    def latency_snapshot(self) -> LatencySnapshot:
+        return self._latency.snapshot()
+
+    def queue_telemetry_snapshot(self) -> QueueTelemetrySnapshot:
+        return self._queue_telemetry.snapshot()
+
     def _run(self) -> None:
         try:
             if os.name == "nt":
@@ -779,6 +939,7 @@ class AoaReceiver:
             host = AoaHost(
                 use_usbdk=self.use_usbdk,
                 extra_vendor_id=self.extra_vendor_id,
+                winusb_read_depth=self.winusb_read_depth,
             )
             backend = "UsbDk" if host.usb.using_usbdk else "WinUSB"
             self.on_status(f"USB backend ready: {backend}", False)
@@ -800,19 +961,30 @@ class AoaReceiver:
                     # avoids composite-driver teardown on affected devices.
                     last_error = ""
                     parser = TouchPacketParser()
+                    self._latency.reset()
                     last_packet_at = time.monotonic()
                     while not self._stop.is_set():
                         chunk = self._connection.read()
-                        events = list(parser.feed(chunk))
+                        arrival_nanos = time.perf_counter_ns()
                         now = time.monotonic()
-                        if events:
+                        received_packet = False
+                        for event in parser.feed(chunk):
+                            received_packet = True
                             last_packet_at = now
-                            for event in events:
-                                # Heartbeats participate in sequence tracking.
-                                # The router ignores them after verifying that
-                                # no wire record was skipped.
-                                self.on_event(event)
-                        elif (
+                            self._queue_telemetry.observe(event)
+                            if self.benchmark:
+                                self._latency.observe(
+                                    event.phone_event_nanos,
+                                    arrival_nanos,
+                                    include_sample=(
+                                        event.action != ACTION_HEARTBEAT
+                                    ),
+                                )
+                            # Heartbeats participate in sequence tracking. The
+                            # router ignores them after verifying no wire record
+                            # was skipped.
+                            self.on_event(event)
+                        if not received_packet and (
                             now - last_packet_at
                             >= self.HEARTBEAT_TIMEOUT_SECONDS
                         ):

@@ -11,8 +11,14 @@ from aoa_transport import (
     ACTION_MOVE,
     ACTION_UP,
     AoaReceiver,
+    ClockNormalizedLatency,
     FLAG_INSIDE,
     FLAG_LOCKED,
+    FLAG_QUEUE_DIAGNOSTICS,
+    FLAG_QUEUE_FAILSAFE,
+    FLAG_QUEUE_RESYNC,
+    FLAG_QUEUE_WARNING,
+    QueueTelemetry,
     TOUCH_MAGIC,
     TOUCH_PACKET,
     TouchEvent,
@@ -50,6 +56,54 @@ class PacketParserTests(unittest.TestCase):
         parsed = list(parser.feed(b"garbage" + packet))
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0].pointer_id, 1)
+
+    def test_heartbeat_carries_queue_telemetry(self):
+        packet = TOUCH_PACKET.pack(
+            TOUCH_MAGIC,
+            1,
+            ACTION_HEARTBEAT,
+            7,
+            FLAG_QUEUE_DIAGNOSTICS
+            | FLAG_QUEUE_WARNING
+            | FLAG_QUEUE_RESYNC
+            | FLAG_QUEUE_FAILSAFE,
+            1234,
+            2,
+            9,
+            456,
+        )
+        parsed = list(TouchPacketParser().feed(packet))
+        self.assertEqual(len(parsed), 1)
+        heartbeat = parsed[0]
+        self.assertTrue(heartbeat.has_queue_diagnostics)
+        self.assertEqual(heartbeat.queue_depth, 7)
+        self.assertEqual(heartbeat.queue_age_nanos, 12_340_000)
+        self.assertEqual(heartbeat.queue_resyncs, 2)
+
+        telemetry = QueueTelemetry()
+        telemetry.observe(heartbeat)
+        snapshot = telemetry.snapshot()
+        self.assertEqual(snapshot.reports, 1)
+        self.assertAlmostEqual(snapshot.max_age_ms, 12.34)
+        self.assertEqual(snapshot.max_depth, 7)
+        self.assertEqual(snapshot.warning_reports, 1)
+        self.assertEqual(snapshot.resyncs, 2)
+        self.assertEqual(snapshot.failsafe_reports, 1)
+
+
+class LatencyTests(unittest.TestCase):
+    def test_clock_normalization_uses_fastest_offset_as_baseline(self):
+        latency = ClockNormalizedLatency()
+        latency.observe(100_000_000, 1_100_000_000, True)
+        latency.observe(200_000_000, 1_210_000_000, True)
+        # A heartbeat can improve clock alignment without being counted as a
+        # touch-latency sample.
+        latency.observe(300_000_000, 1_290_000_000, False)
+
+        snapshot = latency.snapshot()
+        self.assertEqual(snapshot.samples, 2)
+        self.assertAlmostEqual(snapshot.mean_excess_ms, 15.0)
+        self.assertAlmostEqual(snapshot.max_excess_ms, 20.0)
 
 
 class RouterTests(unittest.TestCase):
