@@ -10,9 +10,17 @@ from aoa_transport import (
     ACTION_HEARTBEAT,
     ACTION_MOVE,
     ACTION_UP,
+    AoaError,
+    AoaHost,
     AoaReceiver,
+    ClockNormalizedLatency,
     FLAG_INSIDE,
     FLAG_LOCKED,
+    FLAG_QUEUE_DIAGNOSTICS,
+    FLAG_QUEUE_FAILSAFE,
+    FLAG_QUEUE_RESYNC,
+    FLAG_QUEUE_WARNING,
+    QueueTelemetry,
     TOUCH_MAGIC,
     TOUCH_PACKET,
     TouchEvent,
@@ -50,6 +58,123 @@ class PacketParserTests(unittest.TestCase):
         parsed = list(parser.feed(b"garbage" + packet))
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0].pointer_id, 1)
+
+    def test_heartbeat_carries_queue_telemetry(self):
+        packet = TOUCH_PACKET.pack(
+            TOUCH_MAGIC,
+            1,
+            ACTION_HEARTBEAT,
+            7,
+            FLAG_QUEUE_DIAGNOSTICS
+            | FLAG_QUEUE_WARNING
+            | FLAG_QUEUE_RESYNC
+            | FLAG_QUEUE_FAILSAFE,
+            1234,
+            2,
+            9,
+            456,
+        )
+        parsed = list(TouchPacketParser().feed(packet))
+        self.assertEqual(len(parsed), 1)
+        heartbeat = parsed[0]
+        self.assertTrue(heartbeat.has_queue_diagnostics)
+        self.assertEqual(heartbeat.queue_depth, 7)
+        self.assertEqual(heartbeat.queue_age_nanos, 12_340_000)
+        self.assertEqual(heartbeat.queue_resyncs, 2)
+
+        telemetry = QueueTelemetry()
+        telemetry.observe(heartbeat)
+        snapshot = telemetry.snapshot()
+        self.assertEqual(snapshot.reports, 1)
+        self.assertAlmostEqual(snapshot.max_age_ms, 12.34)
+        self.assertEqual(snapshot.max_depth, 7)
+        self.assertEqual(snapshot.warning_reports, 1)
+        self.assertEqual(snapshot.resyncs, 2)
+        self.assertEqual(snapshot.failsafe_reports, 1)
+
+
+class LatencyTests(unittest.TestCase):
+    def test_clock_normalization_uses_fastest_offset_as_baseline(self):
+        latency = ClockNormalizedLatency()
+        latency.observe(100_000_000, 1_100_000_000, True)
+        latency.observe(200_000_000, 1_210_000_000, True)
+        # A heartbeat can improve clock alignment without being counted as a
+        # touch-latency sample.
+        latency.observe(300_000_000, 1_290_000_000, False)
+
+        snapshot = latency.snapshot()
+        self.assertEqual(snapshot.samples, 2)
+        self.assertAlmostEqual(snapshot.mean_excess_ms, 15.0)
+        self.assertAlmostEqual(snapshot.max_excess_ms, 20.0)
+
+
+class AoaHostTests(unittest.TestCase):
+    def test_data_connection_prefers_winusb_without_enabling_fallback(self):
+        connection = object()
+        host = object.__new__(AoaHost)
+        host.prefer_usbdk = True
+        host.usb = type("Usb", (), {"using_usbdk": False})()
+        host._find_data_accessory = mock.Mock(return_value=connection)
+        host._replace_usb = mock.Mock()
+
+        self.assertIs(host._wait_for_data_accessory(0.1), connection)
+        host._replace_usb.assert_not_called()
+
+    def test_data_connection_falls_back_to_usbdk_after_winusb_error(self):
+        connection = object()
+        host = object.__new__(AoaHost)
+        host.prefer_usbdk = True
+        host.usb = type("Usb", (), {"using_usbdk": False})()
+
+        def replace_usb(use_usbdk):
+            host.usb = type(
+                "Usb", (), {"using_usbdk": bool(use_usbdk)}
+            )()
+
+        host._replace_usb = mock.Mock(side_effect=replace_usb)
+        host._find_data_accessory = mock.Mock(
+            side_effect=[AoaError("LIBUSB_ERROR_NOT_SUPPORTED"), connection]
+        )
+
+        self.assertIs(host._wait_for_data_accessory(0.1), connection)
+        host._replace_usb.assert_called_once_with(use_usbdk=True)
+        self.assertTrue(host.usb.using_usbdk)
+
+    def test_data_connection_falls_back_after_winusb_attach_grace(self):
+        connection = object()
+        host = object.__new__(AoaHost)
+        host.prefer_usbdk = True
+        host.usb = type("Usb", (), {"using_usbdk": False})()
+
+        def replace_usb(use_usbdk):
+            host.usb = type(
+                "Usb", (), {"using_usbdk": bool(use_usbdk)}
+            )()
+
+        host._replace_usb = mock.Mock(side_effect=replace_usb)
+        host._find_data_accessory = mock.Mock(
+            side_effect=[None, connection]
+        )
+
+        with (
+            mock.patch(
+                "aoa_transport.time.monotonic",
+                side_effect=[0.0, 0.0, 0.0, 1.5, 1.5],
+            ),
+            mock.patch("aoa_transport.time.sleep"),
+        ):
+            self.assertIs(host._wait_for_data_accessory(2.0), connection)
+
+        host._replace_usb.assert_called_once_with(use_usbdk=True)
+
+    def test_data_fallback_is_disabled_when_usbdk_was_opted_out(self):
+        host = object.__new__(AoaHost)
+        host.prefer_usbdk = False
+        host.usb = type("Usb", (), {"using_usbdk": False})()
+        host._replace_usb = mock.Mock()
+
+        self.assertFalse(host._enable_usbdk_data_fallback())
+        host._replace_usb.assert_not_called()
 
 
 class RouterTests(unittest.TestCase):

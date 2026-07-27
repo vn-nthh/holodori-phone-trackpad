@@ -40,7 +40,7 @@ Each phone-to-PC record is 24 bytes, little-endian:
 |---:|---|---|
 | 0 | 4 bytes | `HPT1` magic |
 | 4 | `u8` | Protocol version, currently `1` |
-| 5 | `u8` | Action: down `1`, move `2`, up `3`, cancel `4` |
+| 5 | `u8` | Action: heartbeat `0`, down `1`, move `2`, up `3`, cancel `4` |
 | 6 | `u8` | Android pointer ID |
 | 7 | `u8` | Flags: inside zone `0x01`, play locked `0x02` |
 | 8 | `i16` | Zone-local X multiplied by 10,000 |
@@ -50,3 +50,14 @@ Each phone-to-PC record is 24 bytes, little-endian:
 
 Coordinates are intentionally not clamped to `0..1`, allowing the PC overlay
 to show when a finger has crossed outside the configured play zone.
+
+On Android 14 and newer, the timestamp comes from the nanosecond-precision
+motion-event API. Older Android versions retain the millisecond-source fallback.
+Phone and PC timestamps have different origins and must be aligned before
+benchmark comparisons.
+
+Heartbeat records carry backward-compatible queue diagnostics. Flag `0x80`
+marks the fields as valid, pointer ID contains maximum queue depth, X contains
+maximum age in 10-microsecond units, and Y contains the number of queue
+resynchronizations since the previous heartbeat. Flags `0x10`, `0x20`, and
+`0x40` indicate a warning, resynchronization, and 100 ms failsafe respectively.

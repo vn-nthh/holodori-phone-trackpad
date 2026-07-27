@@ -14,7 +14,12 @@ import java.nio.ByteOrder;
 final class UsbAccessoryTransport {
     private static final String TAG = "HolodoriAOA";
     private static final long HEARTBEAT_MILLIS = 200;
+    private static final long QUEUE_WARNING_AGE_NANOS = 8_000_000L;
+    private static final long QUEUE_RESYNC_AGE_NANOS = 25_000_000L;
     private static final long MAX_QUEUE_AGE_NANOS = 100_000_000L;
+    private static final long QUEUE_LOG_INTERVAL_NANOS = 1_000_000_000L;
+    // Heartbeats encode queue age in 10 us units, up to about 328 ms.
+    private static final long QUEUE_AGE_REPORT_UNIT_NANOS = 10_000L;
 
     interface Listener {
         void onConnectionChanged(boolean connected, String message);
@@ -29,6 +34,19 @@ final class UsbAccessoryTransport {
     private int head;
     private int tail;
     private int sequence;
+    private long maxQueueAgeNanos;
+    private int maxQueueDepth;
+    private long queueWarningCount;
+    private long queueResyncCount;
+    private long queueFailsafeCount;
+    private long coalescedMoveCount;
+    private long lastQueueLogNanos;
+    private long reportMaxQueueAgeNanos;
+    private int reportMaxQueueDepth;
+    private int reportResyncCount;
+    private boolean reportQueueWarning;
+    private boolean reportQueueFailsafe;
+    private boolean queueWarningActive;
     private volatile int generation;
     private volatile boolean running;
     private ParcelFileDescriptor descriptor;
@@ -83,12 +101,11 @@ final class UsbAccessoryTransport {
             return;
         }
         synchronized (queueLock) {
-            if (queueIsStale(eventNanos)) {
-                // Once queued input is this old, replaying it is worse than
-                // dropping it. Tell the host to release every key, then resume
-                // from the newest sample.
-                replaceQueueWithCancel(eventNanos);
+            if (!running) {
+                return;
             }
+            long nowNanos = System.nanoTime();
+            checkQueuePressure(nowNanos);
 
             int normalizedPointerId = pointerId & 0xFF;
             if (action == TouchSample.ACTION_MOVE
@@ -100,12 +117,20 @@ final class UsbAccessoryTransport {
                             locked,
                             eventNanos
                     )) {
+                coalescedMoveCount++;
+                recordQueueMetrics(nowNanos);
                 return;
             }
 
             int next = (head + 1) % CAPACITY;
             if (next == tail) {
-                replaceQueueWithCancel(eventNanos);
+                resynchronizeQueue(
+                        nowNanos,
+                        queueAgeNanos(nowNanos),
+                        queueDepth(),
+                        true,
+                        "capacity"
+                );
                 next = (head + 1) % CAPACITY;
             }
             TouchSample sample = queue[head];
@@ -113,13 +138,114 @@ final class UsbAccessoryTransport {
             sample.pointerId = normalizedPointerId;
             updateSample(sample, x, y, inside, locked, eventNanos);
             head = next;
+            recordQueueMetrics(nowNanos);
             queueLock.notify();
         }
     }
 
-    private boolean queueIsStale(long eventNanos) {
-        return head != tail
-                && eventNanos - queue[tail].eventNanos > MAX_QUEUE_AGE_NANOS;
+    private void checkQueuePressure(long nowNanos) {
+        if (head == tail) {
+            queueWarningActive = false;
+            return;
+        }
+        long ageNanos = queueAgeNanos(nowNanos);
+        int depth = queueDepth();
+        recordQueueMetrics(ageNanos, depth);
+
+        if (ageNanos >= MAX_QUEUE_AGE_NANOS) {
+            resynchronizeQueue(
+                    nowNanos, ageNanos, depth, true, "100 ms failsafe"
+            );
+        } else if (ageNanos >= QUEUE_RESYNC_AGE_NANOS) {
+            resynchronizeQueue(
+                    nowNanos, ageNanos, depth, false, "latency budget"
+            );
+        } else if (ageNanos >= QUEUE_WARNING_AGE_NANOS) {
+            if (!queueWarningActive) {
+                queueWarningCount++;
+            }
+            queueWarningActive = true;
+            reportQueueWarning = true;
+            logQueuePressure(nowNanos, ageNanos, depth, false);
+        } else {
+            queueWarningActive = false;
+        }
+    }
+
+    private void resynchronizeQueue(
+            long nowNanos,
+            long ageNanos,
+            int depth,
+            boolean failsafe,
+            String reason
+    ) {
+        if (!queueWarningActive) {
+            queueWarningCount++;
+        }
+        queueWarningActive = true;
+        queueResyncCount++;
+        reportQueueWarning = true;
+        reportResyncCount = Math.min(
+                Short.MAX_VALUE, reportResyncCount + 1
+        );
+        if (failsafe) {
+            queueFailsafeCount++;
+            reportQueueFailsafe = true;
+        }
+        if (logQueuePressure(nowNanos, ageNanos, depth, failsafe)) {
+            Log.w(
+                    TAG,
+                    "Dropping stale touch backlog and sending CANCEL ("
+                            + reason + ")"
+            );
+        }
+        // Replaying an old rhythm input is worse than dropping it. Tell the
+        // host to release every key; a following current sample resumes state.
+        replaceQueueWithCancel(nowNanos);
+        queueWarningActive = false;
+    }
+
+    private boolean logQueuePressure(
+            long nowNanos, long ageNanos, int depth, boolean force
+    ) {
+        if (!force
+                && nowNanos - lastQueueLogNanos
+                < QUEUE_LOG_INTERVAL_NANOS) {
+            return false;
+        }
+        lastQueueLogNanos = nowNanos;
+        Log.w(
+                TAG,
+                "Touch queue age="
+                        + ageNanos / 1_000_000.0
+                        + " ms, depth="
+                        + depth
+        );
+        return true;
+    }
+
+    private int queueDepth() {
+        return (head - tail + CAPACITY) % CAPACITY;
+    }
+
+    private long queueAgeNanos(long nowNanos) {
+        if (head == tail) {
+            return 0;
+        }
+        return Math.max(0, nowNanos - queue[tail].eventNanos);
+    }
+
+    private void recordQueueMetrics(long nowNanos) {
+        recordQueueMetrics(queueAgeNanos(nowNanos), queueDepth());
+    }
+
+    private void recordQueueMetrics(long ageNanos, int depth) {
+        maxQueueAgeNanos = Math.max(maxQueueAgeNanos, ageNanos);
+        maxQueueDepth = Math.max(maxQueueDepth, depth);
+        reportMaxQueueAgeNanos = Math.max(
+                reportMaxQueueAgeNanos, ageNanos
+        );
+        reportMaxQueueDepth = Math.max(reportMaxQueueDepth, depth);
     }
 
     private boolean coalescePendingMove(
@@ -202,14 +328,30 @@ final class UsbAccessoryTransport {
                         break;
                     }
                     if (head == tail) {
+                        queueWarningActive = false;
                         action = TouchSample.ACTION_HEARTBEAT;
-                        pointerId = 0;
-                        flags = 0;
-                        x = 0;
-                        y = 0;
+                        pointerId = Math.min(0xFF, reportMaxQueueDepth);
+                        flags = TouchSample.FLAG_QUEUE_DIAGNOSTICS;
+                        if (reportQueueWarning) {
+                            flags |= TouchSample.FLAG_QUEUE_WARNING;
+                        }
+                        if (reportResyncCount > 0) {
+                            flags |= TouchSample.FLAG_QUEUE_RESYNC;
+                        }
+                        if (reportQueueFailsafe) {
+                            flags |= TouchSample.FLAG_QUEUE_FAILSAFE;
+                        }
+                        x = (int) Math.min(
+                                Short.MAX_VALUE,
+                                reportMaxQueueAgeNanos
+                                        / QUEUE_AGE_REPORT_UNIT_NANOS
+                        );
+                        y = reportResyncCount;
                         currentSequence = sequence++;
                         eventNanos = System.nanoTime();
+                        resetQueueReport();
                     } else {
+                        checkQueuePressure(System.nanoTime());
                         TouchSample sample = queue[tail];
                         action = sample.action;
                         pointerId = sample.pointerId;
@@ -262,10 +404,36 @@ final class UsbAccessoryTransport {
         return running && generation == sessionGeneration;
     }
 
+    private void resetQueueReport() {
+        reportMaxQueueAgeNanos = 0;
+        reportMaxQueueDepth = 0;
+        reportResyncCount = 0;
+        reportQueueWarning = false;
+        reportQueueFailsafe = false;
+    }
+
+    private void resetQueueStats() {
+        maxQueueAgeNanos = 0;
+        maxQueueDepth = 0;
+        queueWarningCount = 0;
+        queueResyncCount = 0;
+        queueFailsafeCount = 0;
+        coalescedMoveCount = 0;
+        lastQueueLogNanos = 0;
+        queueWarningActive = false;
+        resetQueueReport();
+    }
+
     void close() {
         Thread previousWriter;
         ParcelFileDescriptor previousDescriptor;
         FileOutputStream previousOutput;
+        long summaryMaxAgeNanos;
+        int summaryMaxDepth;
+        long summaryWarningCount;
+        long summaryResyncCount;
+        long summaryFailsafeCount;
+        long summaryCoalescedMoves;
         synchronized (lifecycleLock) {
             running = false;
             generation++;
@@ -277,8 +445,15 @@ final class UsbAccessoryTransport {
             output = null;
         }
         synchronized (queueLock) {
+            summaryMaxAgeNanos = maxQueueAgeNanos;
+            summaryMaxDepth = maxQueueDepth;
+            summaryWarningCount = queueWarningCount;
+            summaryResyncCount = queueResyncCount;
+            summaryFailsafeCount = queueFailsafeCount;
+            summaryCoalescedMoves = coalescedMoveCount;
             head = 0;
             tail = 0;
+            resetQueueStats();
             queueLock.notifyAll();
         }
         if (previousWriter != null
@@ -292,6 +467,23 @@ final class UsbAccessoryTransport {
         try {
             if (previousDescriptor != null) previousDescriptor.close();
         } catch (IOException ignored) {
+        }
+        if (summaryMaxDepth > 0) {
+            Log.i(
+                    TAG,
+                    "Queue summary: maxAge="
+                            + summaryMaxAgeNanos / 1_000_000.0
+                            + " ms, maxDepth="
+                            + summaryMaxDepth
+                            + ", warnings="
+                            + summaryWarningCount
+                            + ", resyncs="
+                            + summaryResyncCount
+                            + ", failsafes="
+                            + summaryFailsafeCount
+                            + ", coalescedMoves="
+                            + summaryCoalescedMoves
+            );
         }
     }
 }

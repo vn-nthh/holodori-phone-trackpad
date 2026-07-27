@@ -788,7 +788,19 @@ def main():
     )
     parser.add_argument(
         "--no-usbdk", action="store_true",
-        help="Use the device's installed WinUSB driver instead of UsbDk",
+        help="Disable the UsbDk handshake and data fallback",
+    )
+    parser.add_argument(
+        "--aoa-read-depth",
+        type=int,
+        choices=(1, 2),
+        default=2,
+        help="Number of preposted WinUSB reads (default: 2)",
+    )
+    parser.add_argument(
+        "--aoa-benchmark",
+        action="store_true",
+        help="Report clock-normalized AOA transport jitter",
     )
 
     args = parser.parse_args()
@@ -820,6 +832,8 @@ def main():
             release_key=release_key,
             use_usbdk=not args.no_usbdk,
             extra_vendor_id=args.usb_vid,
+            winusb_read_depth=args.aoa_read_depth,
+            benchmark=args.aoa_benchmark,
         )
         return
 

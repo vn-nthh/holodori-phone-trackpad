@@ -7,7 +7,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PointF;
 import android.graphics.RectF;
-import android.os.SystemClock;
+import android.os.Build;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -245,7 +245,7 @@ final class TrackpadView extends View {
             activeTouches.remove(pointerId);
             sentPointers.remove(pointerId);
         } else if (action == MotionEvent.ACTION_CANCEL) {
-            cancelAll(event.getEventTime() * 1_000_000L);
+            cancelAll(eventTimeNanos(event));
         }
     }
 
@@ -265,7 +265,7 @@ final class TrackpadView extends View {
                 local.y,
                 inside,
                 true,
-                event.getEventTime() * 1_000_000L
+                eventTimeNanos(event)
         );
     }
 
@@ -406,7 +406,7 @@ final class TrackpadView extends View {
     private void setLocked(boolean locked) {
         if (this.locked == locked) return;
         if (!locked) {
-            cancelAll(SystemClock.uptimeMillis() * 1_000_000L);
+            cancelAll(System.nanoTime());
         }
         this.locked = locked;
         activeTouches.clear();
@@ -452,5 +452,12 @@ final class TrackpadView extends View {
 
     private static float clamp(float value, float min, float max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private static long eventTimeNanos(MotionEvent event) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return event.getEventTimeNanos();
+        }
+        return event.getEventTime() * 1_000_000L;
     }
 }
