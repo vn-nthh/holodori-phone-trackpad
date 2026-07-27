@@ -6,19 +6,20 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 > **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game's Terms of Service.
 
-## Download v0.1.2
+## Download v0.1.3
 
 Install the Windows setup and Android companion app, connect the phone with a
 data-capable USB cable, and approve Android's accessory prompt. The Windows
-setup includes the signed UsbDk USB driver needed for the normal AOA connection;
-approve its administrator prompt and restart only if setup asks you to.
+setup includes default-checked WinUSB low-latency data support and the signed
+UsbDk driver used for the AOA handshake and compatibility fallback. Approve its
+administrator prompt and restart only if setup asks you to.
 The PC touch overlay is off by default, keeping play unobstructed. Launch the
 separate **with Touch Overlay** Start-menu shortcut when you want it.
 
-- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.2/HolodoriPhoneTrackpadSetup.exe)
-- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.2/HolodoriPhoneTrackpad.apk)
-- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.2/HolodoriPhoneTrackpad.exe)
-- [View the v0.1.2 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.2)
+- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpadSetup.exe)
+- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpad.apk)
+- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpad.exe)
+- [View the v0.1.3 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.3)
 
 The original ADB transport remains available if you prefer it. ADB mode still
 requires USB debugging; AOA mode does not.
@@ -49,15 +50,15 @@ The project is free and open source under the [MIT License](LICENSE).
 | Requirement | Notes |
 |---|---|
 | **Windows PC** | Uses Win32 key injection and a topmost transparent overlay |
-| **Windows setup** | Bundles the PC app and UsbDk; no Python installation required |
+| **Windows setup** | Bundles the PC app, WinUSB provisioning, and UsbDk; no Python installation required |
 | **Android phone** | AOA-capable phone, companion APK, and data-capable USB cable |
-| **Windows USB access** | The setup bundles UsbDk for the initial handshake, or use an AOA interface already bound to WinUSB |
+| **Windows USB access** | WinUSB is preferred for AOA data; UsbDk performs the handshake and automatically handles data when WinUSB is unavailable |
 | **hololive Dreams (PC)** | Steam client, or another focused app accepting the mapped keys |
 
 ## Quick start
 
-1. Download the [Windows setup](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpadSetup.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.1/HolodoriPhoneTrackpad.apk).
-2. Run the Windows setup. Leave **Install UsbDk USB connection support** selected unless you already use WinUSB for the Android Accessory interface. Approve the administrator prompt, then restart Windows only if setup asks you to.
+1. Download the [Windows setup](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpadSetup.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpad.apk).
+2. Run the Windows setup. Leave both **WinUSB low-latency data support** and **UsbDk handshake and fallback support** selected for the recommended configuration. If WinUSB is skipped or cannot be installed, the app automatically carries the AOA data stream over UsbDk. Approve the administrator prompt, then restart Windows only if setup asks you to.
 3. Install the APK on the phone, then launch Holodori Phone Trackpad from the Start menu or desktop shortcut.
 4. When running from source instead, install the PC dependency:
 
@@ -85,8 +86,9 @@ Run the packaging script from PowerShell:
 ```
 
 The Windows build creates `release\HolodoriPhoneTrackpad.exe` plus
-`release\HolodoriPhoneTrackpadSetup.exe`, which bundles the signed UsbDk 1.0.22
-x64 installer. Building the setup requires [Inno Setup 6](https://jrsoftware.org/isinfo.php).
+`release\HolodoriPhoneTrackpadSetup.exe`, which bundles device-specific WinUSB
+provisioning and the signed UsbDk 1.0.22 x64 installer. Building the setup
+requires [Inno Setup 6](https://jrsoftware.org/isinfo.php).
 Its settings are stored in `%LOCALAPPDATA%\Holodori Phone Trackpad`, so they
 survive the temporary extraction used by the single-file executable.
 
@@ -120,7 +122,7 @@ python phone_trackpad.py [options]
   --no-overlay           Keep the PC touch-position overlay disabled (the default)
   --overlay-edit         Open the saved PC overlay zone for editing
   --usb-vid VID          Add an unlisted Android USB vendor ID
-  --no-usbdk             Use an installed WinUSB driver instead of UsbDk
+  --no-usbdk             Disable the UsbDk handshake/data fallback
   --aoa-read-depth 1|2   Preposted WinUSB reads (default: 2)
   --aoa-benchmark        Report clock-normalized AOA transport jitter
   --test                 Show input events without sending keys
@@ -143,7 +145,7 @@ Native Android app ──AOA USB bulk──► PC input router ──key event�
 
 1. The Android view requests unbuffered touch dispatch and maps screen coordinates into its rotated play zone.
 2. Fixed 24-byte records carry finger ID, action, normalized coordinates, sequence, and source timestamp over AOA.
-3. The PC immediately maps records to key presses and releases.
+3. The PC prefers pipelined WinUSB for AOA data, falls back to UsbDk when needed, and immediately maps records to key presses and releases.
 4. A separate queue mirrors coordinates to the visual overlay, so drawing never blocks the input path.
 5. If USB disconnects, the PC releases every held key and automatically looks for the phone again.
 
@@ -187,10 +189,11 @@ ADB mode still requires Android Platform Tools, USB debugging, and the original 
 
 ## Troubleshooting
 
-- The Windows setup installs UsbDk automatically when it is not already present. If you use the portable EXE, install [UsbDk 1.0.22 x64](https://www.spice-space.org/download/windows/usbdk/UsbDk_1.0.22_x64.msi) separately.
+- The Windows setup pre-stages WinUSB for `18D1:2D00` and interface 0 of `18D1:2D01`, and installs UsbDk when it is not already present. It does not replace the phone's normal MTP or ADB interfaces.
+- If WinUSB was unchecked or its installation failed, Holodori automatically uses UsbDk for the AOA data stream. No manual driver binding is required.
+- If you use the portable EXE, install [UsbDk 1.0.22 x64](https://www.spice-space.org/download/windows/usbdk/UsbDk_1.0.22_x64.msi) separately or manually provide WinUSB for the AOA interface.
 - Restart Windows once after installing or reinstalling UsbDk; its USB filter does not attach to already-running USB controllers.
-- If it cannot claim `18D1:2D00`, bind WinUSB to the **Android Accessory** interface only.
-- Do not replace the phone's normal MTP driver with WinUSB. UsbDk avoids that device-wide replacement.
+- Do not replace the phone's normal MTP driver with WinUSB.
 - The overlay works over ordinary and borderless windows. True exclusive fullscreen can bypass desktop composition.
 - Run as Administrator if key events do not reach an elevated game.
 - Use `--test` before sending keys into the game.

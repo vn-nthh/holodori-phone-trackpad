@@ -2,8 +2,9 @@
 
 The AOA handshake uses libusb directly through ctypes.  On Windows it can opt
 into libusb's UsbDk backend so the handshake does not replace the phone's MTP
-driver, then switches to the native WinUSB API for the latency-sensitive touch
-stream.  The companion Android app emits fixed-size TOUCH_PACKET records.
+driver, then prefers the native WinUSB API for the latency-sensitive touch
+stream and falls back to UsbDk when WinUSB is unavailable.  The companion
+Android app emits fixed-size TOUCH_PACKET records.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ FLAG_QUEUE_RESYNC = 0x20
 FLAG_QUEUE_FAILSAFE = 0x40
 FLAG_QUEUE_DIAGNOSTICS = 0x80
 QUEUE_AGE_REPORT_UNIT_NANOS = 10_000
+WINUSB_ATTACH_GRACE_SECONDS = 1.5
 
 # Common Android OEM vendor IDs.  --usb-vid can add an unlisted device without
 # probing unrelated USB hardware with vendor-specific control requests.
@@ -618,6 +620,7 @@ class AoaHost:
     ) -> None:
         self.prefer_usbdk = bool(use_usbdk and os.name == "nt")
         self.usb = Libusb(use_usbdk=use_usbdk)
+        self._usbdk_data_fallback_attempted = False
         self.winusb_read_depth = max(1, min(2, winusb_read_depth))
         self.vendor_ids = set(ANDROID_VENDOR_IDS)
         if extra_vendor_id is not None:
@@ -630,22 +633,30 @@ class AoaHost:
         self, switch_timeout: float = 12.0
     ) -> AoaConnection | WinUsbConnection:
         # UsbDk can temporarily detach Samsung's normal MTP/ADB drivers for
-        # the AOA control handshake, but WinUSB is more stable for the long
-        # bulk stream. Never hold the accessory data session on UsbDk.
-        if self.usb.using_usbdk and self._accessory_present():
+        # the AOA control handshake. Prefer WinUSB for the long bulk stream,
+        # while retaining UsbDk as a compatibility fallback for systems where
+        # the optional WinUSB package was skipped or could not be installed.
+        accessory_present = (
+            self.usb.using_usbdk and self._accessory_present()
+        )
+        if accessory_present:
             self._replace_usb(use_usbdk=False)
+            return self._wait_for_data_accessory(switch_timeout)
 
-        connection = self._find_data_accessory()
+        try:
+            connection = self._find_data_accessory()
+        except AoaError:
+            if not self._enable_usbdk_data_fallback():
+                raise
+            connection = self._find_data_accessory()
         if connection:
             return connection
 
         if self.prefer_usbdk and not self.usb.using_usbdk:
-            self._replace_usb(use_usbdk=True)
-            if self._accessory_present():
-                self._replace_usb(use_usbdk=False)
-                connection = self._find_data_accessory()
-                if connection:
-                    return connection
+            self._enable_usbdk_data_fallback()
+            connection = self._find_data_accessory()
+            if connection:
+                return connection
 
         switched = self._request_accessory_mode()
         if not switched:
@@ -667,20 +678,38 @@ class AoaHost:
             time.sleep(0.1)
             self._replace_usb(use_usbdk=False)
 
+        return self._wait_for_data_accessory(switch_timeout)
+
+    def _wait_for_data_accessory(
+        self, switch_timeout: float
+    ) -> AoaConnection | WinUsbConnection:
         deadline = time.monotonic() + switch_timeout
+        fallback_at = time.monotonic() + min(
+            WINUSB_ATTACH_GRACE_SECONDS, switch_timeout
+        )
         last_open_error: Optional[AoaError] = None
         while time.monotonic() < deadline:
-            time.sleep(0.15)
             try:
                 connection = self._find_data_accessory()
             except AoaError as error:
                 # Windows can enumerate the new composite device before
                 # WinUSB has finished attaching to interface 0. Treat that
-                # brief ACCESS/IO window as part of re-enumeration.
+                # brief ACCESS/IO window as part of re-enumeration. If UsbDk
+                # is available, an unusable WinUSB path is also a definite
+                # signal to activate the compatibility backend immediately.
                 last_open_error = error
+                if self._enable_usbdk_data_fallback():
+                    continue
+            else:
+                if connection:
+                    return connection
+
+            if (
+                time.monotonic() >= fallback_at
+                and self._enable_usbdk_data_fallback()
+            ):
                 continue
-            if connection:
-                return connection
+            time.sleep(0.15)
         if last_open_error is not None:
             raise last_open_error
         raise AoaError(
@@ -688,9 +717,24 @@ class AoaHost:
             "Android Accessory. Reconnect the cable and accept the app prompt."
         )
 
+    def _enable_usbdk_data_fallback(self) -> bool:
+        if (
+            not self.prefer_usbdk
+            or self.usb.using_usbdk
+            or getattr(self, "_usbdk_data_fallback_attempted", False)
+        ):
+            return False
+        self._usbdk_data_fallback_attempted = True
+        self._replace_usb(use_usbdk=True)
+        return self.usb.using_usbdk
+
     def _replace_usb(self, use_usbdk: bool) -> None:
         previous = self.usb
         self.usb = Libusb(use_usbdk=use_usbdk)
+        if not use_usbdk and previous.using_usbdk:
+            # A successful handshake starts a fresh WinUSB-first data phase.
+            # Re-arm the same known-good UsbDk context as its fallback.
+            self._usbdk_data_fallback_attempted = False
         previous.close()
 
     def _accessory_present(self) -> bool:

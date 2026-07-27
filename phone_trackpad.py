@@ -788,7 +788,7 @@ def main():
     )
     parser.add_argument(
         "--no-usbdk", action="store_true",
-        help="Use the device's installed WinUSB driver instead of UsbDk",
+        help="Disable the UsbDk handshake and data fallback",
     )
     parser.add_argument(
         "--aoa-read-depth",

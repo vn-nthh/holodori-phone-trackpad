@@ -10,6 +10,8 @@ from aoa_transport import (
     ACTION_HEARTBEAT,
     ACTION_MOVE,
     ACTION_UP,
+    AoaError,
+    AoaHost,
     AoaReceiver,
     ClockNormalizedLatency,
     FLAG_INSIDE,
@@ -104,6 +106,75 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(snapshot.samples, 2)
         self.assertAlmostEqual(snapshot.mean_excess_ms, 15.0)
         self.assertAlmostEqual(snapshot.max_excess_ms, 20.0)
+
+
+class AoaHostTests(unittest.TestCase):
+    def test_data_connection_prefers_winusb_without_enabling_fallback(self):
+        connection = object()
+        host = object.__new__(AoaHost)
+        host.prefer_usbdk = True
+        host.usb = type("Usb", (), {"using_usbdk": False})()
+        host._find_data_accessory = mock.Mock(return_value=connection)
+        host._replace_usb = mock.Mock()
+
+        self.assertIs(host._wait_for_data_accessory(0.1), connection)
+        host._replace_usb.assert_not_called()
+
+    def test_data_connection_falls_back_to_usbdk_after_winusb_error(self):
+        connection = object()
+        host = object.__new__(AoaHost)
+        host.prefer_usbdk = True
+        host.usb = type("Usb", (), {"using_usbdk": False})()
+
+        def replace_usb(use_usbdk):
+            host.usb = type(
+                "Usb", (), {"using_usbdk": bool(use_usbdk)}
+            )()
+
+        host._replace_usb = mock.Mock(side_effect=replace_usb)
+        host._find_data_accessory = mock.Mock(
+            side_effect=[AoaError("LIBUSB_ERROR_NOT_SUPPORTED"), connection]
+        )
+
+        self.assertIs(host._wait_for_data_accessory(0.1), connection)
+        host._replace_usb.assert_called_once_with(use_usbdk=True)
+        self.assertTrue(host.usb.using_usbdk)
+
+    def test_data_connection_falls_back_after_winusb_attach_grace(self):
+        connection = object()
+        host = object.__new__(AoaHost)
+        host.prefer_usbdk = True
+        host.usb = type("Usb", (), {"using_usbdk": False})()
+
+        def replace_usb(use_usbdk):
+            host.usb = type(
+                "Usb", (), {"using_usbdk": bool(use_usbdk)}
+            )()
+
+        host._replace_usb = mock.Mock(side_effect=replace_usb)
+        host._find_data_accessory = mock.Mock(
+            side_effect=[None, connection]
+        )
+
+        with (
+            mock.patch(
+                "aoa_transport.time.monotonic",
+                side_effect=[0.0, 0.0, 0.0, 1.5, 1.5],
+            ),
+            mock.patch("aoa_transport.time.sleep"),
+        ):
+            self.assertIs(host._wait_for_data_accessory(2.0), connection)
+
+        host._replace_usb.assert_called_once_with(use_usbdk=True)
+
+    def test_data_fallback_is_disabled_when_usbdk_was_opted_out(self):
+        host = object.__new__(AoaHost)
+        host.prefer_usbdk = False
+        host.usb = type("Usb", (), {"using_usbdk": False})()
+        host._replace_usb = mock.Mock()
+
+        self.assertFalse(host._enable_usbdk_data_fallback())
+        host._replace_usb.assert_not_called()
 
 
 class RouterTests(unittest.TestCase):
