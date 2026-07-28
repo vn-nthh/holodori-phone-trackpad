@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
+import threading
 from ctypes import wintypes
 from typing import Iterable, Optional
 
@@ -26,6 +28,16 @@ AOA_DEVICE_PREFIXES = (
     "vid_18d1&pid_2d04",
     "vid_18d1&pid_2d05",
 )
+_DEVICE_ID_PATTERN = re.compile(
+    r"vid_([0-9a-f]{4})&pid_([0-9a-f]{4})", re.IGNORECASE
+)
+
+
+def _parse_device_ids(path: str) -> tuple[Optional[int], Optional[int]]:
+    match = _DEVICE_ID_PATTERN.search(path)
+    if not match:
+        return None, None
+    return int(match.group(1), 16), int(match.group(2), 16)
 
 DIGCF_PRESENT = 0x00000002
 DIGCF_DEVICEINTERFACE = 0x00000010
@@ -46,10 +58,21 @@ WAIT_FAILED = 0xFFFFFFFF
 PIPE_TRANSFER_TIMEOUT = 3
 AUTO_CLEAR_STALL = 2
 DEFAULT_READ_PIPELINE_DEPTH = 2
+DEFAULT_READ_TIMEOUT_MS = 100
 
 
 class WinUsbError(RuntimeError):
-    pass
+    """WinUSB failure with structured fields for the connection doctor."""
+
+    def __init__(
+        self,
+        message: str,
+        operation: Optional[str] = None,
+        native_code: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.operation = operation
+        self.native_code = native_code
 
 
 class Guid(ctypes.Structure):
@@ -319,7 +342,9 @@ class _WinUsbApi:
         error = ctypes.get_last_error() if code is None else code
         message = ctypes.FormatError(error).strip()
         return WinUsbError(
-            f"Could not {operation}: {message or 'Windows error'} ({error})"
+            f"Could not {operation}: {message or 'Windows error'} ({error})",
+            operation=operation,
+            native_code=error,
         )
 
 
@@ -397,6 +422,8 @@ class WinUsbConnection:
         self.endpoint_in = endpoint_in
         self.endpoint_out = endpoint_out
         self.interface_number = 0
+        self.device_vid: Optional[int] = None
+        self.device_pid: Optional[int] = None
         self.read_depth = max(1, min(2, int(read_depth)))
         self._read_timeout: Optional[int] = None
         self._write_timeout: Optional[int] = None
@@ -405,6 +432,7 @@ class WinUsbConnection:
         self._next_read_slot = 0
         self._deferred_read_error: Optional[WinUsbError] = None
         self._closed = False
+        self._lifecycle_lock = threading.Lock()
         enabled = wintypes.BOOL(True)
         self.api.winusb.WinUsb_SetPipePolicy(
             self.interface_handle,
@@ -501,7 +529,7 @@ class WinUsbConnection:
                 api.winusb.WinUsb_Free(interface_handle)
                 api.kernel.CloseHandle(file_handle)
                 return None
-            return cls(
+            connection = cls(
                 api,
                 file_handle,
                 interface_handle,
@@ -509,6 +537,10 @@ class WinUsbConnection:
                 endpoint_out,
                 read_depth=read_depth,
             )
+            connection.device_vid, connection.device_pid = _parse_device_ids(
+                path
+            )
+            return connection
         except Exception:
             if interface_handle:
                 api.winusb.WinUsb_Free(interface_handle)
@@ -526,7 +558,9 @@ class WinUsbConnection:
         ):
             raise self.api.last_error("set the AOA WinUSB timeout")
 
-    def read(self, size: int = 4096, timeout_ms: int = 500) -> bytes:
+    def read(
+        self, size: int = 4096, timeout_ms: int = DEFAULT_READ_TIMEOUT_MS
+    ) -> bytes:
         if self._closed:
             raise WinUsbError("The AOA WinUSB connection is closed")
         if size <= 0:
@@ -707,10 +741,22 @@ class WinUsbConnection:
         if transferred.value != len(payload):
             raise WinUsbError("AOA configuration write was incomplete")
 
+    def cancel_pending_read(self) -> None:
+        """Cancel overlapped reads without freeing handles on this thread."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            try:
+                self.api.kernel.CancelIoEx(self.file_handle, None)
+            except Exception:
+                # The receiver's bounded read wait remains the fallback.
+                pass
+
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._teardown_read_pipeline()
-        self.api.winusb.WinUsb_Free(self.interface_handle)
-        self.api.kernel.CloseHandle(self.file_handle)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._teardown_read_pipeline()
+            self.api.winusb.WinUsb_Free(self.interface_handle)
+            self.api.kernel.CloseHandle(self.file_handle)

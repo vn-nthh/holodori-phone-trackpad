@@ -1,6 +1,9 @@
 plugins {
     id "com.android.application"
 }
+
+def holodoriVersion = rootProject.file("../VERSION").text.trim()
+
 android {
     namespace "dev.holodori.trackpad"
     compileSdk 35
@@ -10,7 +13,7 @@ android {
         minSdk 23
         targetSdk 35
         versionCode 4
-        versionName "0.1.3"
+        versionName holodoriVersion
     }
 
     buildTypes {
