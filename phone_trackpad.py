@@ -193,6 +193,7 @@ class SharedConfig:
         self.playzone = {'x': 0.10, 'y': 0.75, 'w': 0.80, 'h': 0.15, 'r': 0}
         self.locked = False
         self.hw_zones = []  # Pre-computed zone hitboxes in hardware coords
+        self._version = 0   # Bumped on every update so consumers can cache
 
     def update_from_phone(self, data: dict):
         """Called by the HTTP server when the phone sends a config update."""
@@ -203,6 +204,17 @@ class SharedConfig:
                 self.locked = data['locked']
             if 'hw_zones' in data:
                 self.hw_zones = data['hw_zones']
+            self._version += 1
+
+    @property
+    def version(self) -> int:
+        """Monotonic config version; int read is atomic, safe to poll lock-free."""
+        return self._version
+
+    def snapshot_runtime(self) -> Tuple[int, bool, list]:
+        """(version, locked, hw_zones) consistently read under the lock."""
+        with self._lock:
+            return self._version, self.locked, list(self.hw_zones)
 
     def get_dict(self) -> dict:
         """Get a snapshot of the current config."""
@@ -264,6 +276,25 @@ class TouchProcessor:
         self.active_keys: Dict[int, Optional[str]] = {}  # slot -> key name
         self.stats = {"events": 0, "presses": 0, "releases": 0, "drags": 0}
 
+        # Cached view of SharedConfig, refreshed only when its version changes
+        self._cfg_version = -1
+        self._cfg_locked = True
+        self._cfg_zones: list = []
+
+    def _refresh_config(self):
+        """Re-read shared config only when it actually changed (cheap hot path)."""
+        cfg = self.shared_config
+        if not cfg:
+            self._cfg_locked = True
+            self._cfg_zones = []
+            return
+        if cfg.version == self._cfg_version:
+            return  # Nothing changed since last sync frame
+        version, locked, zones = cfg.snapshot_runtime()
+        self._cfg_version = version
+        self._cfg_locked = locked
+        self._cfg_zones = zones
+
     def _get_slot(self, idx: int) -> SlotState:
         if idx not in self.slots:
             self.slots[idx] = SlotState()
@@ -280,14 +311,12 @@ class TouchProcessor:
         Find which key a hardware-normalized touch point maps to.
         Uses pre-computed zone hitboxes from the phone (already in hw coords).
         """
-        if self.shared_config:
-            zones = self.shared_config.get_hw_zones()
-            if zones:
-                for z in zones:
-                    if (z['x_min'] <= nx <= z['x_max'] and
-                            z['y_min'] <= ny <= z['y_max']):
-                        return z['key']
-                return None
+        if self._cfg_zones:
+            for z in self._cfg_zones:
+                if (z['x_min'] <= nx <= z['x_max'] and
+                        z['y_min'] <= ny <= z['y_max']):
+                    return z['key']
+            return None
 
         # Fallback: divide full screen into equal columns
         n = len(self.keys)
@@ -329,10 +358,11 @@ class TouchProcessor:
             self.active_keys[slot_idx] = None
 
     def _handle_sync(self):
+        self._refresh_config()
         # Don't send keys if phone UI is unlocked (user is configuring zones)
-        if self.shared_config and not self.shared_config.is_locked():
+        if not self._cfg_locked:
             # Still track positions but don't send keys
-            for slot_idx, slot in self.slots.items():
+            for slot in self.slots.values():
                 slot.changed = False
             return
 
@@ -526,15 +556,58 @@ def start_controller_server(shared_config: SharedConfig):
             "-d", f"http://localhost:{SERVER_PORT}/")
     time.sleep(1.5)
 
-    # Dim screen brightness
-    run_adb("shell", "settings", "put", "system", "screen_brightness_mode", "0")
-    run_adb("shell", "settings", "put", "system", "screen_brightness", "1")
-
-    # Stay awake / immersive / DND so nothing interrupts gameplay
-    prevent_interruptions()
+    # NOTE: screen brightness is intentionally left untouched — we never
+    # dim the user's screen.
 
     print("   [OK] Controller UI active on phone.")
     return server
+
+
+def _get_setting(namespace: str, key: str) -> Optional[str]:
+    """Read a settings value; None when unset ('null')."""
+    out = run_adb("shell", "settings", "get", namespace, key, timeout=5)
+    out = (out or "").strip()
+    return None if out in ("", "null") else out
+
+
+class PhoneSettingsBackup:
+    """
+    Snapshot the user's phone settings before we override them for gameplay,
+    and restore the exact original values afterwards (never hardcoded guesses).
+    """
+
+    # zen_mode int -> `cmd notification set_dnd` argument
+    _ZEN_MODES = {0: "off", 1: "priority", 2: "total-silence", 3: "alarms"}
+
+    def __init__(self):
+        self._originals: Dict[Tuple[str, str], Optional[str]] = {}
+        self._taken = False
+
+    def snapshot(self):
+        if self._taken:
+            return
+        keys = [
+            ("system", "screen_off_timeout"),
+            ("global", "stay_on_while_plugged_in"),
+            ("global", "policy_control"),
+            ("global", "zen_mode"),
+        ]
+        self._originals = {(ns, k): _get_setting(ns, k) for ns, k in keys}
+        self._taken = True
+
+    def restore(self):
+        if not self._taken:
+            return
+        for (ns, key), value in self._originals.items():
+            if key == "zen_mode":
+                # Restore DND via the same command surface we changed it with
+                mode = self._ZEN_MODES.get(int(value) if value else 0, "off")
+                run_adb("shell", "cmd", "notification", "set_dnd", mode, timeout=5)
+            elif value is None:
+                run_adb("shell", "settings", "delete", ns, key, timeout=5)
+            else:
+                run_adb("shell", "settings", "put", ns, key, value, timeout=5)
+        self._taken = False
 
 
 def prevent_interruptions():
@@ -544,6 +617,8 @@ def prevent_interruptions():
     - immersive sticky (hide nav/status bars)
     - Do Not Disturb (block notification popups)
     - very long screen-off timeout as a fallback
+    Original values must be snapshotted first (PhoneSettingsBackup).
+    Brightness is deliberately NOT touched.
     """
     print("   Suppressing interruptions (stay-on / immersive / DND)...")
     # Stay awake while USB is connected (reverted on cleanup)
@@ -556,15 +631,17 @@ def prevent_interruptions():
     run_adb("shell", "cmd", "notification", "set_dnd", "priority")
 
 
-def restore_phone():
-    """Restore phone brightness, power, DND, immersive mode, and ADB tunnel."""
-    run_adb("shell", "settings", "put", "system", "screen_brightness", "128")
-    run_adb("shell", "settings", "put", "system", "screen_brightness_mode", "1")
-    # Re-enable normal screen-off / auto-brightness behavior
-    run_adb("shell", "svc", "power", "stayon", "false")
-    run_adb("shell", "settings", "put", "system", "screen_off_timeout", "60000")
-    run_adb("shell", "settings", "delete", "global", "policy_control")
-    run_adb("shell", "cmd", "notification", "set_dnd", "off")
+def restore_phone(backup: Optional[PhoneSettingsBackup] = None):
+    """Restore original phone settings and remove the ADB tunnel."""
+    if backup:
+        backup.restore()
+    else:
+        # Shouldn't happen, but never leave the phone stuck: revert to sane
+        # defaults without touching brightness.
+        run_adb("shell", "svc", "power", "stayon", "false")
+        run_adb("shell", "settings", "delete", "system", "screen_off_timeout")
+        run_adb("shell", "settings", "delete", "global", "policy_control")
+        run_adb("shell", "cmd", "notification", "set_dnd", "off")
     run_adb("reverse", "--remove-all")
 
 
@@ -684,51 +761,47 @@ def stream_events(device: str, processor: TouchProcessor):
 
     event_count = 0
     start_time = time.time()
-    # Read raw bytes and split lines ourselves — avoids Python text-IO buffering
+    # Read raw bytes and split lines ourselves — avoids Python text-IO
+    # buffering, and parse hex straight from bytes (no per-line decode).
     leftover = b""
+    process_event = processor.process_event
 
     try:
         while True:
-            chunk = proc.stdout.read(4096)
+            chunk = proc.stdout.read(65536)
             if not chunk:
                 if proc.poll() is not None:
                     break
                 continue
 
-            leftover += chunk
-            while True:
-                nl = leftover.find(b"\n")
-                if nl < 0:
-                    break
-                raw_line = leftover[:nl]
-                leftover = leftover[nl + 1:]
-                line = raw_line.decode("utf-8", errors="ignore").strip()
-                if not line:
-                    continue
+            lines = (leftover + chunk).split(b"\n")
+            leftover = lines.pop()
 
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-
+            for raw_line in lines:
+                # getevent line: "/dev/input/eventN: 0003 0035 00000123"
+                # rsplit from the right grabs the 3 hex fields without
+                # touching the device-path prefix.
+                parts = raw_line.rsplit(None, 3)
                 try:
                     ev_type = int(parts[-3], 16)
                     ev_code = int(parts[-2], 16)
                     ev_value = int(parts[-1], 16)
-                    if ev_value >= 0x80000000:
-                        ev_value -= 0x100000000
-                    processor.process_event(ev_type, ev_code, ev_value)
-                except ValueError:
+                except (ValueError, IndexError):
                     continue
+                if ev_value >= 0x80000000:
+                    ev_value -= 0x100000000
+                process_event(ev_type, ev_code, ev_value)
 
-                event_count += 1
-                if event_count % 3000 == 0:
-                    elapsed = time.time() - start_time
-                    rate = event_count / elapsed if elapsed > 0 else 0
-                    s = processor.stats
-                    locked = processor.shared_config.is_locked() if processor.shared_config else True
-                    state_str = "PLAYING" if locked else "CONFIGURING"
-                    print(f"  [STATS] {s['presses']} presses | {s['releases']} releases | "
-                          f"{s['drags']} drags | {rate:.0f} ev/s | {state_str}")
+            event_count += len(lines)
+            if event_count >= 3000:
+                elapsed = time.time() - start_time
+                rate = event_count / elapsed if elapsed > 0 else 0
+                s = processor.stats
+                state_str = "PLAYING" if processor._cfg_locked else "CONFIGURING"
+                print(f"  [STATS] {s['presses']} presses | {s['releases']} releases | "
+                      f"{s['drags']} drags | {rate:.0f} ev/s | {state_str}")
+                event_count = 0
+                start_time = time.time()
 
     except KeyboardInterrupt:
         pass
@@ -888,10 +961,14 @@ def main():
     # Start controller UI on phone
     server = None
     interruptions_armed = False
+    settings_backup = PhoneSettingsBackup()
     if not args.no_ui:
         print("[PHONE] Setting up controller UI...")
         server = start_controller_server(shared_config)
         if server:
+            # Snapshot user settings first, then apply gameplay overrides
+            settings_backup.snapshot()
+            prevent_interruptions()
             interruptions_armed = True
             print()
             print("  >> Configure the play zone on your phone,")
@@ -899,6 +976,7 @@ def main():
             print()
     else:
         # Still suppress phone interruptions even without the controller UI
+        settings_backup.snapshot()
         prevent_interruptions()
         interruptions_armed = True
 
@@ -926,7 +1004,7 @@ def main():
             # Save final playzone config
             config["playzone"] = shared_config.get_playzone()
             save_config(config)
-        restore_phone()
+        restore_phone(settings_backup if interruptions_armed else None)
 
     print("[BYE] Done!")
 
