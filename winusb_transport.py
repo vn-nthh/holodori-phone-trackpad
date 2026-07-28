@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 from ctypes import wintypes
 from typing import Iterable, Optional
 
@@ -26,6 +27,16 @@ AOA_DEVICE_PREFIXES = (
     "vid_18d1&pid_2d04",
     "vid_18d1&pid_2d05",
 )
+_DEVICE_ID_PATTERN = re.compile(
+    r"vid_([0-9a-f]{4})&pid_([0-9a-f]{4})", re.IGNORECASE
+)
+
+
+def _parse_device_ids(path: str) -> tuple[Optional[int], Optional[int]]:
+    match = _DEVICE_ID_PATTERN.search(path)
+    if not match:
+        return None, None
+    return int(match.group(1), 16), int(match.group(2), 16)
 
 DIGCF_PRESENT = 0x00000002
 DIGCF_DEVICEINTERFACE = 0x00000010
@@ -49,7 +60,17 @@ DEFAULT_READ_PIPELINE_DEPTH = 2
 
 
 class WinUsbError(RuntimeError):
-    pass
+    """WinUSB failure with structured fields for the connection doctor."""
+
+    def __init__(
+        self,
+        message: str,
+        operation: Optional[str] = None,
+        native_code: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.operation = operation
+        self.native_code = native_code
 
 
 class Guid(ctypes.Structure):
@@ -319,7 +340,9 @@ class _WinUsbApi:
         error = ctypes.get_last_error() if code is None else code
         message = ctypes.FormatError(error).strip()
         return WinUsbError(
-            f"Could not {operation}: {message or 'Windows error'} ({error})"
+            f"Could not {operation}: {message or 'Windows error'} ({error})",
+            operation=operation,
+            native_code=error,
         )
 
 
@@ -397,6 +420,8 @@ class WinUsbConnection:
         self.endpoint_in = endpoint_in
         self.endpoint_out = endpoint_out
         self.interface_number = 0
+        self.device_vid: Optional[int] = None
+        self.device_pid: Optional[int] = None
         self.read_depth = max(1, min(2, int(read_depth)))
         self._read_timeout: Optional[int] = None
         self._write_timeout: Optional[int] = None
@@ -501,7 +526,7 @@ class WinUsbConnection:
                 api.winusb.WinUsb_Free(interface_handle)
                 api.kernel.CloseHandle(file_handle)
                 return None
-            return cls(
+            connection = cls(
                 api,
                 file_handle,
                 interface_handle,
@@ -509,6 +534,10 @@ class WinUsbConnection:
                 endpoint_out,
                 read_depth=read_depth,
             )
+            connection.device_vid, connection.device_pid = _parse_device_ids(
+                path
+            )
+            return connection
         except Exception:
             if interface_handle:
                 api.winusb.WinUsb_Free(interface_handle)
