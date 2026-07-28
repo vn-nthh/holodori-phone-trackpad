@@ -274,8 +274,8 @@ class TouchProcessor:
 
         self.slots: Dict[int, SlotState] = {}
         self.current_slot = 0
-        self.active_keys: Dict[int, Optional[str]] = {}  # slot -> key name
-        self._held_keys = set()
+        self.active_keys: Dict[int, str] = {}  # slot -> key name
+        self.key_counts: Dict[str, int] = {}
         self.stats = {"events": 0, "presses": 0, "releases": 0, "drags": 0}
 
         # Cached view of SharedConfig, refreshed only when its version changes
@@ -351,16 +351,52 @@ class TouchProcessor:
 
     def _handle_finger_up(self, slot_idx: int):
         old_key = self.active_keys.get(slot_idx)
-        if old_key:
-            self.active_keys[slot_idx] = None
+        if not old_key:
+            self.active_keys.pop(slot_idx, None)
+            return
+
+        try:
+            self._release_lane(old_key, slot_idx)
+        except BaseException:
+            self.release_all_keys()
+            raise
+        self.active_keys.pop(slot_idx, None)
+
+    def _press_lane(
+            self,
+            key: str,
+            slot_idx: int,
+            nx: float,
+            ny: float,
+            dragging: bool):
+        count = max(0, self.key_counts.get(key, 0))
+        if count == 0:
             if self.test_mode:
-                print(f"  [UP] RELEASE [{old_key.upper()}]  (slot {slot_idx})")
-                released = True
-            else:
-                released = release_key(old_key)
-            if released:
-                self._held_keys.discard(old_key)
-            self.stats["releases"] += 1
+                action = "DRAG ->" if dragging else "PRESS"
+                print(
+                    f"  [DOWN] {action} [{key.upper()}]  "
+                    f"(slot {slot_idx}, pos {nx:.2f},{ny:.2f})"
+                )
+            elif not press_key(key):
+                raise RuntimeError(f"Could not press key {key!r}")
+            self.stats["presses"] += 1
+        self.key_counts[key] = count + 1
+
+    def _release_lane(self, key: str, slot_idx: int):
+        count = max(0, self.key_counts.get(key, 0))
+        if count == 0:
+            self.key_counts.pop(key, None)
+            return
+        if count > 1:
+            self.key_counts[key] = count - 1
+            return
+
+        if self.test_mode:
+            print(f"  [UP] RELEASE [{key.upper()}]  (slot {slot_idx})")
+        elif not release_key(key):
+            raise RuntimeError(f"Could not release key {key!r}")
+        self.stats["releases"] += 1
+        self.key_counts.pop(key, None)
 
     def _handle_sync(self):
         self._refresh_config()
@@ -384,45 +420,39 @@ class TouchProcessor:
             old_key = self.active_keys.get(slot_idx)
 
             if new_key != old_key:
-                # Press the new key before releasing the old one so drag
-                # transitions never leave a gap (no mid-slide interruptions).
-                if new_key:
-                    if self.test_mode:
-                        action = "DRAG ->" if old_key else "PRESS"
-                        print(f"  [DOWN] {action} [{new_key.upper()}]  (slot {slot_idx}, pos {nx:.2f},{ny:.2f})")
-                        pressed = True
-                    else:
-                        pressed = press_key(new_key)
-                    if pressed:
-                        self._held_keys.add(new_key)
-                    self.stats["presses"] += 1
+                try:
+                    # Press first on lane transitions so drags have no gap.
+                    if new_key:
+                        self._press_lane(
+                            new_key, slot_idx, nx, ny,
+                            dragging=bool(old_key),
+                        )
+                        if old_key:
+                            self.stats["drags"] += 1
+
                     if old_key:
-                        self.stats["drags"] += 1
+                        self._release_lane(old_key, slot_idx)
 
-                if old_key:
-                    if self.test_mode:
-                        print(f"  [UP] RELEASE [{old_key.upper()}]  (drag out, slot {slot_idx})")
-                        released = True
+                    if new_key:
+                        self.active_keys[slot_idx] = new_key
                     else:
-                        released = release_key(old_key)
-                    if released:
-                        self._held_keys.discard(old_key)
-                    self.stats["releases"] += 1
-
-                self.active_keys[slot_idx] = new_key
+                        self.active_keys.pop(slot_idx, None)
+                except BaseException:
+                    # An injection failure can occur between the two halves of
+                    # a slide. Release every counted lane before propagating.
+                    self.release_all_keys()
+                    raise
 
     def release_all_keys(self):
         """Best-effort release of every synthesized key; safe to call twice."""
-        held_keys = list(dict.fromkeys(
-            list(self._held_keys)
-            + [key for key in self.active_keys.values() if key]
-        ))
+        held_keys = [
+            key for key, count in self.key_counts.items() if count > 0
+        ]
 
-        # Clear logical state before injection so failures cannot leave stale
-        # state behind and repeated cleanup remains safe.
-        self._held_keys.clear()
-        for slot_idx in list(self.active_keys):
-            self.active_keys[slot_idx] = None
+        # Counts are the authoritative Windows key-down ownership state.
+        # Clear all logical state before injection so repeated cleanup is safe.
+        self.key_counts.clear()
+        self.active_keys.clear()
         for slot in self.slots.values():
             slot.tracking_id = -1
             slot.changed = False
@@ -439,10 +469,6 @@ class TouchProcessor:
             except BaseException:
                 failures.append(key)
             finally:
-                if key in failures:
-                    # The logical active-key state is clear, but retain the
-                    # physical key as pending so another cleanup can retry it.
-                    self._held_keys.add(key)
                 self.stats["releases"] += 1
         return failures
 
@@ -850,6 +876,8 @@ class PhoneSettingsBackup:
             self._pending_restore.add(setting)
             try:
                 run_adb_checked(*overrides[setting], timeout=5)
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except AdbCommandError as exc:
                 restore_args = self._restore_args(setting)
                 failures.append(
@@ -859,7 +887,7 @@ class PhoneSettingsBackup:
                         self._manual_command(restore_args),
                     ),
                 )
-            except BaseException:
+            except Exception:
                 restore_args = self._restore_args(setting)
                 failures.append(
                     CleanupFailure(

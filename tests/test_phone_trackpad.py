@@ -198,37 +198,171 @@ class SetupBoundaryTests(unittest.TestCase):
         )
 
 
-class KeyReleaseTests(unittest.TestCase):
-    def make_processor(self, test_mode=False):
-        return TouchProcessor(["a", "b", "c"], 100, 100, test_mode=test_mode)
-
-    def test_one_held_key_released_at_shutdown(self):
-        processor = self.make_processor()
-        processor.active_keys = {0: "a"}
-        with mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            self.assertEqual(processor.release_all_keys(), [])
-
-        release.assert_called_once_with("a")
-        self.assertEqual(processor.active_keys, {0: None})
-
-    def test_several_held_keys_are_all_released(self):
-        processor = self.make_processor()
-        processor.active_keys = {0: "a", 1: "b", 2: "c"}
-        with mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            self.assertEqual(processor.release_all_keys(), [])
-
-        self.assertEqual(
-            release.call_args_list,
-            [mock.call("a"), mock.call("b"), mock.call("c")],
+class KeyReferenceCountTests(unittest.TestCase):
+    def make_processor(self, keys=("a", "b", "c"), test_mode=False):
+        config = SharedConfig(list(keys))
+        config.update_from_phone({"locked": True})
+        return TouchProcessor(
+            list(keys), 100, 100,
+            shared_config=config,
+            test_mode=test_mode,
         )
 
-    def test_duplicate_cleanup_is_safe(self):
+    @staticmethod
+    def touch(processor, slot, x, tracking_id=None):
+        tracking_id = slot + 10 if tracking_id is None else tracking_id
+        processor.process_event(EV_ABS, ABS_MT_SLOT, slot)
+        processor.process_event(
+            EV_ABS, ABS_MT_TRACKING_ID, tracking_id,
+        )
+        processor.process_event(EV_ABS, ABS_MT_POSITION_X, x)
+        processor.process_event(EV_ABS, ABS_MT_POSITION_Y, 50)
+        processor.process_event(EV_SYN, SYN_REPORT, 0)
+
+    @staticmethod
+    def move(processor, slot, x):
+        processor.process_event(EV_ABS, ABS_MT_SLOT, slot)
+        processor.process_event(EV_ABS, ABS_MT_POSITION_X, x)
+        processor.process_event(EV_ABS, ABS_MT_POSITION_Y, 50)
+        processor.process_event(EV_SYN, SYN_REPORT, 0)
+
+    @staticmethod
+    def lift(processor, slot):
+        processor.process_event(EV_ABS, ABS_MT_SLOT, slot)
+        processor.process_event(EV_ABS, ABS_MT_TRACKING_ID, -1)
+        processor.process_event(EV_SYN, SYN_REPORT, 0)
+
+    def test_two_fingers_pressing_same_lane_send_one_key_down(self):
         processor = self.make_processor()
-        processor.active_keys = {0: "a"}
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ) as press:
+            self.touch(processor, 0, 10)
+            self.touch(processor, 1, 20)
+
+        press.assert_called_once_with("a")
+        self.assertEqual(processor.active_keys, {0: "a", 1: "a"})
+        self.assertEqual(processor.key_counts, {"a": 2})
+
+    def test_first_finger_lift_keeps_shared_lane_down(self):
+        processor = self.make_processor()
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ), mock.patch.object(phone_trackpad, "release_key") as release:
+            self.touch(processor, 0, 10)
+            self.touch(processor, 1, 20)
+            self.lift(processor, 0)
+
+        release.assert_not_called()
+        self.assertEqual(processor.active_keys, {1: "a"})
+        self.assertEqual(processor.key_counts, {"a": 1})
+
+    def test_final_finger_lift_releases_shared_lane(self):
+        processor = self.make_processor()
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ), mock.patch.object(
+            phone_trackpad, "release_key", return_value=True,
+        ) as release:
+            self.touch(processor, 0, 10)
+            self.touch(processor, 1, 20)
+            self.lift(processor, 0)
+            self.lift(processor, 1)
+
+        release.assert_called_once_with("a")
+        self.assertEqual(processor.active_keys, {})
+        self.assertEqual(processor.key_counts, {})
+
+    def test_three_fingers_can_share_one_lane(self):
+        processor = self.make_processor()
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ) as press, mock.patch.object(
+            phone_trackpad, "release_key", return_value=True,
+        ) as release:
+            for slot, x in ((0, 10), (1, 20), (2, 25)):
+                self.touch(processor, slot, x)
+            self.lift(processor, 1)
+            self.lift(processor, 0)
+
+        press.assert_called_once_with("a")
+        release.assert_not_called()
+        self.assertEqual(processor.key_counts, {"a": 1})
+        self.assertEqual(processor.active_keys, {2: "a"})
+
+    def test_two_fingers_enter_same_lane_from_different_lanes(self):
+        processor = self.make_processor()
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ) as press, mock.patch.object(
+            phone_trackpad, "release_key", return_value=True,
+        ) as release:
+            self.touch(processor, 0, 10)
+            self.touch(processor, 1, 90)
+            self.move(processor, 0, 50)
+            self.move(processor, 1, 50)
+
+        self.assertEqual(
+            press.call_args_list,
+            [mock.call("a"), mock.call("c"), mock.call("b")],
+        )
+        self.assertEqual(
+            release.call_args_list,
+            [mock.call("a"), mock.call("c")],
+        )
+        self.assertEqual(processor.active_keys, {0: "b", 1: "b"})
+        self.assertEqual(processor.key_counts, {"b": 2})
+
+    def test_one_finger_slides_away_while_another_remains(self):
+        processor = self.make_processor()
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ) as press, mock.patch.object(
+            phone_trackpad, "release_key", return_value=True,
+        ) as release:
+            self.touch(processor, 0, 50)
+            self.touch(processor, 1, 50)
+            self.move(processor, 0, 10)
+
+        self.assertEqual(
+            press.call_args_list,
+            [mock.call("b"), mock.call("a")],
+        )
+        release.assert_not_called()
+        self.assertEqual(processor.active_keys, {0: "a", 1: "b"})
+        self.assertEqual(processor.key_counts, {"b": 1, "a": 1})
+
+    def test_cleanup_releases_shared_lanes_once_each(self):
+        processor = self.make_processor()
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ):
+            self.touch(processor, 0, 10)
+            self.touch(processor, 1, 20)
+            self.touch(processor, 2, 50)
+
+        with mock.patch.object(
+            phone_trackpad, "release_key", return_value=True,
+        ) as release:
+            failures = processor.release_all_keys()
+
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            release.call_args_list,
+            [mock.call("a"), mock.call("b")],
+        )
+        self.assertEqual(processor.active_keys, {})
+        self.assertEqual(processor.key_counts, {})
+        self.assertTrue(all(slot.tracking_id == -1 for slot in processor.slots.values()))
+
+    def test_repeated_release_all_is_safe(self):
+        processor = self.make_processor()
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ):
+            self.touch(processor, 0, 10)
+            self.touch(processor, 1, 20)
+
         with mock.patch.object(
             phone_trackpad, "release_key", return_value=True,
         ) as release:
@@ -237,9 +371,10 @@ class KeyReleaseTests(unittest.TestCase):
 
         release.assert_called_once_with("a")
 
-    def test_one_release_failure_does_not_prevent_others(self):
+    def test_release_failure_does_not_prevent_other_lane_releases(self):
         processor = self.make_processor()
         processor.active_keys = {0: "a", 1: "b", 2: "c"}
+        processor.key_counts = {"a": 1, "b": 1, "c": 1}
         with mock.patch.object(
             phone_trackpad,
             "release_key",
@@ -249,66 +384,41 @@ class KeyReleaseTests(unittest.TestCase):
 
         self.assertEqual(failures, ["a"])
         self.assertEqual(release.call_count, 3)
-        self.assertTrue(all(value is None for value in processor.active_keys.values()))
-        self.assertEqual(processor._held_keys, {"a"})
+        self.assertEqual(processor.active_keys, {})
+        self.assertEqual(processor.key_counts, {})
 
-    def test_failed_release_is_retried_by_repeated_cleanup(self):
+    def test_duplicate_and_stale_releases_never_make_counts_negative(self):
         processor = self.make_processor()
-        processor.active_keys = {0: "a"}
-        with mock.patch.object(
-            phone_trackpad, "release_key", side_effect=[False, True],
-        ) as release:
-            self.assertEqual(processor.release_all_keys(), ["a"])
-            self.assertEqual(processor.release_all_keys(), [])
-
-        self.assertEqual(release.call_count, 2)
-        self.assertEqual(processor._held_keys, set())
-
-    def test_test_mode_clears_state_without_injection(self):
-        processor = self.make_processor(test_mode=True)
-        processor.active_keys = {0: "a", 1: "b"}
-        with mock.patch.object(phone_trackpad, "release_key") as release:
-            self.assertEqual(processor.release_all_keys(), [])
-
-        release.assert_not_called()
-        self.assertTrue(all(value is None for value in processor.active_keys.values()))
-
-    def test_disconnect_during_active_multitouch_releases_every_key(self):
-        config = SharedConfig(["a", "b"])
-        config.update_from_phone({"locked": True})
-        processor = TouchProcessor(
-            ["a", "b"], 100, 100, shared_config=config,
-        )
-
         with mock.patch.object(
             phone_trackpad, "press_key", return_value=True,
-        ):
-            for slot, tracking_id, x in ((0, 10, 10), (1, 11, 90)):
-                processor.process_event(EV_ABS, ABS_MT_SLOT, slot)
-                processor.process_event(
-                    EV_ABS, ABS_MT_TRACKING_ID, tracking_id,
-                )
-                processor.process_event(EV_ABS, ABS_MT_POSITION_X, x)
-                processor.process_event(EV_ABS, ABS_MT_POSITION_Y, 50)
-                processor.process_event(EV_SYN, SYN_REPORT, 0)
-
-        session = AdbCleanupSession()
-        session.processor = processor
-        disconnected = mock.Mock()
-        disconnected.poll.return_value = 0
-        session.input_transport.proc = disconnected
-
-        with mock.patch.object(
+        ), mock.patch.object(
             phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            failures = session.cleanup()
+        ):
+            self.touch(processor, 0, 10)
+            self.lift(processor, 0)
+            self.lift(processor, 0)
+            self.lift(processor, 7)
 
-        self.assertEqual(failures, [])
-        self.assertCountEqual(
-            [call.args[0] for call in release.call_args_list],
-            ["a", "b"],
-        )
-        self.assertTrue(all(value is None for value in processor.active_keys.values()))
+        self.assertEqual(processor.active_keys, {})
+        self.assertEqual(processor.key_counts, {})
+        self.assertTrue(all(count >= 0 for count in processor.key_counts.values()))
+
+    def test_test_mode_uses_same_reference_counts_without_injection(self):
+        processor = self.make_processor(test_mode=True)
+        with mock.patch.object(phone_trackpad, "press_key") as press, \
+                mock.patch.object(phone_trackpad, "release_key") as release, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.touch(processor, 0, 10)
+            self.touch(processor, 1, 20)
+            self.lift(processor, 0)
+            self.assertEqual(processor.key_counts, {"a": 1})
+            self.lift(processor, 1)
+            processor.release_all_keys()
+
+        press.assert_not_called()
+        release.assert_not_called()
+        self.assertEqual(processor.active_keys, {})
+        self.assertEqual(processor.key_counts, {})
 
 
 class PhoneSettingsBackupTests(unittest.TestCase):
@@ -317,6 +427,157 @@ class PhoneSettingsBackupTests(unittest.TestCase):
         backup._snapshotted = True
         backup._originals = dict(originals)
         return backup
+
+    @staticmethod
+    def all_originals():
+        return {
+            ("system", "screen_off_timeout"): "60000",
+            ("global", "stay_on_while_plugged_in"): "0",
+            ("global", "policy_control"): None,
+            ("global", "zen_mode"): "0",
+        }
+
+    def test_ctrl_c_during_first_override_propagates_immediately(self):
+        backup = self.make_backup(self.all_originals())
+        screen = ("system", "screen_off_timeout")
+        with mock.patch.object(
+            phone_trackpad,
+            "run_adb_checked",
+            side_effect=KeyboardInterrupt,
+        ) as checked:
+            with self.assertRaises(KeyboardInterrupt):
+                backup.apply_overrides()
+
+        self.assertEqual(checked.call_count, 1)
+        self.assertEqual(backup.pending_settings, {screen})
+
+    def test_ctrl_c_after_modified_setting_restores_pending_values(self):
+        backup = self.make_backup(self.all_originals())
+        screen = ("system", "screen_off_timeout")
+        stay = ("global", "stay_on_while_plugged_in")
+
+        with mock.patch.object(
+            phone_trackpad,
+            "run_adb_checked",
+            side_effect=["", KeyboardInterrupt],
+        ) as checked:
+            with self.assertRaises(KeyboardInterrupt):
+                backup.apply_overrides()
+
+        self.assertEqual(checked.call_count, 2)
+        self.assertEqual(backup.pending_settings, {screen, stay})
+
+        with mock.patch.object(
+            phone_trackpad, "run_adb_checked", return_value="",
+        ) as restored:
+            self.assertEqual(backup.restore(), [])
+
+        self.assertEqual(
+            restored.call_args_list,
+            [
+                mock.call(
+                    "shell", "settings", "put", "system",
+                    "screen_off_timeout", "60000", timeout=5,
+                ),
+                mock.call(
+                    "shell", "settings", "put", "global",
+                    "stay_on_while_plugged_in", "0", timeout=5,
+                ),
+            ],
+        )
+        self.assertEqual(backup.pending_settings, set())
+
+    def test_system_exit_during_override_propagates_immediately(self):
+        backup = self.make_backup(self.all_originals())
+        with mock.patch.object(
+            phone_trackpad,
+            "run_adb_checked",
+            side_effect=SystemExit(7),
+        ) as checked:
+            with self.assertRaises(SystemExit) as raised:
+                backup.apply_overrides()
+
+        self.assertEqual(raised.exception.code, 7)
+        self.assertEqual(checked.call_count, 1)
+
+    def test_ordinary_override_failure_is_collected_and_processing_continues(self):
+        backup = self.make_backup(self.all_originals())
+        with mock.patch.object(
+            phone_trackpad,
+            "run_adb_checked",
+            side_effect=[RuntimeError("ordinary failure"), "", "", ""],
+        ) as checked:
+            failures = backup.apply_overrides()
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("unexpectedly", failures[0].detail)
+        self.assertEqual(checked.call_count, 4)
+        self.assertEqual(
+            backup.pending_settings,
+            set(self.all_originals()),
+        )
+
+    def test_cleanup_failure_does_not_replace_ctrl_c(self):
+        screen = ("system", "screen_off_timeout")
+        backup = self.make_backup({screen: "60000"})
+        restore_failure = AdbCommandError((), "restore failed")
+        cleanup_failures = []
+
+        with mock.patch.object(
+            phone_trackpad,
+            "run_adb_checked",
+            side_effect=[KeyboardInterrupt, restore_failure],
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                try:
+                    backup.apply_overrides()
+                finally:
+                    cleanup_failures.extend(backup.restore())
+
+        self.assertEqual(len(cleanup_failures), 1)
+        self.assertEqual(backup.pending_settings, {screen})
+
+    def test_main_outer_finally_restores_after_ctrl_c_override(self):
+        session = AdbCleanupSession()
+        originals = iter(("60000", "0", None, "0"))
+        with mock.patch.object(
+            phone_trackpad.sys,
+            "argv",
+            ["phone_trackpad.py", "--transport", "adb", "--no-ui"],
+        ), mock.patch.object(
+            phone_trackpad, "load_config",
+            return_value={"device": "/dev/input/event1", "max_x": 100, "max_y": 100},
+        ), mock.patch.object(
+            phone_trackpad, "save_config",
+        ), mock.patch.object(
+            phone_trackpad, "check_device_connected", return_value=True,
+        ), mock.patch.object(
+            phone_trackpad, "AdbCleanupSession", return_value=session,
+        ), mock.patch.object(
+            phone_trackpad,
+            "_get_setting",
+            side_effect=lambda *_: next(originals),
+        ), mock.patch.object(
+            phone_trackpad,
+            "run_adb_checked",
+            side_effect=[KeyboardInterrupt, ""],
+        ) as checked, contextlib.redirect_stdout(io.StringIO()):
+            phone_trackpad.main()
+
+        self.assertEqual(
+            checked.call_args_list,
+            [
+                mock.call(
+                    "shell", "settings", "put", "system",
+                    "screen_off_timeout", "2147483647", timeout=5,
+                ),
+                mock.call(
+                    "shell", "settings", "put", "system",
+                    "screen_off_timeout", "60000", timeout=5,
+                ),
+            ],
+        )
+        self.assertEqual(session.settings_backup.pending_settings, set())
 
     def test_known_dnd_modes_use_consistent_command_path(self):
         setting = ("global", "zen_mode")
