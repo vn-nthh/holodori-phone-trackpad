@@ -563,10 +563,23 @@ def start_controller_server(shared_config: SharedConfig):
     return server
 
 
-def _get_setting(namespace: str, key: str) -> Optional[str]:
-    """Read a settings value; None when unset ('null')."""
-    out = run_adb("shell", "settings", "get", namespace, key, timeout=5)
-    out = (out or "").strip()
+_SETTING_READ_FAILED = object()
+
+
+def _get_setting(namespace: str, key: str):
+    """Read a setting without mistaking an ADB failure for an unset value."""
+    cmd = [ADB_PATH, "shell", "settings", "get", namespace, key]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return _SETTING_READ_FAILED
+
+    if result.returncode != 0:
+        return _SETTING_READ_FAILED
+
+    out = result.stdout.strip()
     return None if out in ("", "null") else out
 
 
@@ -577,7 +590,7 @@ class PhoneSettingsBackup:
     """
 
     # zen_mode int -> `cmd notification set_dnd` argument
-    _ZEN_MODES = {0: "off", 1: "priority", 2: "total-silence", 3: "alarms"}
+    _ZEN_MODES = {0: "off", 1: "priority", 2: "none", 3: "alarms"}
 
     def __init__(self):
         self._originals: Dict[Tuple[str, str], Optional[str]] = {}
@@ -585,15 +598,27 @@ class PhoneSettingsBackup:
 
     def snapshot(self):
         if self._taken:
-            return
+            return True
         keys = [
             ("system", "screen_off_timeout"),
             ("global", "stay_on_while_plugged_in"),
             ("global", "policy_control"),
             ("global", "zen_mode"),
         ]
-        self._originals = {(ns, k): _get_setting(ns, k) for ns, k in keys}
+        originals = {}
+        for namespace, key in keys:
+            value = _get_setting(namespace, key)
+            if value is _SETTING_READ_FAILED:
+                print(
+                    f"   [WARN] Could not read {namespace}/{key}; "
+                    "phone interruption settings will be left unchanged."
+                )
+                return False
+            originals[(namespace, key)] = value
+
+        self._originals = originals
         self._taken = True
+        return True
 
     def restore(self):
         if not self._taken:
@@ -601,8 +626,32 @@ class PhoneSettingsBackup:
         for (ns, key), value in self._originals.items():
             if key == "zen_mode":
                 # Restore DND via the same command surface we changed it with
-                mode = self._ZEN_MODES.get(int(value) if value else 0, "off")
-                run_adb("shell", "cmd", "notification", "set_dnd", mode, timeout=5)
+                if value is None:
+                    run_adb(
+                        "shell", "cmd", "notification", "set_dnd", "off",
+                        timeout=5,
+                    )
+                    run_adb(
+                        "shell", "settings", "delete", ns, key, timeout=5,
+                    )
+                    continue
+
+                try:
+                    mode = self._ZEN_MODES.get(int(value))
+                except ValueError:
+                    mode = None
+
+                if mode is not None:
+                    run_adb(
+                        "shell", "cmd", "notification", "set_dnd", mode,
+                        timeout=5,
+                    )
+                else:
+                    # Preserve an OEM-specific value instead of crashing
+                    # cleanup or silently replacing it with DND-off.
+                    run_adb(
+                        "shell", "settings", "put", ns, key, value, timeout=5,
+                    )
             elif value is None:
                 run_adb("shell", "settings", "delete", ns, key, timeout=5)
             else:
@@ -633,16 +682,11 @@ def prevent_interruptions():
 
 def restore_phone(backup: Optional[PhoneSettingsBackup] = None):
     """Restore original phone settings and remove the ADB tunnel."""
-    if backup:
-        backup.restore()
-    else:
-        # Shouldn't happen, but never leave the phone stuck: revert to sane
-        # defaults without touching brightness.
-        run_adb("shell", "svc", "power", "stayon", "false")
-        run_adb("shell", "settings", "delete", "system", "screen_off_timeout")
-        run_adb("shell", "settings", "delete", "global", "policy_control")
-        run_adb("shell", "cmd", "notification", "set_dnd", "off")
-    run_adb("reverse", "--remove-all")
+    try:
+        if backup:
+            backup.restore()
+    finally:
+        run_adb("reverse", "--remove-all")
 
 
 # ============================================================================
@@ -974,18 +1018,28 @@ def main():
         server = start_controller_server(shared_config)
         if server:
             # Snapshot user settings first, then apply gameplay overrides
-            settings_backup.snapshot()
-            prevent_interruptions()
-            interruptions_armed = True
+            if settings_backup.snapshot():
+                interruptions_armed = True
+                try:
+                    prevent_interruptions()
+                except BaseException:
+                    restore_phone(settings_backup)
+                    interruptions_armed = False
+                    raise
             print()
             print("  >> Configure the play zone on your phone,")
             print("  >> then tap the LOCK button to start playing.")
             print()
     else:
         # Still suppress phone interruptions even without the controller UI
-        settings_backup.snapshot()
-        prevent_interruptions()
-        interruptions_armed = True
+        if settings_backup.snapshot():
+            interruptions_armed = True
+            try:
+                prevent_interruptions()
+            except BaseException:
+                restore_phone(settings_backup)
+                interruptions_armed = False
+                raise
 
     # Create processor
     processor = TouchProcessor(
@@ -995,23 +1049,29 @@ def main():
 
     print_banner(keys, device, max_x, max_y, args.test)
 
-    # Run
+    # Run and always restore the phone, even if the ADB stream fails.
     try:
         stream_events(device, processor)
     except KeyboardInterrupt:
         pass
+    finally:
+        s = processor.stats
+        print(
+            f"\n[STATS] Session: {s['presses']} presses, "
+            f"{s['releases']} releases, {s['drags']} drags"
+        )
 
-    # Cleanup
-    s = processor.stats
-    print(f"\n[STATS] Session: {s['presses']} presses, {s['releases']} releases, {s['drags']} drags")
-
-    if server or interruptions_armed:
-        print("[CLEANUP] Restoring phone...")
-        if server:
-            # Save final playzone config
-            config["playzone"] = shared_config.get_playzone()
-            save_config(config)
-        restore_phone(settings_backup if interruptions_armed else None)
+        if server or interruptions_armed:
+            print("[CLEANUP] Restoring phone...")
+            try:
+                if server:
+                    # Save final playzone config
+                    config["playzone"] = shared_config.get_playzone()
+                    save_config(config)
+            finally:
+                restore_phone(
+                    settings_backup if interruptions_armed else None,
+                )
 
     print("[BYE] Done!")
 
