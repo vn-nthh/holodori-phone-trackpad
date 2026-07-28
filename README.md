@@ -186,6 +186,7 @@ ADB mode still requires Android Platform Tools, USB debugging, and the original 
 | `aoa_mode.py` | Multi-touch key-state routing and console diagnostics |
 | `winusb_transport.py` | Native WinUSB overlapped-read transport |
 | `connection_doctor.py` | Connection-stage state machine and diagnostic report |
+| `VERSION` | Authoritative version used by runtime and release packaging |
 | `touch_overlay.py` | Transparent, click-through PC touch overlay |
 | `android-app/` | Native Android companion app |
 | `controller.html` | Legacy ADB phone UI |
@@ -193,7 +194,9 @@ ADB mode still requires Android Platform Tools, USB debugging, and the original 
 
 ## Troubleshooting
 
-- Every connection problem is reported with a stable `HPT-…` code, the stage where it happened (discovery, handshake, re-enumeration, WinUSB open, UsbDk fallback, app handshake, streaming, stall), and a recommended action — no raw libusb errors. Run `python phone_trackpad.py --diagnose` for the live Connection Doctor view; type `report` in its console to get a copyable, privacy-preserving diagnostic report (no serial numbers, user/computer names, full paths, IP addresses, touch coordinates, or keystrokes) and `retry` to reconnect immediately.
+- Every connection problem is reported with a stable `HPT-…` code and a recommended action. Connection Doctor distinguishes USB transport open, waiting for the Android companion, protocol handshake complete, and an active touch stream.
+- Opening WinUSB or UsbDk shows `USB connected … waiting for Android app…`; it is not reported as a usable/connected controller session until the first valid protocol packet arrives.
+- Run `python phone_trackpad.py --diagnose` for the live view. `report` copies a privacy-preserving report containing stable codes and allowlisted fields, not raw exceptions, USB serials, user/computer names, paths, IP addresses, touch coordinates, keystrokes, or free-form developer details. `retry` cancels discovery or the current USB read, releases held keys, closes the backend, and starts a fresh attempt immediately.
 - The Windows setup pre-stages WinUSB for `18D1:2D00` and interface 0 of `18D1:2D01`, and installs UsbDk when it is not already present. It does not replace the phone's normal MTP or ADB interfaces.
 - If WinUSB was unchecked or its installation failed, Holodori automatically uses UsbDk for the AOA data stream. No manual driver binding is required.
 - If you use the portable EXE, install [UsbDk 1.0.22 x64](https://www.spice-space.org/download/windows/usbdk/UsbDk_1.0.22_x64.msi) separately or manually provide WinUSB for the AOA interface.

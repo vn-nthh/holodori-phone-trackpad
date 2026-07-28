@@ -12,7 +12,6 @@ from __future__ import annotations
 import ctypes
 import os
 import struct
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -55,6 +54,7 @@ FLAG_QUEUE_FAILSAFE = 0x40
 FLAG_QUEUE_DIAGNOSTICS = 0x80
 QUEUE_AGE_REPORT_UNIT_NANOS = 10_000
 WINUSB_ATTACH_GRACE_SECONDS = 1.5
+INTERRUPTIBLE_READ_TIMEOUT_MS = 100
 
 # Common Android OEM vendor IDs.  --usb-vid can add an unlisted device without
 # probing unrelated USB hardware with vendor-specific control requests.
@@ -178,6 +178,26 @@ class AoaError(RuntimeError):
         self.native_name = native_name
         self.native_code = native_code
         self.diag_code = diag_code
+
+
+class TouchProtocolMismatch(AoaError):
+    """Confirmed unsupported touch protocol for one connection attempt."""
+
+    def __init__(self, received_version: int) -> None:
+        self.received_version = int(received_version)
+        self.expected_version = doctor_codes.TOUCH_PROTOCOL_VERSION
+        self.diagnostic_metadata = {
+            "received_touch_protocol_version": self.received_version,
+            "expected_touch_protocol_version": self.expected_version,
+        }
+        super().__init__(
+            "The phone and PC use incompatible touch protocol versions",
+            diag_code=doctor_codes.HPT_APP_PROTOCOL_MISMATCH,
+        )
+
+
+class _AoaOperationCancelled(RuntimeError):
+    """Internal control-flow signal for retry or shutdown."""
 
 
 @dataclass(frozen=True)
@@ -359,8 +379,11 @@ class TouchPacketParser:
                 TOUCH_PACKET.unpack_from(self._buffer)
             )
             del self._buffer[:size]
-            if magic != TOUCH_MAGIC or version != 1:
-                if version != 1:
+            if (
+                magic != TOUCH_MAGIC
+                or version != doctor_codes.TOUCH_PROTOCOL_VERSION
+            ):
+                if version != doctor_codes.TOUCH_PROTOCOL_VERSION:
                     self.bad_version_packets += 1
                     if self._on_bad_version is not None:
                         self._on_bad_version(version)
@@ -476,6 +499,10 @@ class Libusb:
         lib.libusb_bulk_transfer.restype = ctypes.c_int
         lib.libusb_error_name.argtypes = [ctypes.c_int]
         lib.libusb_error_name.restype = ctypes.c_char_p
+        interrupt = getattr(lib, "libusb_interrupt_event_handler", None)
+        if interrupt is not None:
+            interrupt.argtypes = [ctypes.c_void_p]
+            interrupt.restype = None
 
     def close(self) -> None:
         if self.context:
@@ -595,8 +622,15 @@ class AoaConnection:
         self.endpoint_in = endpoint_in
         self.endpoint_out = endpoint_out
         self._closed = False
+        self._cancel_requested = threading.Event()
 
-    def read(self, size: int = 4096, timeout_ms: int = 500) -> bytes:
+    def read(
+        self,
+        size: int = 4096,
+        timeout_ms: int = INTERRUPTIBLE_READ_TIMEOUT_MS,
+    ) -> bytes:
+        if self._cancel_requested.is_set():
+            return b""
         buffer = (ctypes.c_ubyte * size)()
         transferred = ctypes.c_int()
         rc = self.usb.lib.libusb_bulk_transfer(
@@ -607,10 +641,28 @@ class AoaConnection:
             ctypes.byref(transferred),
             timeout_ms,
         )
+        if self._cancel_requested.is_set():
+            return b""
         if rc == LIBUSB_ERROR_TIMEOUT:
             return b""
         self.usb.check(rc, "read the AOA touch stream")
         return bytes(buffer[: transferred.value])
+
+    def cancel_pending_read(self) -> None:
+        """Wake or bound an in-progress synchronous libusb read.
+
+        libusb's synchronous transfer is timeout-bounded above. Its event-loop
+        interrupt shortens that wait on runtimes which export the helper.
+        """
+        self._cancel_requested.set()
+        interrupt = getattr(
+            self.usb.lib, "libusb_interrupt_event_handler", None
+        )
+        if interrupt is not None and self.usb.context:
+            try:
+                interrupt(self.usb.context)
+            except Exception:
+                pass
 
     def write(self, payload: bytes, timeout_ms: int = 1000) -> None:
         buffer = (ctypes.c_ubyte * len(payload)).from_buffer_copy(payload)
@@ -656,6 +708,7 @@ class AoaHost:
         extra_vendor_id: Optional[int] = None,
         winusb_read_depth: int = DEFAULT_READ_PIPELINE_DEPTH,
         doctor: Optional[ConnectionDoctor] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
         self.prefer_usbdk = bool(use_usbdk and os.name == "nt")
         self.usb = Libusb(use_usbdk=use_usbdk)
@@ -664,6 +717,7 @@ class AoaHost:
         self.winusb_read_depth = max(1, min(2, winusb_read_depth))
         self.vendor_ids = set(ANDROID_VENDOR_IDS)
         self.doctor = doctor
+        self._cancel_event = cancel_event
         if doctor is not None:
             doctor.note_usbdk_status(
                 "active" if self.usb.using_usbdk else "not active"
@@ -677,6 +731,18 @@ class AoaHost:
         if doctor is not None:
             doctor.emit(code, **kwargs)
 
+    def _check_cancelled(self) -> None:
+        cancel_event = getattr(self, "_cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            raise _AoaOperationCancelled()
+
+    def _interruptible_wait(self, timeout: float) -> None:
+        cancel_event = getattr(self, "_cancel_event", None)
+        if cancel_event is None:
+            time.sleep(timeout)
+        elif cancel_event.wait(timeout):
+            raise _AoaOperationCancelled()
+
     def close(self) -> None:
         self.usb.close()
 
@@ -688,12 +754,14 @@ class AoaHost:
         # while retaining UsbDk as a compatibility fallback for systems where
         # the optional WinUSB package was skipped or could not be installed.
         doctor = getattr(self, "doctor", None)
+        self._check_cancelled()
         if doctor is not None:
             doctor.transition(ConnectionState.DISCOVERY)
         accessory_present = (
             self.usb.using_usbdk and self._accessory_present()
         )
         if accessory_present:
+            self._check_cancelled()
             if doctor is not None:
                 doctor.transition(ConnectionState.REENUMERATION)
             self._replace_usb(use_usbdk=False)
@@ -706,6 +774,11 @@ class AoaHost:
                 raise
             connection = self._find_data_accessory()
         if connection:
+            try:
+                self._check_cancelled()
+            except _AoaOperationCancelled:
+                connection.close()
+                raise
             self._record_usbdk_fallback_success()
             return connection
 
@@ -713,6 +786,11 @@ class AoaHost:
             self._enable_usbdk_data_fallback()
             connection = self._find_data_accessory()
             if connection:
+                try:
+                    self._check_cancelled()
+                except _AoaOperationCancelled:
+                    connection.close()
+                    raise
                 self._record_usbdk_fallback_success()
                 return connection
 
@@ -752,7 +830,7 @@ class AoaHost:
         if self.usb.using_usbdk:
             # Let UsbDk finish releasing its redirect before WinUSB starts
             # opening the newly enumerated accessory interface.
-            time.sleep(0.1)
+            self._interruptible_wait(0.1)
             self._replace_usb(use_usbdk=False)
 
         return self._wait_for_data_accessory(switch_timeout)
@@ -770,6 +848,7 @@ class AoaHost:
         )
         last_open_error: Optional[AoaError] = None
         while time.monotonic() < deadline:
+            self._check_cancelled()
             try:
                 connection = self._find_data_accessory()
             except AoaError as error:
@@ -804,6 +883,11 @@ class AoaHost:
                     continue
             else:
                 if connection:
+                    try:
+                        self._check_cancelled()
+                    except _AoaOperationCancelled:
+                        connection.close()
+                        raise
                     self._record_usbdk_fallback_success()
                     if doctor is not None:
                         doctor.emit(
@@ -825,7 +909,7 @@ class AoaHost:
                 and self._enable_usbdk_data_fallback()
             ):
                 continue
-            time.sleep(0.15)
+            self._interruptible_wait(0.15)
         if last_open_error is not None:
             if doctor is not None:
                 final_code = doctor_codes.classify_error(
@@ -870,6 +954,7 @@ class AoaHost:
         raise timeout_error
 
     def _enable_usbdk_data_fallback(self) -> bool:
+        self._check_cancelled()
         if (
             not self.prefer_usbdk
             or self.usb.using_usbdk
@@ -922,6 +1007,7 @@ class AoaHost:
         previous.close()
 
     def _accessory_present(self) -> bool:
+        self._check_cancelled()
         devices = self.usb.devices()
         try:
             return any(
@@ -936,6 +1022,7 @@ class AoaHost:
     def _find_data_accessory(
         self,
     ) -> Optional[AoaConnection | WinUsbConnection]:
+        self._check_cancelled()
         if os.name == "nt" and not self.usb.using_usbdk:
             try:
                 connection = WinUsbConnection.open_first(
@@ -948,11 +1035,13 @@ class AoaHost:
         return self._find_accessory()
 
     def _find_accessory(self) -> Optional[AoaConnection]:
+        self._check_cancelled()
         devices = self.usb.devices()
         keep: Optional[ctypes.c_void_p] = None
         last_open_error: Optional[AoaError] = None
         try:
             for device, descriptor in devices:
+                self._check_cancelled()
                 if (
                     descriptor.idVendor == AOA_VENDOR_ID
                     and descriptor.idProduct in AOA_PRODUCT_IDS
@@ -985,11 +1074,13 @@ class AoaHost:
         return None
 
     def _request_accessory_mode(self) -> bool:
+        self._check_cancelled()
         devices = self.usb.devices()
         doctor = getattr(self, "doctor", None)
         self._last_handshake_outcome = "no-candidate"
         try:
             for device, descriptor in devices:
+                self._check_cancelled()
                 if descriptor.idVendor not in self.vendor_ids:
                     continue
                 if (
@@ -1029,6 +1120,7 @@ class AoaHost:
                     if doctor is not None:
                         doctor.transition(phase)
                     for index, value in enumerate(self.IDENT):
+                        self._check_cancelled()
                         self.usb.control_out(
                             handle,
                             AOA_SEND_IDENT,
@@ -1037,12 +1129,12 @@ class AoaHost:
                         )
                         # A short setup-only pace is harmless to touch latency
                         # and accommodates older Android gadget stacks.
-                        time.sleep(0.02)
-                    time.sleep(0.05)
+                        self._interruptible_wait(0.02)
+                    self._interruptible_wait(0.05)
                     self.usb.control_out(handle, AOA_START)
                     # AOA_START is asynchronous. Keep the control handle alive
                     # briefly while Android begins USB re-enumeration.
-                    time.sleep(0.25)
+                    self._interruptible_wait(0.25)
                     return True
                 except AoaError as error:
                     capability_failure = (
@@ -1157,6 +1249,7 @@ class AoaReceiver:
     """Reconnect-capable background receiver."""
 
     HEARTBEAT_TIMEOUT_SECONDS = 1.5
+    RECONNECT_BACKOFF_SECONDS = 1.0
 
     def __init__(
         self,
@@ -1182,10 +1275,17 @@ class AoaReceiver:
         self._latency = ClockNormalizedLatency()
         self._queue_telemetry = QueueTelemetry()
         self._stop = threading.Event()
-        self._retry_now = threading.Event()
+        self._control_event = threading.Event()
+        self._lifecycle_lock = threading.Lock()
+        self._retry_generation = 0
+        self._handled_retry_generation = 0
         self.finished = threading.Event()
+        self.transport_open = threading.Event()
+        self.session_ready = threading.Event()
+        self.connected = self.session_ready
         self._thread: Optional[threading.Thread] = None
         self._connection: Optional[AoaConnection | WinUsbConnection] = None
+        self._host: Optional[AoaHost] = None
         self._app_handshake_done = False
         self._had_stream_failure = False
 
@@ -1197,15 +1297,22 @@ class AoaReceiver:
 
     def stop(self) -> None:
         self._stop.set()
-        self._retry_now.set()
+        self._control_event.set()
+        self._interrupt_active_read()
         if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
 
-    def request_retry(self) -> None:
-        """Cut the current reconnect backoff short; never lengthens it."""
+    def request_retry(self) -> bool:
+        """Force the current attempt to tear down and reconnect immediately."""
+        with self._lifecycle_lock:
+            if self._stop.is_set() or self.finished.is_set():
+                return False
+            self._retry_generation += 1
+            self._control_event.set()
         if self.doctor is not None:
             self.doctor.emit(doctor_codes.HPT_SESSION_RETRY_REQUESTED)
-        self._retry_now.set()
+        self._interrupt_active_read()
+        return True
 
     def latency_snapshot(self) -> LatencySnapshot:
         return self._latency.snapshot()
@@ -1213,7 +1320,107 @@ class AoaReceiver:
     def queue_telemetry_snapshot(self) -> QueueTelemetrySnapshot:
         return self._queue_telemetry.snapshot()
 
+    def _interrupt_active_read(self) -> None:
+        with self._lifecycle_lock:
+            connection = self._connection
+        if connection is None:
+            return
+        cancel = getattr(connection, "cancel_pending_read", None)
+        try:
+            if callable(cancel):
+                cancel()
+            else:
+                # Built-in backends expose cancellation. This close fallback
+                # keeps simple third-party/test backends interruptible.
+                connection.close()
+        except Exception:
+            pass
+
+    def _retry_pending(self) -> bool:
+        with self._lifecycle_lock:
+            return self._retry_generation != self._handled_retry_generation
+
+    def _consume_retry(self) -> bool:
+        with self._lifecycle_lock:
+            pending = (
+                self._retry_generation != self._handled_retry_generation
+            )
+            self._handled_retry_generation = self._retry_generation
+            if not self._stop.is_set():
+                self._control_event.clear()
+            return pending
+
+    def _set_connection(
+        self, connection: Optional[AoaConnection | WinUsbConnection]
+    ) -> None:
+        with self._lifecycle_lock:
+            self._connection = connection
+
+    def _take_connection(
+        self,
+    ) -> Optional[AoaConnection | WinUsbConnection]:
+        with self._lifecycle_lock:
+            connection = self._connection
+            self._connection = None
+            return connection
+
+    def _set_host(self, host: Optional[AoaHost]) -> None:
+        with self._lifecycle_lock:
+            self._host = host
+
+    def _new_host(self) -> AoaHost:
+        host = AoaHost(
+            use_usbdk=self.use_usbdk,
+            extra_vendor_id=self.extra_vendor_id,
+            winusb_read_depth=self.winusb_read_depth,
+            doctor=self.doctor,
+            cancel_event=self._control_event,
+        )
+        self._set_host(host)
+        backend = "UsbDk" if host.usb.using_usbdk else "WinUSB"
+        try:
+            self.on_status(f"USB backend available: {backend}", False)
+        except Exception:
+            self._close_host(host)
+            raise
+        return host
+
+    def _close_connection(self) -> None:
+        connection = self._take_connection()
+        if connection is None:
+            return
+        try:
+            connection.close()
+        except Exception:
+            pass
+
+    def _close_host(self, host: Optional[AoaHost]) -> None:
+        self._set_host(None)
+        if host is None:
+            return
+        try:
+            host.close()
+        except Exception:
+            pass
+
+    def _release_attempt(self) -> None:
+        self.session_ready.clear()
+        self.transport_open.clear()
+        try:
+            self.on_disconnect()
+        finally:
+            self._close_connection()
+
+    def _report_host_start_failure(self, exc: BaseException) -> None:
+        if self.doctor is not None:
+            event = self.doctor.fail(exc, state=ConnectionState.FAILURE)
+            message = f"{event.summary} {event.action}".strip()
+        else:
+            message = str(exc)
+        self.on_status(message, False)
+
     def _run(self) -> None:
+        host: Optional[AoaHost] = None
         try:
             if os.name == "nt":
                 try:
@@ -1223,28 +1430,28 @@ class AoaReceiver:
                 except Exception:
                     pass
 
-            host = AoaHost(
-                use_usbdk=self.use_usbdk,
-                extra_vendor_id=self.extra_vendor_id,
-                winusb_read_depth=self.winusb_read_depth,
-                doctor=self.doctor,
-            )
-            backend = "UsbDk" if host.usb.using_usbdk else "WinUSB"
-            self.on_status(f"USB backend ready: {backend}", False)
-        except Exception as exc:
-            if self.doctor is not None:
-                event = self.doctor.fail(exc, state=ConnectionState.FAILURE)
-                self.on_status(
-                    f"{event.summary} {event.action}".strip(), False
-                )
-            else:
-                self.on_status(str(exc), False)
-            self.finished.set()
-            return
+            try:
+                host = self._new_host()
+            except Exception as exc:
+                self._report_host_start_failure(exc)
+                self._release_attempt()
+                return
 
-        last_error = ""
-        try:
+            last_error = ""
             while not self._stop.is_set():
+                if self._retry_pending():
+                    self._consume_retry()
+                    self._release_attempt()
+                    self._close_host(host)
+                    try:
+                        host = self._new_host()
+                    except Exception as exc:
+                        self._report_host_start_failure(exc)
+                        break
+
+                retry_attempt = False
+                connection_failed = False
+                terminal_mismatch: Optional[TouchProtocolMismatch] = None
                 try:
                     if self.doctor is not None and last_error:
                         self.doctor.note_reconnect_attempt()
@@ -1253,12 +1460,19 @@ class AoaReceiver:
                             state=ConnectionState.DISCOVERY,
                         )
                     self.on_status("Looking for Android accessory…", False)
-                    self._connection = host.connect()
+                    if self._control_event.is_set():
+                        raise _AoaOperationCancelled()
+                    connection = host.connect()
+                    self._set_connection(connection)
+                    if self._control_event.is_set():
+                        raise _AoaOperationCancelled()
+
                     backend = "UsbDk" if host.usb.using_usbdk else "WinUSB"
-                    if self.doctor is not None:
-                        self.doctor.note_backend(backend)
-                        connection = self._connection
-                        doctor = self.doctor
+                    self.transport_open.set()
+                    self.session_ready.clear()
+                    doctor = self.doctor
+                    if doctor is not None:
+                        doctor.note_backend(backend)
                         doctor.note_accessory(
                             getattr(connection, "device_vid", None),
                             getattr(connection, "device_pid", None),
@@ -1266,7 +1480,7 @@ class AoaReceiver:
                         )
                         doctor.emit(
                             doctor_codes.HPT_USB_BACKEND_SELECTED,
-                            state=ConnectionState.APP_HANDSHAKE,
+                            state=ConnectionState.USB_TRANSPORT_OPEN,
                             detail=(
                                 f"backend={backend} "
                                 f"interface="
@@ -1275,39 +1489,39 @@ class AoaReceiver:
                                 f"out=0x{connection.endpoint_out:02x}"
                             ),
                         )
-                    self.on_status(f"Connected over AOA ({backend})", True)
+                        doctor.transition(
+                            ConnectionState.WAITING_FOR_ANDROID_APP
+                        )
+                    self.on_status(
+                        f"USB connected over {backend} — "
+                        "waiting for Android app…",
+                        False,
+                    )
                     # Keep the accessory path one-way. The phone streams touch
                     # packets to the host; avoiding an idle reverse reader also
                     # avoids composite-driver teardown on affected devices.
                     last_error = ""
-                    doctor = self.doctor
                     handshake_done = False
                     self._app_handshake_done = False
 
-                    def bad_version(_version: int) -> None:
-                        if doctor is not None:
-                            doctor.note_touch_protocol_version(_version)
-                            doctor.emit(
-                                doctor_codes.HPT_APP_PROTOCOL_MISMATCH,
-                                state=ConnectionState.APP_HANDSHAKE,
-                                detail=(
-                                    f"phone sent touch protocol v{_version}; "
-                                    f"PC expects v1"
-                                ),
-                            )
+                    def bad_version(version: int) -> None:
+                        raise TouchProtocolMismatch(version)
 
-                    parser = TouchPacketParser(
-                        on_bad_version=bad_version if doctor else None
-                    )
+                    parser = TouchPacketParser(on_bad_version=bad_version)
                     self._latency.reset()
                     last_packet_at = time.monotonic()
                     while not self._stop.is_set():
-                        chunk = self._connection.read()
+                        if self._control_event.is_set():
+                            raise _AoaOperationCancelled()
+                        chunk = connection.read()
+                        if self._control_event.is_set():
+                            raise _AoaOperationCancelled()
                         arrival_nanos = time.perf_counter_ns()
                         now = time.monotonic()
-                        received_packet = False
-                        for event in parser.feed(chunk):
-                            received_packet = True
+                        parsed_events = list(parser.feed(chunk))
+                        received_packet = bool(parsed_events)
+                        became_ready = False
+                        for event in parsed_events:
                             last_packet_at = now
                             self._queue_telemetry.observe(event)
                             if doctor is not None:
@@ -1315,14 +1529,20 @@ class AoaReceiver:
                                     event.action == ACTION_HEARTBEAT,
                                     observed_at=now,
                                 )
-                                if not handshake_done:
-                                    handshake_done = True
-                                    self._app_handshake_done = True
-                                    doctor.note_touch_protocol_version(1)
+                            if not handshake_done:
+                                handshake_done = True
+                                self._app_handshake_done = True
+                                self.session_ready.set()
+                                became_ready = True
+                                if doctor is not None:
+                                    doctor.note_touch_protocol_version(
+                                        doctor_codes.TOUCH_PROTOCOL_VERSION
+                                    )
                                     doctor.emit(
                                         doctor_codes.HPT_APP_HANDSHAKE_OK,
                                         state=(
-                                            ConnectionState.CONNECTED_STREAM
+                                            ConnectionState
+                                            .PROTOCOL_HANDSHAKE_COMPLETE
                                         ),
                                     )
                                     doctor.emit(
@@ -1330,7 +1550,8 @@ class AoaReceiver:
                                         if self._had_stream_failure
                                         else doctor_codes.HPT_STREAM_CONNECTED,
                                         state=(
-                                            ConnectionState.CONNECTED_STREAM
+                                            ConnectionState
+                                            .TOUCH_STREAM_ACTIVE
                                         ),
                                     )
                             if self.benchmark:
@@ -1345,6 +1566,12 @@ class AoaReceiver:
                             # router ignores them after verifying no wire record
                             # was skipped.
                             self.on_event(event)
+                        if became_ready:
+                            self.on_status(
+                                f"Android app responded over {backend} — "
+                                "touch stream active",
+                                True,
+                            )
                         if not received_packet and (
                             now - last_packet_at
                             >= self.HEARTBEAT_TIMEOUT_SECONDS
@@ -1357,29 +1584,84 @@ class AoaReceiver:
                                     else doctor_codes.HPT_APP_NOT_RESPONDING
                                 ),
                             )
+                except _AoaOperationCancelled:
+                    retry_attempt = not self._stop.is_set()
                 except Exception as exc:
-                    if self._stop.is_set():
-                        break
-                    if self._app_handshake_done:
-                        self._had_stream_failure = True
-                    message = str(exc)
+                    if self._stop.is_set() or self._control_event.is_set():
+                        retry_attempt = not self._stop.is_set()
+                    else:
+                        connection_failed = True
+                        if self._app_handshake_done:
+                            self._had_stream_failure = True
+                        if isinstance(exc, TouchProtocolMismatch):
+                            terminal_mismatch = exc
+                        else:
+                            message = str(exc)
+                            doctor = self.doctor
+                            if doctor is not None:
+                                event = doctor.fail(
+                                    exc, detail="connection attempt"
+                                )
+                                message = (
+                                    f"{event.summary} {event.action}".strip()
+                                )
+                            if message != last_error:
+                                self.on_status(message, False)
+                                last_error = message
+                finally:
+                    self._release_attempt()
+
+                if terminal_mismatch is not None:
+                    message = str(terminal_mismatch)
                     doctor = self.doctor
                     if doctor is not None:
-                        event = doctor.fail(exc, detail="connection attempt")
+                        doctor.note_touch_protocol_version(
+                            terminal_mismatch.received_version
+                        )
+                        event = doctor.fail(
+                            terminal_mismatch,
+                            state=ConnectionState.FAILURE,
+                            detail=(
+                                "phone sent touch protocol "
+                                f"v{terminal_mismatch.received_version}; "
+                                "PC expects "
+                                f"v{terminal_mismatch.expected_version}"
+                            ),
+                        )
                         message = f"{event.summary} {event.action}".strip()
                     if message != last_error:
                         self.on_status(message, False)
                         last_error = message
-                    self.on_disconnect()
-                    if self._retry_now.wait(1):
-                        self._retry_now.clear()
-                finally:
-                    if self._connection:
+
+                if self._stop.is_set():
+                    break
+
+                if retry_attempt or self._retry_pending():
+                    self._consume_retry()
+                    self._close_host(host)
+                    try:
+                        host = self._new_host()
+                    except Exception as exc:
+                        self._report_host_start_failure(exc)
+                        break
+                    continue
+
+                if connection_failed and self._control_event.wait(
+                    self.RECONNECT_BACKOFF_SECONDS
+                ):
+                    if self._stop.is_set():
+                        break
+                    if self._retry_pending():
+                        self._consume_retry()
+                        self._close_host(host)
                         try:
-                            self._connection.close()
-                        except Exception:
-                            pass
-                        self._connection = None
+                            host = self._new_host()
+                        except Exception as exc:
+                            self._report_host_start_failure(exc)
+                            break
         finally:
-            host.close()
+            self.session_ready.clear()
+            self.transport_open.clear()
+            self._close_connection()
+            self._close_host(host)
             self.finished.set()

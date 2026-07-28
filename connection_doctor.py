@@ -1,12 +1,11 @@
 """Connection Doctor: structured diagnosis for the AOA connection flow.
 
 The doctor models the connection as explicit states and records bounded,
-thread-safe diagnostic events with stable codes. User-facing text comes only
-from the static code catalog below; raw exceptions stay in the ``native_error``
-field for the technical appendix of the report. Everything here is local and
-offline: no telemetry, analytics, or network behavior, and reports are
-redacted (no USB serials, user names, computer names, full paths, IP
-addresses, touch coordinates, or keystrokes).
+thread-safe diagnostic events with stable codes. Subscriber delivery uses one
+bounded worker queue so console or UI work never runs on the transport thread.
+Raw exception context remains developer-only in memory; copied reports contain
+stable catalog text and allowlisted structured fields. Everything here is
+local and offline: no telemetry, analytics, or network behavior.
 """
 
 from __future__ import annotations
@@ -15,19 +14,23 @@ import ctypes
 import os
 import platform
 import re
+import sys
 import threading
 import time
 from collections import deque
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
+
+from app_metadata import APP_VERSION
 
 
-WINDOWS_APP_VERSION = "0.1.3"
 TOUCH_PROTOCOL_VERSION = 1
 DEFAULT_HISTORY_CAPACITY = 256
 DEFAULT_DEDUP_WINDOW_SECONDS = 5.0
+DEFAULT_NOTIFICATION_CAPACITY = 64
+DEFAULT_NOTIFICATION_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 
 
 class ConnectionState(str, Enum):
@@ -38,8 +41,12 @@ class ConnectionState(str, Enum):
     REENUMERATION = "usb-reenumeration"
     WINUSB_OPEN = "winusb-open"
     USBDK_FALLBACK = "usbdk-fallback"
-    APP_HANDSHAKE = "android-app-handshake"
-    CONNECTED_STREAM = "connected-stream"
+    USB_TRANSPORT_OPEN = "usb-transport-open"
+    WAITING_FOR_ANDROID_APP = "waiting-for-android-app"
+    APP_HANDSHAKE = "waiting-for-android-app"
+    PROTOCOL_HANDSHAKE_COMPLETE = "protocol-handshake-complete"
+    TOUCH_STREAM_ACTIVE = "touch-stream-active"
+    CONNECTED_STREAM = "touch-stream-active"
     STALLED_STREAM = "stalled-stream"
     DISCONNECT = "disconnect"
     FAILURE = "failure"
@@ -292,9 +299,9 @@ _CODE_IMPLIED_STATE: dict[str, ConnectionState] = {
     HPT_STREAM_STALLED: ConnectionState.STALLED_STREAM,
     HPT_LINK_DISCONNECTED: ConnectionState.DISCONNECT,
     HPT_LINK_DISCONNECT_ACTIVE_INPUT: ConnectionState.DISCONNECT,
-    HPT_STREAM_CONNECTED: ConnectionState.CONNECTED_STREAM,
-    HPT_STREAM_RESUMED: ConnectionState.CONNECTED_STREAM,
-    HPT_APP_HANDSHAKE_OK: ConnectionState.CONNECTED_STREAM,
+    HPT_STREAM_CONNECTED: ConnectionState.TOUCH_STREAM_ACTIVE,
+    HPT_STREAM_RESUMED: ConnectionState.TOUCH_STREAM_ACTIVE,
+    HPT_APP_HANDSHAKE_OK: ConnectionState.PROTOCOL_HANDSHAKE_COMPLETE,
 }
 
 
@@ -310,6 +317,13 @@ class DiagnosticEvent:
     native_error: str = ""
     transient: bool = False
     repeats: int = 0
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _QueuedNotification:
+    event: DiagnosticEvent
+    critical: bool
 
 
 # ---------------------------------------------------------------------------
@@ -327,8 +341,10 @@ _WINUSB_TRANSIENT_CODES = {
     1168,   # ERROR_NOT_FOUND
 }
 _ACTIVE_LINK_STATES = {
-    ConnectionState.APP_HANDSHAKE,
-    ConnectionState.CONNECTED_STREAM,
+    ConnectionState.USB_TRANSPORT_OPEN,
+    ConnectionState.WAITING_FOR_ANDROID_APP,
+    ConnectionState.PROTOCOL_HANDSHAKE_COMPLETE,
+    ConnectionState.TOUCH_STREAM_ACTIVE,
     ConnectionState.STALLED_STREAM,
     ConnectionState.DISCONNECT,
 }
@@ -476,8 +492,87 @@ def redact(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Snapshot
+# Allowlisted public metadata and system snapshot
 # ---------------------------------------------------------------------------
+
+_PUBLIC_METADATA_LABELS = {
+    "received_touch_protocol_version": "received touch protocol",
+    "expected_touch_protocol_version": "expected touch protocol",
+}
+
+
+def _public_metadata_value(key: str, value: object) -> Optional[str]:
+    if key in (
+        "received_touch_protocol_version",
+        "expected_touch_protocol_version",
+    ):
+        if isinstance(value, int) and not isinstance(value, bool):
+            if 0 <= value <= 255:
+                return str(value)
+    return None
+
+
+@dataclass(frozen=True)
+class _SystemInfo:
+    name: str
+    release: str
+    build: str
+
+    @property
+    def display(self) -> str:
+        text = " ".join(part for part in (self.name, self.release) if part)
+        if self.build:
+            text += f" (build {self.build})"
+        return text
+
+
+_SAFE_SYSTEM_VALUE = re.compile(r"[0-9A-Za-z ._-]{1,48}")
+
+
+def _safe_system_value(value: object) -> str:
+    text = str(value or "").strip()
+    return text if _SAFE_SYSTEM_VALUE.fullmatch(text) else ""
+
+
+def _system_info() -> _SystemInfo:
+    name = _safe_system_value(platform.system()) or "unknown"
+    if name != "Windows" or not hasattr(sys, "getwindowsversion"):
+        return _SystemInfo(
+            name=name,
+            release=_safe_system_value(platform.release()),
+            build="",
+        )
+
+    windows = sys.getwindowsversion()
+    build_number = int(windows.build)
+    if build_number >= 22000:
+        release = "11"
+    elif build_number >= 10240:
+        release = "10"
+    else:
+        release = _safe_system_value(platform.release())
+
+    display_version = ""
+    update_revision: Optional[int] = None
+    try:
+        import winreg
+
+        key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+            display_version = _safe_system_value(
+                winreg.QueryValueEx(key, "DisplayVersion")[0]
+            )
+            update_revision = int(winreg.QueryValueEx(key, "UBR")[0])
+    except (ImportError, OSError, TypeError, ValueError):
+        pass
+
+    if display_version:
+        release = f"{release} {display_version}"
+    build = str(build_number)
+    if update_revision is not None and update_revision >= 0:
+        build += f".{update_revision}"
+    return _SystemInfo(name="Windows", release=release, build=build)
+
 
 @dataclass(frozen=True)
 class DoctorSnapshot:
@@ -492,6 +587,9 @@ class DoctorSnapshot:
     android_app_version: str
     aoa_protocol_version: Optional[int]
     touch_protocol_version: Optional[int]
+    os_name: str
+    os_release: str
+    os_build: str
     os_version: str
     touch_packets: int
     heartbeats: int
@@ -510,9 +608,12 @@ class DoctorSnapshot:
 class ConnectionDoctor:
     """Bounded, thread-safe diagnostic event recorder.
 
-    Emission is a lock + deque append plus cheap field stores, so it stays off
-    the latency-critical path: states change a handful of times per session
-    and repeated polling events are merged instead of logged.
+    History updates finish synchronously under one lock. Subscriber callbacks
+    are delivered in order by one worker using a separate bounded workload,
+    never by the emitting transport thread. Repeated queued notifications
+    coalesce. On overflow, a failure or state-changing event displaces the
+    oldest noncritical item; low-priority arrivals are dropped. If the queue
+    contains only critical items, the oldest is evicted to keep memory bounded.
     """
 
     def __init__(
@@ -520,16 +621,27 @@ class ConnectionDoctor:
         capacity: int = DEFAULT_HISTORY_CAPACITY,
         dedup_window_s: float = DEFAULT_DEDUP_WINDOW_SECONDS,
         now: Callable[[], float] = time.monotonic,
+        notification_capacity: int = DEFAULT_NOTIFICATION_CAPACITY,
     ) -> None:
         self._now = now
         self._start = now()
         self._dedup_window_s = dedup_window_s
-        self._events: deque[DiagnosticEvent] = deque(maxlen=capacity)
+        self._events: deque[DiagnosticEvent] = deque(
+            maxlen=max(1, int(capacity))
+        )
         self._recent: dict[tuple[str, ConnectionState], DiagnosticEvent] = {}
         self._listeners: list[Callable[[DiagnosticEvent], None]] = []
         self._lock = threading.Lock()
+        self._notification_condition = threading.Condition(self._lock)
+        self._notification_capacity = max(1, int(notification_capacity))
+        self._notifications: deque[_QueuedNotification] = deque()
+        self._notification_thread: Optional[threading.Thread] = None
+        self._notification_stopping = False
+        self._notification_drain = True
+        self._notification_drops = 0
         self._state = ConnectionState.IDLE
         self._state_since = self._start
+        self._system_info = _system_info()
         self._backend = "unknown"
         self._winusb_status = "unknown"
         self._usbdk_status = "unknown"
@@ -554,7 +666,16 @@ class ConnectionDoctor:
         self, listener: Callable[[DiagnosticEvent], None]
     ) -> None:
         with self._lock:
+            if self._notification_stopping:
+                raise RuntimeError("ConnectionDoctor notifications are shut down")
             self._listeners.append(listener)
+            if self._notification_thread is None:
+                self._notification_thread = threading.Thread(
+                    target=self._notification_loop,
+                    name="Connection Doctor notifications",
+                    daemon=True,
+                )
+                self._notification_thread.start()
 
     # -- emission ----------------------------------------------------------
 
@@ -573,15 +694,20 @@ class ConnectionDoctor:
         exc: Optional[BaseException] = None,
         severity: Optional[Severity] = None,
         transient: Optional[bool] = None,
+        metadata: Optional[Mapping[str, object]] = None,
     ) -> DiagnosticEvent:
+        if code not in _CATALOG:
+            code = HPT_SYS_UNEXPECTED
         entry = catalog_entry(code)
         now = self._now()
         merged: Optional[DiagnosticEvent] = None
         notify: Optional[DiagnosticEvent] = None
+        state_changed = False
         with self._lock:
             if state is None:
                 state = _CODE_IMPLIED_STATE.get(code, self._state)
             if state != self._state:
+                state_changed = True
                 self._state = state
                 self._state_since = now
             # Rate limit: merge repeats of the same code+state arriving
@@ -595,6 +721,12 @@ class ConnectionDoctor:
             ):
                 previous.repeats += 1
                 previous.elapsed_s = elapsed
+                if detail:
+                    previous.detail = detail
+                if exc is not None:
+                    previous.native_error = _native_error_text(exc)
+                if metadata is not None:
+                    previous.metadata = dict(metadata)
                 self._revision += 1
                 merged = previous
                 # Backoff: notify again only at powers-of-two repeat counts.
@@ -617,6 +749,7 @@ class ConnectionDoctor:
                     transient=(
                         entry.transient if transient is None else transient
                     ),
+                    metadata=dict(metadata or {}),
                 )
                 self._events.append(event)
                 self._recent[key] = event
@@ -629,15 +762,18 @@ class ConnectionDoctor:
                     ]
                     for k in stale:
                         del self._recent[k]
-                if entry.severity in (Severity.WARNING, Severity.ERROR):
+                if event.severity in (Severity.WARNING, Severity.ERROR):
                     self._last_code = code
                     self._last_summary = entry.summary
                     self._last_action = entry.action
                 self._revision += 1
                 notify = event
-        # Listeners run outside the lock so they may query the doctor.
-        if notify is not None:
-            self._notify(notify)
+            if notify is not None:
+                self._enqueue_notification_locked(
+                    notify,
+                    state_changed=state_changed,
+                    repeated=merged is not None,
+                )
         return event
 
     def fail(
@@ -650,21 +786,131 @@ class ConnectionDoctor:
         """Emit an event for a raw exception, mapped to a stable code."""
         with self._lock:
             context_state = self._state
+        metadata = getattr(exc, "diagnostic_metadata", None)
+        if not isinstance(metadata, Mapping):
+            metadata = None
         return self.emit(
             code or classify_error(exc, state=context_state),
             state=state,
             detail=detail,
             exc=exc,
+            metadata=metadata,
         )
 
-    def _notify(self, event: DiagnosticEvent) -> None:
-        listeners = list(self._listeners)
-        for listener in listeners:
-            try:
-                listener(event)
-            except Exception:
-                # Diagnostics must never disturb the transport.
-                pass
+    def _enqueue_notification_locked(
+        self,
+        event: DiagnosticEvent,
+        *,
+        state_changed: bool,
+        repeated: bool,
+    ) -> None:
+        if not self._listeners or self._notification_stopping:
+            return
+
+        snapshot = replace(event, metadata=dict(event.metadata))
+        critical = event.severity is Severity.ERROR or state_changed
+        queued = _QueuedNotification(snapshot, critical)
+        key = (event.code, event.state)
+
+        if repeated:
+            for index in range(len(self._notifications) - 1, -1, -1):
+                candidate = self._notifications[index]
+                if (
+                    candidate.event.code,
+                    candidate.event.state,
+                ) == key:
+                    self._notifications[index] = _QueuedNotification(
+                        snapshot, candidate.critical or critical
+                    )
+                    self._notification_condition.notify()
+                    return
+
+        if len(self._notifications) >= self._notification_capacity:
+            if not critical:
+                self._notification_drops += 1
+                return
+            removable = next(
+                (
+                    index
+                    for index, candidate in enumerate(self._notifications)
+                    if not candidate.critical
+                ),
+                None,
+            )
+            if removable is None:
+                self._notifications.popleft()
+            else:
+                del self._notifications[removable]
+            self._notification_drops += 1
+
+        self._notifications.append(queued)
+        self._notification_condition.notify()
+
+    def _notification_loop(self) -> None:
+        while True:
+            with self._notification_condition:
+                while (
+                    not self._notifications
+                    and not self._notification_stopping
+                ):
+                    self._notification_condition.wait()
+                if self._notification_stopping and (
+                    not self._notification_drain
+                    or not self._notifications
+                ):
+                    return
+                queued = self._notifications.popleft()
+                listeners = tuple(self._listeners)
+
+            for listener in listeners:
+                try:
+                    listener(queued.event)
+                except BaseException:
+                    # Diagnostics must never disturb transport or later
+                    # subscribers.
+                    pass
+
+    def shutdown(
+        self,
+        *,
+        wait: bool = True,
+        drain: bool = True,
+        timeout: float = DEFAULT_NOTIFICATION_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Stop subscriber delivery without blocking indefinitely.
+
+        Returns ``True`` once the worker has exited. A callback that is itself
+        blocked cannot be killed safely, so a timed-out worker remains daemon
+        and exits as soon as that callback returns.
+        """
+        with self._notification_condition:
+            self._notification_stopping = True
+            if not drain:
+                self._notification_drain = False
+                self._notifications.clear()
+            thread = self._notification_thread
+            self._notification_condition.notify_all()
+
+        if (
+            wait
+            and thread is not None
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=max(0.0, timeout))
+        return thread is None or not thread.is_alive()
+
+    def close(
+        self,
+        *,
+        wait: bool = True,
+        drain: bool = True,
+        timeout: float = DEFAULT_NOTIFICATION_SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> bool:
+        return self.shutdown(wait=wait, drain=drain, timeout=timeout)
+
+    def notification_drops(self) -> int:
+        with self._lock:
+            return self._notification_drops
 
     # -- status fields (cheap stores; no events on the packet path) --------
 
@@ -751,13 +997,14 @@ class ConnectionDoctor:
                 usbdk_status=self._usbdk_status,
                 aoa_ids=self._aoa_ids,
                 aoa_interface=self._aoa_interface,
-                windows_version=WINDOWS_APP_VERSION,
+                windows_version=APP_VERSION,
                 android_app_version=self._android_app_version,
                 aoa_protocol_version=self._aoa_protocol_version,
                 touch_protocol_version=self._touch_protocol_version,
-                os_version=(
-                    f"{platform.system()} {platform.release()}"
-                ),
+                os_name=self._system_info.name,
+                os_release=self._system_info.release,
+                os_build=self._system_info.build,
+                os_version=self._system_info.display,
                 touch_packets=self._touch_packets,
                 heartbeats=self._heartbeats,
                 packets_flowing=bool(
@@ -786,7 +1033,7 @@ class ConnectionDoctor:
         if mismatch:
             self.emit(
                 HPT_INPUT_PRIVILEGE_MISMATCH,
-                state=ConnectionState.CONNECTED_STREAM,
+                state=ConnectionState.TOUCH_STREAM_ACTIVE,
             )
 
     # -- rendering ---------------------------------------------------------
@@ -803,15 +1050,25 @@ class ConnectionDoctor:
             if snap.packets_flowing
             else "no"
         )
+        touch_protocol = (
+            f"v{snap.touch_protocol_version}"
+            if snap.touch_protocol_version is not None
+            else "unknown"
+        )
+        aoa_protocol = (
+            str(snap.aoa_protocol_version)
+            if snap.aoa_protocol_version is not None
+            else "unknown"
+        )
         lines = [
             "Connection Doctor",
             f"  stage: {snap.state.value} "
             f"({snap.state_elapsed_s:.1f}s in this stage)",
+            f"  operating system: {snap.os_version}",
             f"  windows app: {snap.windows_version}   android app: "
             f"{snap.android_app_version}",
-            f"  protocol: touch v"
-            f"{snap.touch_protocol_version or 'unknown'}   AOA protocol: "
-            f"{snap.aoa_protocol_version or 'unknown'}",
+            f"  protocol: touch {touch_protocol}   "
+            f"AOA protocol: {aoa_protocol}",
             f"  AOA device: {snap.aoa_ids}   interface: {interface}",
             f"  WinUSB: {snap.winusb_status}   UsbDk: {snap.usbdk_status}",
             f"  selected backend: {snap.backend}",
@@ -846,18 +1103,17 @@ class ConnectionDoctor:
                 f"{event.code} {event.severity.value}/{transient}: "
                 f"{redact(event.summary)}{repeats}"
             )
-            if event.detail:
-                lines.append(f"      detail: {redact(event.detail)}")
+            for key, label in _PUBLIC_METADATA_LABELS.items():
+                value = _public_metadata_value(key, event.metadata.get(key))
+                if value is not None:
+                    lines.append(f"      {label}: {value}")
             if event.action:
                 lines.append(f"      action: {redact(event.action)}")
-            if event.native_error:
-                lines.append(
-                    f"      native: {redact(event.native_error)}"
-                )
         lines += [
             "",
             "privacy: contains no USB serial numbers, user or computer names,",
             "full paths, IP addresses, touch coordinates, or keystrokes.",
+            "raw exception text and free-form developer details are omitted.",
             "-----END HOLODORI DIAGNOSTIC REPORT-----",
         ]
         return "\n".join(lines)

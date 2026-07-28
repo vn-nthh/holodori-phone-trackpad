@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import threading
 from ctypes import wintypes
 from typing import Iterable, Optional
 
@@ -57,6 +58,7 @@ WAIT_FAILED = 0xFFFFFFFF
 PIPE_TRANSFER_TIMEOUT = 3
 AUTO_CLEAR_STALL = 2
 DEFAULT_READ_PIPELINE_DEPTH = 2
+DEFAULT_READ_TIMEOUT_MS = 100
 
 
 class WinUsbError(RuntimeError):
@@ -430,6 +432,7 @@ class WinUsbConnection:
         self._next_read_slot = 0
         self._deferred_read_error: Optional[WinUsbError] = None
         self._closed = False
+        self._lifecycle_lock = threading.Lock()
         enabled = wintypes.BOOL(True)
         self.api.winusb.WinUsb_SetPipePolicy(
             self.interface_handle,
@@ -555,7 +558,9 @@ class WinUsbConnection:
         ):
             raise self.api.last_error("set the AOA WinUSB timeout")
 
-    def read(self, size: int = 4096, timeout_ms: int = 500) -> bytes:
+    def read(
+        self, size: int = 4096, timeout_ms: int = DEFAULT_READ_TIMEOUT_MS
+    ) -> bytes:
         if self._closed:
             raise WinUsbError("The AOA WinUSB connection is closed")
         if size <= 0:
@@ -736,10 +741,22 @@ class WinUsbConnection:
         if transferred.value != len(payload):
             raise WinUsbError("AOA configuration write was incomplete")
 
+    def cancel_pending_read(self) -> None:
+        """Cancel overlapped reads without freeing handles on this thread."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            try:
+                self.api.kernel.CancelIoEx(self.file_handle, None)
+            except Exception:
+                # The receiver's bounded read wait remains the fallback.
+                pass
+
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._teardown_read_pipeline()
-        self.api.winusb.WinUsb_Free(self.interface_handle)
-        self.api.kernel.CloseHandle(self.file_handle)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._teardown_read_pipeline()
+            self.api.winusb.WinUsb_Free(self.interface_handle)
+            self.api.kernel.CloseHandle(self.file_handle)

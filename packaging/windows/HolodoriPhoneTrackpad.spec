@@ -10,6 +10,7 @@ project_root = Path(SPECPATH).parents[1]
 datas = [
     (str(project_root / "controller.html"), "."),
     (str(project_root / "blank_screen.html"), "."),
+    (str(project_root / "VERSION"), "."),
 ]
 datas += collect_data_files("libusb_package")
 

@@ -11,7 +11,6 @@ from aoa_transport import (
     ACTION_CANCEL,
     ACTION_DOWN,
     ACTION_HEARTBEAT,
-    ACTION_MOVE,
     ACTION_UP,
     AoaReceiver,
     TouchEvent,
@@ -360,6 +359,7 @@ def run_aoa_mode(
         doctor_view_stop.set()
         receiver.stop()
         router.release_all()
+        doctor.close()
 
     warning_seen = any(
         e.severity in (Severity.WARNING, Severity.ERROR)
