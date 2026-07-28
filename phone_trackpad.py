@@ -875,6 +875,12 @@ def main():
         action="store_true",
         help="Report clock-normalized AOA transport jitter",
     )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="Connection Doctor: live connection-stage view plus 'report' "
+        "and 'retry' console commands",
+    )
 
     args = parser.parse_args()
 
@@ -907,6 +913,7 @@ def main():
             extra_vendor_id=args.usb_vid,
             winusb_read_depth=args.aoa_read_depth,
             benchmark=args.aoa_benchmark,
+            diagnostics=args.diagnose,
         )
         return
 

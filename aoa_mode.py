@@ -1,18 +1,31 @@
 """AOA controller mode shared by the CLI and PC overlay."""
 
 from __future__ import annotations
+
+import sys
+import threading
+import time
 from typing import Callable, Optional
 
 from aoa_transport import (
     ACTION_CANCEL,
     ACTION_DOWN,
     ACTION_HEARTBEAT,
-    ACTION_MOVE,
     ACTION_UP,
     AoaReceiver,
     TouchEvent,
 )
+from connection_doctor import (
+    ConnectionDoctor,
+    ConnectionState,
+    DiagnosticEvent,
+    Severity,
+)
+import connection_doctor as doctor_codes
 from touch_overlay import TouchOverlay
+
+STATUS_REPEAT_WINDOW_SECONDS = 5.0
+DIAGNOSTIC_VIEW_INTERVAL_SECONDS = 3.0
 
 
 class AoaTouchRouter:
@@ -127,6 +140,112 @@ class AoaTouchRouter:
             self.overlay.publish_cancel()
 
 
+class RateLimitedStatusPrinter:
+    """Print connection status lines without spamming repeated retries."""
+
+    def __init__(self, overlay: Optional[TouchOverlay]) -> None:
+        self.overlay = overlay
+        self._last_text: Optional[str] = None
+        self._last_print_at = 0.0
+        self._suppressed = 0
+
+    def __call__(self, text: str, connected: bool) -> None:
+        if self.overlay:
+            self.overlay.publish_status(text, connected)
+        now = time.monotonic()
+        if (
+            text == self._last_text
+            and not connected
+            and now - self._last_print_at < STATUS_REPEAT_WINDOW_SECONDS
+        ):
+            self._suppressed += 1
+            return
+        suffix = f" (x{self._suppressed + 1})" if self._suppressed else ""
+        self._suppressed = 0
+        self._last_text = text
+        self._last_print_at = now
+        print(f"[AOA] {text}{suffix}")
+
+
+def make_disconnect_handler(
+    router: "AoaTouchRouter",
+    doctor: Optional[ConnectionDoctor],
+) -> Callable[[], None]:
+    """Release every held key, then record the diagnostic event."""
+
+    def disconnect() -> None:
+        keys_held = bool(router.key_counts)
+        router.release_all()
+        if doctor is not None and keys_held:
+            doctor.emit(
+                doctor_codes.HPT_LINK_DISCONNECT_ACTIVE_INPUT,
+                state=ConnectionState.DISCONNECT,
+            )
+
+    return disconnect
+
+
+def _print_diagnostic_event(event: DiagnosticEvent) -> None:
+    line = (
+        f"  [doctor +{event.elapsed_s:8.3f}s {event.state.value}] "
+        f"{event.code} ({event.severity.value}): {event.summary}"
+    )
+    if event.repeats:
+        line += f" (x{event.repeats + 1})"
+    print(line)
+    if event.severity is not Severity.INFO and event.action:
+        print(f"      action: {event.action}")
+
+
+def _diagnostic_view_loop(
+    doctor: ConnectionDoctor, stop: threading.Event
+) -> None:
+    last_revision = -1
+    while not stop.wait(DIAGNOSTIC_VIEW_INTERVAL_SECONDS):
+        snapshot = doctor.snapshot()
+        if snapshot.revision == last_revision:
+            continue
+        last_revision = snapshot.revision
+        stream = (
+            f"packets={snapshot.touch_packets} flowing"
+            if snapshot.packets_flowing
+            else "no packets"
+        )
+        print(
+            f"  [doctor] stage={snapshot.state.value} "
+            f"backend={snapshot.backend} "
+            f"winusb={snapshot.winusb_status} "
+            f"usbdk={snapshot.usbdk_status} {stream}"
+        )
+
+
+def _diagnostic_command_loop(
+    doctor: ConnectionDoctor,
+    receiver: AoaReceiver,
+    stop: threading.Event,
+) -> None:
+    print(
+        "  [doctor] live diagnostics on — type 'report', 'retry', or "
+        "'quit' then press Enter."
+    )
+    while not stop.is_set():
+        try:
+            line = sys.stdin.readline()
+        except (OSError, ValueError):
+            return
+        if not line:  # stdin closed
+            return
+        command = line.strip().lower()
+        if command in ("report", "r"):
+            print(doctor.render_report())
+        elif command in ("retry", ""):
+            receiver.request_retry()
+        elif command in ("quit", "q", "exit"):
+            stop.set()
+            receiver.stop()
+            return
+
+
 def run_aoa_mode(
     keys: list[str],
     test_mode: bool,
@@ -140,8 +259,11 @@ def run_aoa_mode(
     extra_vendor_id: Optional[int],
     winusb_read_depth: int,
     benchmark: bool,
+    diagnostics: bool = False,
 ) -> None:
     overlay_config = config.setdefault("pc_overlay", {})
+    doctor = ConnectionDoctor()
+    doctor_view_stop = threading.Event()
 
     def persist_overlay(value: dict) -> None:
         config["pc_overlay"] = dict(value)
@@ -164,23 +286,55 @@ def run_aoa_mode(
         release_key=release_key,
         overlay=overlay,
     )
+    status = RateLimitedStatusPrinter(overlay)
 
-    def status(text: str, connected: bool) -> None:
-        print(f"[AOA] {text}")
-        if overlay:
-            overlay.publish_status(text, connected)
+    privilege_check_started = threading.Event()
+
+    def handle_event(event: TouchEvent) -> None:
+        router.handle(event)
+        # One-shot, off-thread: never gates the key path.
+        if (
+            event.action == ACTION_DOWN
+            and not privilege_check_started.is_set()
+        ):
+            privilege_check_started.set()
+            threading.Thread(
+                target=doctor.check_input_privilege, daemon=True
+            ).start()
+
+    if diagnostics:
+        doctor.subscribe(_print_diagnostic_event)
 
     receiver = AoaReceiver(
-        on_event=router.handle,
+        on_event=handle_event,
         on_status=status,
-        on_disconnect=router.release_all,
+        on_disconnect=make_disconnect_handler(router, doctor),
         lane_count=len(keys),
         use_usbdk=use_usbdk,
         extra_vendor_id=extra_vendor_id,
         winusb_read_depth=winusb_read_depth,
         benchmark=benchmark,
+        doctor=doctor,
     )
     receiver.start()
+
+    view_thread: Optional[threading.Thread] = None
+    command_thread: Optional[threading.Thread] = None
+    if diagnostics and not overlay and sys.stdin and sys.stdin.isatty():
+        view_thread = threading.Thread(
+            target=_diagnostic_view_loop,
+            args=(doctor, doctor_view_stop),
+            name="Connection Doctor view",
+            daemon=True,
+        )
+        view_thread.start()
+        command_thread = threading.Thread(
+            target=_diagnostic_command_loop,
+            args=(doctor, receiver, doctor_view_stop),
+            name="Connection Doctor commands",
+            daemon=True,
+        )
+        command_thread.start()
 
     print("[PLAY] AOA mode active. USB debugging is not required.")
     if overlay:
@@ -191,14 +345,34 @@ def run_aoa_mode(
     try:
         if overlay:
             overlay.run()
+        elif diagnostics and sys.stdin and sys.stdin.isatty():
+            while not (
+                receiver.finished.wait(0.25) or doctor_view_stop.wait(0.01)
+            ):
+                pass
         else:
             while not receiver.finished.wait(0.25):
                 pass
     except KeyboardInterrupt:
         pass
     finally:
+        doctor_view_stop.set()
         receiver.stop()
         router.release_all()
+        doctor.close()
+
+    warning_seen = any(
+        e.severity in (Severity.WARNING, Severity.ERROR)
+        for e in doctor.events()
+    )
+    if diagnostics and warning_seen:
+        print()
+        print(doctor.render_report())
+    elif warning_seen:
+        print(
+            "[doctor] connection problems were recorded; rerun with "
+            "--diagnose for a live view and a copyable diagnostic report."
+        )
 
     stats = router.stats
     print(

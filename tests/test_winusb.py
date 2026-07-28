@@ -32,7 +32,9 @@ class FakeKernel:
         return WAIT_OBJECT_0
 
     def CancelIoEx(self, _file_handle, overlapped):
-        self.cancelled.append(ctypes.addressof(overlapped._obj))
+        self.cancelled.append(
+            None if overlapped is None else ctypes.addressof(overlapped._obj)
+        )
         return True
 
     def CloseHandle(self, handle):
@@ -147,6 +149,22 @@ class WinUsbReadPipelineTests(unittest.TestCase):
             connection.close()
 
         self.assertEqual(len(api.kernel.cancelled), 2)
+
+    def test_cancel_pending_read_cancels_all_file_io(self):
+        api = FakeApi()
+        connection = WinUsbConnection(
+            api=api,
+            file_handle=1,
+            interface_handle=ctypes.c_void_p(2),
+            endpoint_in=0x81,
+            endpoint_out=0x01,
+        )
+
+        connection.cancel_pending_read()
+        connection.cancel_pending_read()
+
+        self.assertEqual(api.kernel.cancelled, [None, None])
+        connection.close()
 
 
 if __name__ == "__main__":

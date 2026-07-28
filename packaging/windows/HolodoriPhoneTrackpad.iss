@@ -3,7 +3,9 @@
 ; uninstalling Holodori never removes USB support another application may use.
 
 #define MyAppName "Holodori Phone Trackpad"
-#define MyAppVersion "0.1.3"
+#define VersionFile FileOpen(AddBackslash(SourcePath) + "..\..\VERSION")
+#define MyAppVersion Trim(FileRead(VersionFile))
+#expr FileClose(VersionFile)
 #define MyAppPublisher "Holodori Phone Trackpad contributors"
 #define MyAppExeName "HolodoriPhoneTrackpad.exe"
 
