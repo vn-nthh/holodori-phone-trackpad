@@ -336,8 +336,6 @@ class TouchProcessor:
                 slot = self._get_slot(self.current_slot)
                 slot.tracking_id = ev_value
                 slot.changed = True
-                if ev_value == -1:
-                    self._handle_finger_up(self.current_slot)
             elif ev_code == ABS_MT_POSITION_X:
                 slot = self._get_slot(self.current_slot)
                 slot.x = ev_value
@@ -349,54 +347,26 @@ class TouchProcessor:
         elif ev_type == EV_SYN and ev_code == SYN_REPORT:
             self._handle_sync()
 
-    def _handle_finger_up(self, slot_idx: int):
-        old_key = self.active_keys.get(slot_idx)
-        if not old_key:
-            self.active_keys.pop(slot_idx, None)
-            return
+    @staticmethod
+    def _counts_for(active_keys):
+        counts = {}
+        for key in active_keys.values():
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
-        try:
-            self._release_lane(old_key, slot_idx)
-        except BaseException:
-            self.release_all_keys()
-            raise
-        self.active_keys.pop(slot_idx, None)
-
-    def _press_lane(
-            self,
-            key: str,
-            slot_idx: int,
-            nx: float,
-            ny: float,
-            dragging: bool):
-        count = max(0, self.key_counts.get(key, 0))
-        if count == 0:
-            if self.test_mode:
-                action = "DRAG ->" if dragging else "PRESS"
-                print(
-                    f"  [DOWN] {action} [{key.upper()}]  "
-                    f"(slot {slot_idx}, pos {nx:.2f},{ny:.2f})"
-                )
-            elif not press_key(key):
-                raise RuntimeError(f"Could not press key {key!r}")
-            self.stats["presses"] += 1
-        self.key_counts[key] = count + 1
-
-    def _release_lane(self, key: str, slot_idx: int):
-        count = max(0, self.key_counts.get(key, 0))
-        if count == 0:
-            self.key_counts.pop(key, None)
-            return
-        if count > 1:
-            self.key_counts[key] = count - 1
-            return
-
+    def _inject_key_down(self, key):
         if self.test_mode:
-            print(f"  [UP] RELEASE [{key.upper()}]  (slot {slot_idx})")
-        elif not release_key(key):
+            print(f"  [DOWN] PRESS [{key.upper()}]  (frame transition)")
+            return
+        if not press_key(key):
+            raise RuntimeError(f"Could not press key {key!r}")
+
+    def _inject_key_up(self, key):
+        if self.test_mode:
+            print(f"  [UP] RELEASE [{key.upper()}]  (frame transition)")
+            return
+        if not release_key(key):
             raise RuntimeError(f"Could not release key {key!r}")
-        self.stats["releases"] += 1
-        self.key_counts.pop(key, None)
 
     def _handle_sync(self):
         self._refresh_config()
@@ -407,41 +377,91 @@ class TouchProcessor:
                 slot.changed = False
             return
 
+        old_active_keys = dict(self.active_keys)
+        old_key_counts = self._counts_for(old_active_keys)
+        next_active_keys = dict(old_active_keys)
+        changed_slots = []
+
+        # First resolve every changed slot to its final owner for this frame.
         for slot_idx, slot in self.slots.items():
             if not slot.changed:
                 continue
             slot.changed = False
 
             if slot.tracking_id == -1:
-                continue
-
-            nx, ny = self._normalize(slot.x, slot.y)
-            new_key = self._find_key(nx, ny)
+                new_key = None
+            else:
+                nx, ny = self._normalize(slot.x, slot.y)
+                new_key = self._find_key(nx, ny)
             old_key = self.active_keys.get(slot_idx)
 
             if new_key != old_key:
-                try:
-                    # Press first on lane transitions so drags have no gap.
-                    if new_key:
-                        self._press_lane(
-                            new_key, slot_idx, nx, ny,
-                            dragging=bool(old_key),
-                        )
-                        if old_key:
-                            self.stats["drags"] += 1
+                changed_slots.append((slot_idx, old_key, new_key))
+                if new_key:
+                    next_active_keys[slot_idx] = new_key
+                else:
+                    next_active_keys.pop(slot_idx, None)
 
-                    if old_key:
-                        self._release_lane(old_key, slot_idx)
+        if not changed_slots:
+            # Repair any stale counts without emitting input.
+            self.key_counts = old_key_counts
+            return
 
-                    if new_key:
-                        self.active_keys[slot_idx] = new_key
-                    else:
-                        self.active_keys.pop(slot_idx, None)
-                except BaseException:
-                    # An injection failure can occur between the two halves of
-                    # a slide. Release every counted lane before propagating.
-                    self.release_all_keys()
-                    raise
+        next_key_counts = self._counts_for(next_active_keys)
+        keys_down = [
+            key for key in next_key_counts
+            if old_key_counts.get(key, 0) == 0
+        ]
+        keys_up = [
+            key for key in old_key_counts
+            if next_key_counts.get(key, 0) == 0
+        ]
+
+        failures = []
+        primary_error = None
+
+        # All key-down transitions precede every key-up transition.
+        for key in keys_down:
+            try:
+                self._inject_key_down(key)
+                self.stats["presses"] += 1
+            except BaseException as exc:
+                failures.append(("down", key, exc))
+                if primary_error is None:
+                    primary_error = exc
+
+        for key in keys_up:
+            try:
+                self._inject_key_up(key)
+                self.stats["releases"] += 1
+            except BaseException as exc:
+                failures.append(("up", key, exc))
+                if primary_error is None:
+                    primary_error = exc
+
+        if failures:
+            # Abort touch ownership and retain one conservative count for each
+            # key that may still be down. Outer cleanup releases this union.
+            possibly_held = dict.fromkeys(
+                list(old_key_counts) + keys_down, 1,
+            )
+            self.active_keys.clear()
+            self.key_counts = possibly_held
+            for slot in self.slots.values():
+                slot.tracking_id = -1
+                slot.changed = False
+            try:
+                primary_error.touch_failures = tuple(failures)
+            except BaseException:
+                pass
+            raise primary_error
+
+        self.active_keys = next_active_keys
+        self.key_counts = next_key_counts
+        self.stats["drags"] += sum(
+            1 for _, old_key, new_key in changed_slots
+            if old_key and new_key
+        )
 
     def release_all_keys(self):
         """Best-effort release of every synthesized key; safe to call twice."""
