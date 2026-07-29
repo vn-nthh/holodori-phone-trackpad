@@ -6,7 +6,7 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 > **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game's Terms of Service.
 
-## Download v0.1.3
+## Download v0.1.4
 
 Install the Windows setup and Android companion app, connect the phone with a
 data-capable USB cable, and approve Android's accessory prompt. The Windows
@@ -16,10 +16,10 @@ administrator prompt and restart only if setup asks you to.
 The PC touch overlay is off by default, keeping play unobstructed. Launch the
 separate **with Touch Overlay** Start-menu shortcut when you want it.
 
-- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpadSetup.exe)
-- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpad.apk)
-- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpad.exe)
-- [View the v0.1.3 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.3)
+- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.4/HolodoriPhoneTrackpadSetup.exe)
+- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.4/HolodoriPhoneTrackpad.apk)
+- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.4/HolodoriPhoneTrackpad.exe)
+- [View the v0.1.4 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.1.4)
 
 The original ADB transport remains available if you prefer it. ADB mode still
 requires USB debugging; AOA mode does not.
@@ -38,7 +38,9 @@ The project is free and open source under the [MIT License](LICENSE).
 - **Low-latency native touch capture**: requests unbuffered Android input dispatch and sends compact binary events
 - **Pipelined WinUSB receive path**: keeps two ordered overlapped reads posted into reusable buffers
 - **Queue safety telemetry**: warns at 8 ms and resynchronizes stale rhythm input at 25 ms
-- **Phone play-zone editor**: drag to position, pinch to resize or rotate, then lock for play
+- **Forgiving lane hit areas**: touches beyond the drawn zone still map to the nearest outer lane
+- **Phone play-zone editor**: drag to move, use sides to stretch one axis, or use corners to resize and rotate
+- **Connection Doctor**: reports stable error codes, safe recovery actions, and privacy-preserving diagnostics
 - **PC touch overlay**: mirrors fingertips inside a custom click-through zone over the game
 - **Drag notes**: presses the new lane before releasing the old lane during transitions
 - **Multi-touch chords**: tracks independent fingers and reference-counts fingers sharing a lane
@@ -57,7 +59,7 @@ The project is free and open source under the [MIT License](LICENSE).
 
 ## Quick start
 
-1. Download the [Windows setup](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpadSetup.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.3/HolodoriPhoneTrackpad.apk).
+1. Download the [Windows setup](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.4/HolodoriPhoneTrackpadSetup.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.1.4/HolodoriPhoneTrackpad.apk).
 2. Run the Windows setup. Leave both **WinUSB low-latency data support** and **UsbDk handshake and fallback support** selected for the recommended configuration. If WinUSB is skipped or cannot be installed, the app automatically carries the AOA data stream over UsbDk. Approve the administrator prompt, then restart Windows only if setup asks you to.
 3. Install the APK on the phone, then launch Holodori Phone Trackpad from the Start menu or desktop shortcut.
 4. When running from source instead, install the PC dependency:
@@ -74,7 +76,7 @@ The project is free and open source under the [MIT License](LICENSE).
    python phone_trackpad.py
    ```
 
-8. On the phone, position the play zone, pinch to resize or rotate, then tap the lock button.
+8. On the phone, drag the play zone to move it, drag a side to stretch one axis, or drag a corner to resize and rotate. Then tap the lock button.
 9. The PC overlay is off by default. To enable it, launch **Holodori Phone Trackpad (with Touch Overlay)** from the Start menu, or run `HolodoriPhoneTrackpad.exe --overlay`. Position and resize it from any edge or corner, then press `Enter`. During play, click **Edit zone** or use `Ctrl+Shift+O` to edit it later.
 
 ## Build distributable packages
