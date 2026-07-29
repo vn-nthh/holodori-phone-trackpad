@@ -31,10 +31,26 @@ from aoa_transport import (
 )
 
 
-def event(action, pointer_id, x, y, sequence=0, flags=None):
+def event(
+    action,
+    pointer_id,
+    x,
+    y,
+    sequence=0,
+    flags=None,
+    phone_event_nanos=0,
+):
     if flags is None:
         flags = FLAG_INSIDE | FLAG_LOCKED
-    return TouchEvent(action, pointer_id, flags, x, y, sequence, 0)
+    return TouchEvent(
+        action,
+        pointer_id,
+        flags,
+        x,
+        y,
+        sequence,
+        phone_event_nanos,
+    )
 
 
 class PacketParserTests(unittest.TestCase):
@@ -119,6 +135,39 @@ class PacketParserTests(unittest.TestCase):
         self.assertEqual(snapshot.resyncs, 2)
         self.assertEqual(snapshot.failsafe_reports, 1)
         self.assertEqual(snapshot.host_recoveries, 0)
+        self.assertIsNone(snapshot.first_warning_from_first_stroke_s)
+
+    def test_queue_warning_is_timed_from_first_stroke(self):
+        telemetry = QueueTelemetry()
+        telemetry.observe(
+            event(
+                ACTION_DOWN,
+                1,
+                0.25,
+                0.5,
+                phone_event_nanos=2_000_000_000,
+            )
+        )
+        telemetry.observe(
+            event(
+                ACTION_HEARTBEAT,
+                0,
+                0.0,
+                0.0,
+                flags=FLAG_QUEUE_DIAGNOSTICS | FLAG_QUEUE_WARNING,
+                phone_event_nanos=5_250_000_000,
+            )
+        )
+
+        snapshot = telemetry.snapshot()
+        self.assertAlmostEqual(
+            snapshot.first_warning_from_first_stroke_s, 3.25
+        )
+
+        telemetry.begin_epoch(recovered=False)
+        self.assertIsNone(
+            telemetry.snapshot().first_warning_from_first_stroke_s
+        )
 
     def test_session_reset_marker_starts_a_recovered_epoch(self):
         packet = TOUCH_PACKET.pack(

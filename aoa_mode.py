@@ -387,6 +387,12 @@ def run_aoa_mode(
             f"{queue_stats.failsafe_reports} failsafe reports, "
             f"{queue_stats.host_recoveries} host recoveries"
         )
+        if queue_stats.first_warning_from_first_stroke_s is not None:
+            print(
+                "[AOA QUEUE] first warning report at "
+                f"{queue_stats.first_warning_from_first_stroke_s:+.3f}s "
+                "from first stroke"
+            )
     if benchmark:
         latency = receiver.latency_snapshot()
         if latency.samples:

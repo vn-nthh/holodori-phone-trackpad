@@ -162,7 +162,9 @@ Touch protocol v2 also gives every host attachment an explicit session boundary.
 The PC ignores records queued for an older process until Android sends a session
 reset. A one-time host attach record tells an already-running Android transport
 to clear its stale queue and report a host recovery. Queue and benchmark
-summaries therefore describe only the current transport epoch.
+summaries therefore describe only the current transport epoch. Experimental
+queue output timestamps the first warning report relative to the first
+`ACTION_DOWN` stroke in that epoch.
 
 For an A/B check of the overlapped read pipeline, run comparable sessions with:
 

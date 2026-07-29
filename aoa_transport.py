@@ -292,6 +292,7 @@ class QueueTelemetrySnapshot:
     resyncs: int
     failsafe_reports: int
     host_recoveries: int
+    first_warning_from_first_stroke_s: Optional[float]
 
 
 class ClockNormalizedLatency:
@@ -504,6 +505,8 @@ class QueueTelemetry:
         self.resyncs = 0
         self.failsafe_reports = 0
         self.host_recoveries = host_recoveries
+        self.first_stroke_nanos: Optional[int] = None
+        self.first_warning_report_nanos: Optional[int] = None
 
     def begin_epoch(self, recovered: bool) -> None:
         self.reset(preserve_host_recoveries=True)
@@ -511,6 +514,12 @@ class QueueTelemetry:
             self.host_recoveries += 1
 
     def observe(self, event: TouchEvent) -> None:
+        if (
+            event.action == ACTION_DOWN
+            and event.phone_event_nanos > 0
+            and self.first_stroke_nanos is None
+        ):
+            self.first_stroke_nanos = event.phone_event_nanos
         if not event.has_queue_diagnostics:
             return
         self.reports += 1
@@ -521,10 +530,23 @@ class QueueTelemetry:
         self.resyncs += event.queue_resyncs
         if event.flags & FLAG_QUEUE_WARNING:
             self.warning_reports += 1
+            if (
+                event.phone_event_nanos > 0
+                and self.first_warning_report_nanos is None
+            ):
+                self.first_warning_report_nanos = event.phone_event_nanos
         if event.flags & FLAG_QUEUE_FAILSAFE:
             self.failsafe_reports += 1
 
     def snapshot(self) -> QueueTelemetrySnapshot:
+        first_warning_offset = None
+        if (
+            self.first_stroke_nanos is not None
+            and self.first_warning_report_nanos is not None
+        ):
+            first_warning_offset = (
+                self.first_warning_report_nanos - self.first_stroke_nanos
+            ) / 1_000_000_000.0
         return QueueTelemetrySnapshot(
             reports=self.reports,
             max_age_ms=self.max_age_nanos / 1_000_000.0,
@@ -533,6 +555,7 @@ class QueueTelemetry:
             resyncs=self.resyncs,
             failsafe_reports=self.failsafe_reports,
             host_recoveries=self.host_recoveries,
+            first_warning_from_first_stroke_s=first_warning_offset,
         )
 
 
