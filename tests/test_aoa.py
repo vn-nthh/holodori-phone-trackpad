@@ -135,7 +135,9 @@ class PacketParserTests(unittest.TestCase):
         self.assertEqual(snapshot.resyncs, 2)
         self.assertEqual(snapshot.failsafe_reports, 1)
         self.assertEqual(snapshot.host_recoveries, 0)
-        self.assertIsNone(snapshot.first_warning_from_first_stroke_s)
+        self.assertEqual(
+            snapshot.warning_reports_from_first_stroke_s, ()
+        )
 
     def test_queue_warning_is_timed_from_first_stroke(self):
         telemetry = QueueTelemetry()
@@ -158,15 +160,28 @@ class PacketParserTests(unittest.TestCase):
                 phone_event_nanos=5_250_000_000,
             )
         )
+        telemetry.observe(
+            event(
+                ACTION_HEARTBEAT,
+                0,
+                0.0,
+                0.0,
+                flags=FLAG_QUEUE_DIAGNOSTICS | FLAG_QUEUE_WARNING,
+                phone_event_nanos=8_500_000_000,
+            )
+        )
 
         snapshot = telemetry.snapshot()
-        self.assertAlmostEqual(
-            snapshot.first_warning_from_first_stroke_s, 3.25
+        self.assertEqual(snapshot.warning_reports, 2)
+        self.assertEqual(
+            snapshot.warning_reports_from_first_stroke_s,
+            (3.25, 6.5),
         )
 
         telemetry.begin_epoch(recovered=False)
-        self.assertIsNone(
-            telemetry.snapshot().first_warning_from_first_stroke_s
+        self.assertEqual(
+            telemetry.snapshot().warning_reports_from_first_stroke_s,
+            (),
         )
 
     def test_session_reset_marker_starts_a_recovered_epoch(self):
