@@ -36,6 +36,7 @@ import ctypes
 import json
 import os
 import shutil
+import shlex
 import time
 import math
 import threading
@@ -193,6 +194,7 @@ class SharedConfig:
         self.playzone = {'x': 0.10, 'y': 0.75, 'w': 0.80, 'h': 0.15, 'r': 0}
         self.locked = False
         self.hw_zones = []  # Pre-computed zone hitboxes in hardware coords
+        self._version = 0   # Bumped on every update so consumers can cache
 
     def update_from_phone(self, data: dict):
         """Called by the HTTP server when the phone sends a config update."""
@@ -203,6 +205,17 @@ class SharedConfig:
                 self.locked = data['locked']
             if 'hw_zones' in data:
                 self.hw_zones = data['hw_zones']
+            self._version += 1
+
+    @property
+    def version(self) -> int:
+        """Monotonic config version; int read is atomic, safe to poll lock-free."""
+        return self._version
+
+    def snapshot_runtime(self) -> Tuple[int, bool, list]:
+        """(version, locked, hw_zones) consistently read under the lock."""
+        with self._lock:
+            return self._version, self.locked, list(self.hw_zones)
 
     def get_dict(self) -> dict:
         """Get a snapshot of the current config."""
@@ -245,10 +258,16 @@ class SlotState:
     x: int = 0
     y: int = 0
     changed: bool = False
+    blocked_until_lift: bool = False
 
 
 class TouchProcessor:
-    """Processes raw getevent data, maps touches to play zone columns, sends keys."""
+    """
+    Process raw getevent frames and map touches to play-zone keys.
+
+    Unlocking cancels all gameplay input. Relocking consumes its boundary
+    frame, and contacts already down must lift before they can press a key.
+    """
 
     def __init__(self, keys: List[str], max_x: int, max_y: int,
                  shared_config: Optional[SharedConfig] = None,
@@ -261,8 +280,30 @@ class TouchProcessor:
 
         self.slots: Dict[int, SlotState] = {}
         self.current_slot = 0
-        self.active_keys: Dict[int, Optional[str]] = {}  # slot -> key name
+        self.active_keys: Dict[int, str] = {}  # slot -> key name
+        self.key_counts: Dict[str, int] = {}
+        self._possibly_held_keys = set()
         self.stats = {"events": 0, "presses": 0, "releases": 0, "drags": 0}
+
+        # Cached view of SharedConfig, refreshed only when its version changes
+        self._cfg_version = -1
+        self._cfg_locked = True
+        self._cfg_zones: list = []
+        self._previous_locked: Optional[bool] = None
+
+    def _refresh_config(self):
+        """Re-read shared config only when it actually changed (cheap hot path)."""
+        cfg = self.shared_config
+        if not cfg:
+            self._cfg_locked = True
+            self._cfg_zones = []
+            return
+        if cfg.version == self._cfg_version:
+            return  # Nothing changed since last sync frame
+        version, locked, zones = cfg.snapshot_runtime()
+        self._cfg_version = version
+        self._cfg_locked = locked
+        self._cfg_zones = zones
 
     def _get_slot(self, idx: int) -> SlotState:
         if idx not in self.slots:
@@ -280,14 +321,12 @@ class TouchProcessor:
         Find which key a hardware-normalized touch point maps to.
         Uses pre-computed zone hitboxes from the phone (already in hw coords).
         """
-        if self.shared_config:
-            zones = self.shared_config.get_hw_zones()
-            if zones:
-                for z in zones:
-                    if (z['x_min'] <= nx <= z['x_max'] and
-                            z['y_min'] <= ny <= z['y_max']):
-                        return z['key']
-                return None
+        if self._cfg_zones:
+            for z in self._cfg_zones:
+                if (z['x_min'] <= nx <= z['x_max'] and
+                        z['y_min'] <= ny <= z['y_max']):
+                    return z['key']
+            return None
 
         # Fallback: divide full screen into equal columns
         n = len(self.keys)
@@ -304,9 +343,9 @@ class TouchProcessor:
             elif ev_code == ABS_MT_TRACKING_ID:
                 slot = self._get_slot(self.current_slot)
                 slot.tracking_id = ev_value
-                slot.changed = True
                 if ev_value == -1:
-                    self._handle_finger_up(self.current_slot)
+                    slot.blocked_until_lift = False
+                slot.changed = True
             elif ev_code == ABS_MT_POSITION_X:
                 slot = self._get_slot(self.current_slot)
                 slot.x = ev_value
@@ -318,57 +357,214 @@ class TouchProcessor:
         elif ev_type == EV_SYN and ev_code == SYN_REPORT:
             self._handle_sync()
 
-    def _handle_finger_up(self, slot_idx: int):
-        old_key = self.active_keys.get(slot_idx)
-        if old_key:
-            if self.test_mode:
-                print(f"  [UP] RELEASE [{old_key.upper()}]  (slot {slot_idx})")
-            else:
-                release_key(old_key)
-            self.stats["releases"] += 1
-            self.active_keys[slot_idx] = None
+    @staticmethod
+    def _counts_for(active_keys):
+        counts = {}
+        for key in active_keys.values():
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def _inject_key_down(self, key):
+        if self.test_mode:
+            print(f"  [DOWN] PRESS [{key.upper()}]  (frame transition)")
+            return
+        if not press_key(key):
+            raise RuntimeError(f"Could not press key {key!r}")
+
+    def _inject_key_up(self, key):
+        if self.test_mode:
+            print(f"  [UP] RELEASE [{key.upper()}]  (frame transition)")
+            return
+        if not release_key(key):
+            raise RuntimeError(f"Could not release key {key!r}")
 
     def _handle_sync(self):
-        # Don't send keys if phone UI is unlocked (user is configuring zones)
-        if self.shared_config and not self.shared_config.is_locked():
-            # Still track positions but don't send keys
-            for slot_idx, slot in self.slots.items():
+        self._refresh_config()
+        previous_locked = self._previous_locked
+        self._previous_locked = self._cfg_locked
+
+        if previous_locked is True and not self._cfg_locked:
+            # Unlocking the editor is an input-cancellation boundary. Preserve
+            # raw touch coordinates for visualization, but discard every
+            # gameplay owner and consume this frame even if a key-up fails.
+            try:
+                self.release_all_keys(
+                    preserve_touches=True,
+                    raise_on_failure=True,
+                )
+            finally:
+                self.active_keys.clear()
+                self.key_counts.clear()
+                for slot in self.slots.values():
+                    slot.changed = False
+                    slot.blocked_until_lift = False
+            return
+
+        # Don't send keys if phone UI is unlocked (user is configuring zones).
+        if not self._cfg_locked:
+            # Raw slot state remains current for editor visualization, while
+            # every gameplay transition is consumed at its SYN_REPORT.
+            for slot in self.slots.values():
                 slot.changed = False
             return
 
+        if previous_locked is False:
+            # Relocking starts a new gameplay epoch. Fingers that are already
+            # touching must lift before their slot can synthesize input.
+            self.active_keys.clear()
+            self.key_counts.clear()
+            for slot in self.slots.values():
+                slot.blocked_until_lift = slot.tracking_id != -1
+                slot.changed = False
+            return
+
+        old_active_keys = dict(self.active_keys)
+        old_key_counts = self._counts_for(old_active_keys)
+        next_active_keys = dict(old_active_keys)
+        changed_slots = []
+
+        # First resolve every changed slot to its final owner for this frame.
         for slot_idx, slot in self.slots.items():
             if not slot.changed:
                 continue
             slot.changed = False
 
-            if slot.tracking_id == -1:
+            if slot.blocked_until_lift:
                 continue
 
-            nx, ny = self._normalize(slot.x, slot.y)
-            new_key = self._find_key(nx, ny)
+            if slot.tracking_id == -1:
+                new_key = None
+            else:
+                nx, ny = self._normalize(slot.x, slot.y)
+                new_key = self._find_key(nx, ny)
             old_key = self.active_keys.get(slot_idx)
 
             if new_key != old_key:
-                # Press the new key before releasing the old one so drag
-                # transitions never leave a gap (no mid-slide interruptions).
+                changed_slots.append((slot_idx, old_key, new_key))
                 if new_key:
-                    if self.test_mode:
-                        action = "DRAG ->" if old_key else "PRESS"
-                        print(f"  [DOWN] {action} [{new_key.upper()}]  (slot {slot_idx}, pos {nx:.2f},{ny:.2f})")
-                    else:
-                        press_key(new_key)
-                    self.stats["presses"] += 1
-                    if old_key:
-                        self.stats["drags"] += 1
+                    next_active_keys[slot_idx] = new_key
+                else:
+                    next_active_keys.pop(slot_idx, None)
 
-                if old_key:
-                    if self.test_mode:
-                        print(f"  [UP] RELEASE [{old_key.upper()}]  (drag out, slot {slot_idx})")
-                    else:
-                        release_key(old_key)
-                    self.stats["releases"] += 1
+        if not changed_slots:
+            # Repair any stale counts without emitting input.
+            self.key_counts = old_key_counts
+            return
 
-                self.active_keys[slot_idx] = new_key
+        next_key_counts = self._counts_for(next_active_keys)
+        keys_down = [
+            key for key in next_key_counts
+            if old_key_counts.get(key, 0) == 0
+        ]
+        keys_up = [
+            key for key in old_key_counts
+            if next_key_counts.get(key, 0) == 0
+        ]
+
+        failures = []
+        primary_error = None
+
+        # All key-down transitions precede every key-up transition.
+        for key in keys_down:
+            try:
+                self._inject_key_down(key)
+                self._possibly_held_keys.add(key)
+                self.stats["presses"] += 1
+            except BaseException as exc:
+                # A failed injection can be ambiguous: retain the key for
+                # conservative final cleanup even if SendInput reported false.
+                self._possibly_held_keys.add(key)
+                failures.append(("down", key, exc))
+                if primary_error is None:
+                    primary_error = exc
+
+        for key in keys_up:
+            try:
+                self._inject_key_up(key)
+                self._possibly_held_keys.discard(key)
+                self.stats["releases"] += 1
+            except BaseException as exc:
+                self._possibly_held_keys.add(key)
+                failures.append(("up", key, exc))
+                if primary_error is None:
+                    primary_error = exc
+
+        if failures:
+            # Abort touch ownership. The separate possibly-held set retains
+            # every ambiguous physical key for outer cleanup without treating
+            # uncertainty as active touch ownership or a reference count.
+            self.active_keys.clear()
+            self.key_counts.clear()
+            for slot in self.slots.values():
+                slot.tracking_id = -1
+                slot.changed = False
+                slot.blocked_until_lift = False
+            try:
+                primary_error.touch_failures = tuple(failures)
+            except BaseException:
+                pass
+            raise primary_error
+
+        self.active_keys = next_active_keys
+        self.key_counts = next_key_counts
+        self.stats["drags"] += sum(
+            1 for _, old_key, new_key in changed_slots
+            if old_key and new_key
+        )
+
+    def release_all_keys(
+            self,
+            *,
+            preserve_touches: bool = False,
+            raise_on_failure: bool = False):
+        """Best-effort release of every synthesized key; safe to call twice."""
+        candidates = set(self._possibly_held_keys)
+        candidates.update(
+            key for key, count in self.key_counts.items() if count > 0
+        )
+        candidates.update(self.active_keys.values())
+        held_keys = [key for key in self.keys if key in candidates]
+        held_keys.extend(sorted(candidates.difference(held_keys)))
+
+        # Clear gameplay ownership before injection. Each candidate remains in
+        # the conservative set until its key-up succeeds, so a failed cleanup
+        # is retryable without reviving slot ownership or reference counts.
+        self.key_counts.clear()
+        self.active_keys.clear()
+        self._possibly_held_keys.update(held_keys)
+        if not preserve_touches:
+            for slot in self.slots.values():
+                slot.tracking_id = -1
+                slot.changed = False
+                slot.blocked_until_lift = False
+
+        failures = []
+        primary_error = None
+        for key in held_keys:
+            try:
+                if self.test_mode:
+                    released = True
+                else:
+                    released = release_key(key)
+                if not released:
+                    raise RuntimeError(f"Could not release key {key!r}")
+                self._possibly_held_keys.discard(key)
+            except BaseException as exc:
+                self._possibly_held_keys.add(key)
+                failures.append(("up", key, exc))
+                if primary_error is None:
+                    primary_error = exc
+            finally:
+                self.stats["releases"] += 1
+
+        if primary_error is not None and raise_on_failure:
+            try:
+                primary_error.touch_failures = tuple(failures)
+            except BaseException:
+                pass
+            raise primary_error
+
+        return [key for _, key, _ in failures]
 
 
 # ============================================================================
@@ -386,6 +582,116 @@ def run_adb(*args, timeout=10) -> str:
         sys.exit(1)
     except subprocess.TimeoutExpired:
         return ""
+
+
+class AdbCommandError(RuntimeError):
+    """Sanitized checked-ADB failure safe for ordinary user output."""
+
+    def __init__(self, args, reason):
+        super().__init__(reason)
+        self.args_list = tuple(args)
+        self.reason = reason
+
+
+def run_adb_checked(*args, timeout=10) -> str:
+    """Run ADB and raise a sanitized error for any detectable failure."""
+    cmd = [ADB_PATH] + list(args)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+        )
+    except OSError as exc:
+        raise AdbCommandError(args, "ADB is unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AdbCommandError(args, "command timed out") from exc
+
+    if result.returncode != 0:
+        raise AdbCommandError(
+            args, f"command exited with status {result.returncode}",
+        )
+
+    output = "\n".join((result.stdout or "", result.stderr or "")).lower()
+    failure_markers = (
+        "error:", "exception occurred", "permission denial",
+        "unknown command", "not found",
+    )
+    if any(marker in output for marker in failure_markers):
+        raise AdbCommandError(args, "device rejected the command")
+
+    return (result.stdout or "").strip()
+
+
+@dataclass(frozen=True)
+class CleanupFailure:
+    component: str
+    detail: str
+    recovery_command: Optional[str] = None
+
+
+class AdbReverseMapping:
+    """Own exactly one reverse mapping created by this process."""
+
+    def __init__(self, port: int):
+        self.device_endpoint = f"tcp:{port}"
+        self.host_endpoint = f"tcp:{port}"
+        self._owned = False
+
+    @property
+    def owned(self) -> bool:
+        return self._owned
+
+    def _mapping_exists(self) -> bool:
+        listing = run_adb_checked("reverse", "--list", timeout=5)
+        for line in listing.splitlines():
+            fields = line.split()
+            if (len(fields) >= 2
+                    and fields[-2:] == [
+                        self.device_endpoint, self.host_endpoint,
+                    ]):
+                return True
+        return False
+
+    def create(self):
+        if self._owned:
+            return
+        if self._mapping_exists():
+            raise AdbCommandError(
+                ("reverse", self.device_endpoint, self.host_endpoint),
+                f"{self.device_endpoint} already has a reverse mapping",
+            )
+
+        try:
+            run_adb_checked(
+                "reverse", self.device_endpoint, self.host_endpoint, timeout=5,
+            )
+        except AdbCommandError:
+            # A timeout can race command completion. Since preflight proved the
+            # endpoint was free, a newly visible exact mapping is ours.
+            try:
+                self._owned = self._mapping_exists()
+            except AdbCommandError:
+                pass
+            raise
+        else:
+            self._owned = True
+
+    def remove(self):
+        if not self._owned:
+            return []
+        try:
+            run_adb_checked(
+                "reverse", "--remove", self.device_endpoint, timeout=5,
+            )
+        except AdbCommandError as exc:
+            return [
+                CleanupFailure(
+                    "ADB reverse mapping",
+                    exc.reason,
+                    f"adb reverse --remove {self.device_endpoint}",
+                ),
+            ]
+        self._owned = False
+        return []
 
 
 def check_device_connected() -> bool:
@@ -494,7 +800,7 @@ class ControllerHandler(http.server.BaseHTTPRequestHandler):
         pass  # Suppress HTTP request logs
 
 
-def start_controller_server(shared_config: SharedConfig):
+def start_controller_server(shared_config: SharedConfig, session):
     """
     Start HTTP server, set up ADB reverse tunnel, and open controller in Chrome.
     Returns the server instance or None on failure.
@@ -511,61 +817,231 @@ def start_controller_server(shared_config: SharedConfig):
         print(f"   [WARN] Could not start HTTP server on port {SERVER_PORT}: {e}")
         return None
 
+    session.server = server
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
+    session.server_running = True
+    session.controller_started = True
     print(f"   HTTP server on 127.0.0.1:{SERVER_PORT}")
 
     # ADB reverse tunnel: phone's localhost:PORT -> PC's localhost:PORT
-    result = run_adb("reverse", f"tcp:{SERVER_PORT}", f"tcp:{SERVER_PORT}")
-    print(f"   ADB reverse tunnel: {result if result else 'OK'}")
+    session.reverse_mapping.create()
+    print("   ADB reverse tunnel: OK")
 
     # Open controller in Chrome on the phone
     print("   Opening controller UI in Chrome...")
-    run_adb("shell", "am", "start",
-            "-a", "android.intent.action.VIEW",
-            "-d", f"http://localhost:{SERVER_PORT}/")
+    run_adb_checked(
+        "shell", "am", "start",
+        "-a", "android.intent.action.VIEW",
+        "-d", f"http://localhost:{SERVER_PORT}/",
+        timeout=10,
+    )
     time.sleep(1.5)
 
-    # Dim screen brightness
-    run_adb("shell", "settings", "put", "system", "screen_brightness_mode", "0")
-    run_adb("shell", "settings", "put", "system", "screen_brightness", "1")
-
-    # Stay awake / immersive / DND so nothing interrupts gameplay
-    prevent_interruptions()
+    # NOTE: screen brightness is intentionally left untouched — we never
+    # dim the user's screen.
 
     print("   [OK] Controller UI active on phone.")
     return server
 
 
-def prevent_interruptions():
+_SETTING_READ_FAILED = object()
+
+
+def _get_setting(namespace: str, key: str):
+    """Read a setting without mistaking an ADB failure for an unset value."""
+    try:
+        out = run_adb_checked(
+            "shell", "settings", "get", namespace, key, timeout=5,
+        )
+    except AdbCommandError:
+        return _SETTING_READ_FAILED
+    return None if out in ("", "null") else out
+
+
+class PhoneSettingsBackup:
+    """
+    Snapshot the user's phone settings before we override them for gameplay,
+    and restore the exact original values afterwards (never hardcoded guesses).
+    """
+
+    _KEYS = (
+        ("system", "screen_off_timeout"),
+        ("global", "stay_on_while_plugged_in"),
+        ("global", "policy_control"),
+        ("global", "zen_mode"),
+    )
+    _LABELS = {
+        ("system", "screen_off_timeout"): "screen timeout",
+        ("global", "stay_on_while_plugged_in"): "stay-awake mode",
+        ("global", "policy_control"): "immersive-mode policy",
+        ("global", "zen_mode"): "Do Not Disturb",
+    }
+
+    # zen_mode int -> `cmd notification set_dnd` argument.
+    _ZEN_MODES = {0: "off", 1: "priority", 2: "none", 3: "alarms"}
+
+    def __init__(self):
+        self._originals: Dict[Tuple[str, str], Optional[str]] = {}
+        self._pending_restore = set()
+        self._snapshotted = False
+
+    def snapshot(self):
+        if self._snapshotted:
+            return []
+
+        failures = []
+        for namespace, key in self._KEYS:
+            value = _get_setting(namespace, key)
+            if value is _SETTING_READ_FAILED:
+                failures.append(
+                    CleanupFailure(
+                        self._LABELS[(namespace, key)],
+                        "original value could not be read; override skipped",
+                    ),
+                )
+                continue
+            self._originals[(namespace, key)] = value
+
+        self._snapshotted = True
+        return failures
+
+    @classmethod
+    def _zen_mode(cls, value):
+        if value is None:
+            return None
+        try:
+            return cls._ZEN_MODES.get(int(value))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _manual_command(args):
+        return "adb " + " ".join(shlex.quote(str(arg)) for arg in args)
+
+    def _restore_args(self, setting):
+        namespace, key = setting
+        value = self._originals[setting]
+        if key == "zen_mode":
+            mode = self._zen_mode(value)
+            if mode is None:
+                return None
+            return ("shell", "cmd", "notification", "set_dnd", mode)
+        if value is None:
+            return ("shell", "settings", "delete", namespace, key)
+        return ("shell", "settings", "put", namespace, key, value)
+
+    def apply_overrides(self):
+        """Apply only overrides whose exact original state can be restored."""
+        failures = []
+        overrides = {
+            ("system", "screen_off_timeout"): (
+                "shell", "settings", "put", "system",
+                "screen_off_timeout", "2147483647",
+            ),
+            ("global", "stay_on_while_plugged_in"): (
+                "shell", "settings", "put", "global",
+                "stay_on_while_plugged_in", "2",
+            ),
+            ("global", "policy_control"): (
+                "shell", "settings", "put", "global",
+                "policy_control", "immersive.full=*",
+            ),
+            ("global", "zen_mode"): (
+                "shell", "cmd", "notification", "set_dnd", "priority",
+            ),
+        }
+
+        for setting in self._KEYS:
+            if setting not in self._originals:
+                continue
+            if (setting[1] == "zen_mode"
+                    and self._zen_mode(self._originals[setting]) is None):
+                failures.append(
+                    CleanupFailure(
+                        self._LABELS[setting],
+                        "original state is unknown; DND override skipped",
+                    ),
+                )
+                continue
+
+            # A timeout or transport error can be ambiguous, so retain the
+            # original for cleanup before attempting the write.
+            self._pending_restore.add(setting)
+            try:
+                run_adb_checked(*overrides[setting], timeout=5)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except AdbCommandError as exc:
+                restore_args = self._restore_args(setting)
+                failures.append(
+                    CleanupFailure(
+                        self._LABELS[setting],
+                        f"override failed: {exc.reason}",
+                        self._manual_command(restore_args),
+                    ),
+                )
+            except Exception:
+                restore_args = self._restore_args(setting)
+                failures.append(
+                    CleanupFailure(
+                        self._LABELS[setting],
+                        "override failed unexpectedly",
+                        self._manual_command(restore_args),
+                    ),
+                )
+        return failures
+
+    def restore(self):
+        failures = []
+        for setting in self._KEYS:
+            if setting not in self._pending_restore:
+                continue
+            args = self._restore_args(setting)
+            try:
+                run_adb_checked(*args, timeout=5)
+            except AdbCommandError as exc:
+                failures.append(
+                    CleanupFailure(
+                        self._LABELS[setting],
+                        f"could not be restored: {exc.reason}",
+                        self._manual_command(args),
+                    ),
+                )
+            except BaseException:
+                failures.append(
+                    CleanupFailure(
+                        self._LABELS[setting],
+                        "could not be restored: unexpected command failure",
+                        self._manual_command(args),
+                    ),
+                )
+            else:
+                self._pending_restore.remove(setting)
+        return failures
+
+    @property
+    def pending_settings(self):
+        return set(self._pending_restore)
+
+
+def prevent_interruptions(backup: PhoneSettingsBackup):
     """
     Keep the phone fully available for touch input:
     - screen stays on while USB-powered
     - immersive sticky (hide nav/status bars)
     - Do Not Disturb (block notification popups)
     - very long screen-off timeout as a fallback
+    Original values must be snapshotted first (PhoneSettingsBackup).
+    Brightness is deliberately NOT touched.
     """
     print("   Suppressing interruptions (stay-on / immersive / DND)...")
-    # Stay awake while USB is connected (reverted on cleanup)
-    run_adb("shell", "svc", "power", "stayon", "usb")
-    # Long timeout fallback if stayon isn't honored
-    run_adb("shell", "settings", "put", "system", "screen_off_timeout", "2147483647")
-    # Hide system bars so edge swipes / status bar don't steal focus
-    run_adb("shell", "settings", "put", "global", "policy_control", "immersive.full=*")
-    # Block heads-up notifications during play
-    run_adb("shell", "cmd", "notification", "set_dnd", "priority")
+    return backup.apply_overrides()
 
 
-def restore_phone():
-    """Restore phone brightness, power, DND, immersive mode, and ADB tunnel."""
-    run_adb("shell", "settings", "put", "system", "screen_brightness", "128")
-    run_adb("shell", "settings", "put", "system", "screen_brightness_mode", "1")
-    # Re-enable normal screen-off / auto-brightness behavior
-    run_adb("shell", "svc", "power", "stayon", "false")
-    run_adb("shell", "settings", "put", "system", "screen_off_timeout", "60000")
-    run_adb("shell", "settings", "delete", "global", "policy_control")
-    run_adb("shell", "cmd", "notification", "set_dnd", "off")
-    run_adb("reverse", "--remove-all")
+def restore_phone(backup: Optional[PhoneSettingsBackup] = None):
+    """Restore backed-up phone settings; reverse mappings are owned elsewhere."""
+    return backup.restore() if backup else []
 
 
 # ============================================================================
@@ -640,104 +1116,255 @@ def _boost_process_priority():
         pass
 
 
-def stream_events(device: str, processor: TouchProcessor):
+class AdbInputTransport:
+    """Own the ADB getevent process so outer cleanup controls teardown."""
+
+    def __init__(self):
+        self.proc = None
+        self.stopping = False
+
+    @staticmethod
+    def _open_stream(cmd):
+        try:
+            return subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except FileNotFoundError as exc:
+            raise AdbCommandError(cmd[1:], "ADB is unavailable") from exc
+
+    def open(self, device):
+        self.stopping = False
+        self.proc = self._open_stream(
+            [ADB_PATH, "exec-out", "getevent", device],
+        )
+        mode = "high-rate exec-out"
+
+        time.sleep(0.08)
+        if self.proc.poll() is not None:
+            try:
+                self.proc.wait(timeout=0.5)
+            except BaseException:
+                pass
+            self.proc = self._open_stream(
+                [ADB_PATH, "shell", "getevent", device],
+            )
+            mode = "shell fallback"
+        return mode
+
+    def stop_input_processing(self):
+        self.stopping = True
+
+    def terminate(self):
+        proc = self.proc
+        if proc is None:
+            return []
+
+        failures = []
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+        except BaseException:
+            failures.append(
+                CleanupFailure(
+                    "ADB input stream",
+                    "could not terminate the getevent process",
+                ),
+            )
+        finally:
+            try:
+                stopped = proc.poll() is not None
+            except BaseException:
+                stopped = False
+            if stopped:
+                self.proc = None
+        return failures
+
+
+def stream_events(
+        device: str,
+        processor: TouchProcessor,
+        transport: AdbInputTransport):
     """
     Stream touch events at maximum rate.
 
     Prefers `adb exec-out getevent` (no PTY line-buffering) for higher
     effective polling rate / lower lag. Falls back to `adb shell getevent`.
     """
-    def _open_stream(cmd):
-        return subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=0,  # unbuffered reads
-        )
-
-    # exec-out = raw, unbuffered binary pipe from device (no PTY)
-    cmd = [ADB_PATH, "exec-out", "getevent", device]
-    mode = "high-rate exec-out"
-    try:
-        proc = _open_stream(cmd)
-    except FileNotFoundError:
-        print(f"[ERROR] ADB not found at '{ADB_PATH}'")
-        sys.exit(1)
-
-    # If exec-out dies immediately, fall back to shell mode
-    time.sleep(0.08)
-    if proc.poll() is not None:
-        try:
-            proc.wait(timeout=0.5)
-        except Exception:
-            pass
-        cmd = [ADB_PATH, "shell", "getevent", device]
-        mode = "shell fallback"
-        try:
-            proc = _open_stream(cmd)
-        except FileNotFoundError:
-            print(f"[ERROR] ADB not found at '{ADB_PATH}'")
-            sys.exit(1)
-
+    mode = transport.open(device)
+    proc = transport.proc
     _boost_process_priority()
     print(f"[PLAY] Streaming touch events ({mode})... (Ctrl+C to stop)\n")
 
     event_count = 0
     start_time = time.time()
-    # Read raw bytes and split lines ourselves — avoids Python text-IO buffering
+    # Read raw bytes and split lines ourselves — avoids Python text-IO
+    # buffering, and parse hex straight from bytes (no per-line decode).
     leftover = b""
+    process_event = processor.process_event
 
-    try:
-        while True:
-            chunk = proc.stdout.read(4096)
-            if not chunk:
-                if proc.poll() is not None:
-                    break
+    while not transport.stopping:
+        chunk = proc.stdout.read(65536)
+        if not chunk:
+            if proc.poll() is not None:
+                break
+            continue
+
+        lines = (leftover + chunk).split(b"\n")
+        leftover = lines.pop()
+
+        for raw_line in lines:
+            # getevent line: "/dev/input/eventN: 0003 0035 00000123"
+            # rsplit from the right grabs the 3 hex fields without
+            # touching the device-path prefix.
+            parts = raw_line.rsplit(None, 3)
+            try:
+                ev_type = int(parts[-3], 16)
+                ev_code = int(parts[-2], 16)
+                ev_value = int(parts[-1], 16)
+            except (ValueError, IndexError):
                 continue
+            if ev_value >= 0x80000000:
+                ev_value -= 0x100000000
+            process_event(ev_type, ev_code, ev_value)
 
-            leftover += chunk
-            while True:
-                nl = leftover.find(b"\n")
-                if nl < 0:
-                    break
-                raw_line = leftover[:nl]
-                leftover = leftover[nl + 1:]
-                line = raw_line.decode("utf-8", errors="ignore").strip()
-                if not line:
-                    continue
+        event_count += len(lines)
+        if event_count >= 3000:
+            elapsed = time.time() - start_time
+            rate = event_count / elapsed if elapsed > 0 else 0
+            s = processor.stats
+            state_str = "PLAYING" if processor._cfg_locked else "CONFIGURING"
+            print(f"  [STATS] {s['presses']} presses | {s['releases']} releases | "
+                  f"{s['drags']} drags | {rate:.0f} ev/s | {state_str}")
+            event_count = 0
+            start_time = time.time()
 
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
 
-                try:
-                    ev_type = int(parts[-3], 16)
-                    ev_code = int(parts[-2], 16)
-                    ev_value = int(parts[-1], 16)
-                    if ev_value >= 0x80000000:
-                        ev_value -= 0x100000000
-                    processor.process_event(ev_type, ev_code, ev_value)
-                except ValueError:
-                    continue
+class AdbCleanupSession:
+    """Idempotent owner of every ADB-mode cleanup resource."""
 
-                event_count += 1
-                if event_count % 3000 == 0:
-                    elapsed = time.time() - start_time
-                    rate = event_count / elapsed if elapsed > 0 else 0
-                    s = processor.stats
-                    locked = processor.shared_config.is_locked() if processor.shared_config else True
-                    state_str = "PLAYING" if locked else "CONFIGURING"
-                    print(f"  [STATS] {s['presses']} presses | {s['releases']} releases | "
-                          f"{s['drags']} drags | {rate:.0f} ev/s | {state_str}")
+    def __init__(self):
+        self.processor = None
+        self.input_transport = AdbInputTransport()
+        self.reverse_mapping = AdbReverseMapping(SERVER_PORT)
+        self.settings_backup = PhoneSettingsBackup()
+        self.server = None
+        self.server_running = False
+        self.controller_started = False
 
-    except KeyboardInterrupt:
-        pass
-    finally:
-        proc.terminate()
+    def _stop_input_processing(self):
+        failures = []
+        self.input_transport.stop_input_processing()
+        server = self.server
+        if server is None:
+            return failures
+
         try:
-            proc.wait(timeout=2)
-        except Exception:
-            proc.kill()
+            if self.server_running:
+                server.shutdown()
+        except BaseException:
+            failures.append(
+                CleanupFailure(
+                    "controller server",
+                    "could not stop the controller server",
+                ),
+            )
+        try:
+            server.server_close()
+        except BaseException:
+            failures.append(
+                CleanupFailure(
+                    "controller server",
+                    "could not close the controller server",
+                ),
+            )
+        self.server = None
+        self.server_running = False
+        return failures
+
+    def cleanup(self):
+        failures = []
+
+        # 1. Stop input processing.
+        try:
+            failures.extend(self._stop_input_processing())
+        except BaseException:
+            failures.append(
+                CleanupFailure(
+                    "input processing",
+                    "could not stop input processing",
+                ),
+            )
+
+        # 2. Release all synthesized keys.
+        if self.processor is not None:
+            try:
+                for key in self.processor.release_all_keys():
+                    failures.append(
+                        CleanupFailure(
+                            f"key {key!r}",
+                            "key-up injection failed",
+                        ),
+                    )
+            except BaseException:
+                failures.append(
+                    CleanupFailure(
+                        "synthesized keys",
+                        "unexpected key-release failure",
+                    ),
+                )
+
+        # 3. Terminate or cancel the ADB input stream.
+        try:
+            failures.extend(self.input_transport.terminate())
+        except BaseException:
+            failures.append(
+                CleanupFailure(
+                    "ADB input stream",
+                    "unexpected stream-termination failure",
+                ),
+            )
+
+        # 4. Remove only this session's owned reverse mapping.
+        try:
+            failures.extend(self.reverse_mapping.remove())
+        except BaseException:
+            failures.append(
+                CleanupFailure(
+                    "ADB reverse mapping",
+                    "unexpected reverse-mapping cleanup failure",
+                ),
+            )
+
+        # 5. Restore every setting that may have been changed.
+        try:
+            failures.extend(self.settings_backup.restore())
+        except BaseException:
+            failures.append(
+                CleanupFailure(
+                    "phone settings",
+                    "unexpected restoration failure",
+                ),
+            )
+
+        return failures
+
+
+def report_failures(title, failures):
+    if not failures:
+        return
+    print(f"[WARN] {title}:")
+    for failure in failures:
+        print(f"  - {failure.component}: {failure.detail}")
+        if failure.recovery_command:
+            print(f"    Manual recovery: {failure.recovery_command}")
 
 
 # ============================================================================
@@ -845,97 +1472,123 @@ def main():
         return
 
     global ADB_PATH
-    ADB_PATH = resolve_adb_path(args.adb)
-
-    # Check device
-    print("[PHONE] Checking for connected Android device...")
-    if not check_device_connected():
-        print("[ERROR] No Android device found!")
-        print()
-        print("  1. Connect phone via USB")
-        print("  2. Enable USB Debugging (Settings -> Developer Options)")
-        print("  3. Accept the USB debugging prompt on phone")
-        print("  4. Run again")
-        sys.exit(1)
-    print("[OK] Device connected!")
-
-    # Detect touch device
-    device = args.device or config.get("device")
-    max_x = config.get("max_x", 0)
-    max_y = config.get("max_y", 0)
-
-    if device and max_x and max_y:
-        print(f"[INFO] Using saved device: {device} ({max_x}x{max_y})")
-    else:
-        device, max_x, max_y = detect_touch_device()
-
-    if not device:
-        print("[ERROR] Could not detect touchscreen!")
-        print("   Run: adb shell getevent -lp")
-        print("   Then use: --device /dev/input/eventN")
-        sys.exit(1)
-
-    if max_x == 0 or max_y == 0:
-        max_x, max_y = 1080, 2400
-        print(f"[WARN] Using default resolution {max_x}x{max_y}")
-
-    print(f"[OK] Touchscreen: {device} ({max_x} x {max_y})")
-
-    # Setup keys and save config
-    config.update({"device": device, "max_x": max_x, "max_y": max_y, "keys": keys})
-    save_config(config)
-
-    # Create shared config for phone<->PC communication
-    shared_config = SharedConfig(keys)
-
-    # Load saved playzone if available
-    if "playzone" in config:
-        shared_config.update_from_phone({"playzone": config["playzone"]})
-
-    # Start controller UI on phone
-    server = None
-    interruptions_armed = False
-    if not args.no_ui:
-        print("[PHONE] Setting up controller UI...")
-        server = start_controller_server(shared_config)
-        if server:
-            interruptions_armed = True
-            print()
-            print("  >> Configure the play zone on your phone,")
-            print("  >> then tap the LOCK button to start playing.")
-            print()
-    else:
-        # Still suppress phone interruptions even without the controller UI
-        prevent_interruptions()
-        interruptions_armed = True
-
-    # Create processor
-    processor = TouchProcessor(
-        keys=keys, max_x=max_x, max_y=max_y,
-        shared_config=shared_config, test_mode=args.test,
-    )
-
-    print_banner(keys, device, max_x, max_y, args.test)
-
-    # Run
+    session = AdbCleanupSession()
+    shared_config = None
     try:
-        stream_events(device, processor)
+        ADB_PATH = resolve_adb_path(args.adb)
+
+        print("[PHONE] Checking for connected Android device...")
+        if not check_device_connected():
+            print("[ERROR] No Android device found!")
+            print()
+            print("  1. Connect phone via USB")
+            print("  2. Enable USB Debugging (Settings -> Developer Options)")
+            print("  3. Accept the USB debugging prompt on phone")
+            print("  4. Run again")
+            sys.exit(1)
+        print("[OK] Device connected!")
+
+        device = args.device or config.get("device")
+        max_x = config.get("max_x", 0)
+        max_y = config.get("max_y", 0)
+
+        if device and max_x and max_y:
+            print(f"[INFO] Using saved device: {device} ({max_x}x{max_y})")
+        else:
+            device, max_x, max_y = detect_touch_device()
+
+        if not device:
+            print("[ERROR] Could not detect touchscreen!")
+            print("   Run: adb shell getevent -lp")
+            print("   Then use: --device /dev/input/eventN")
+            sys.exit(1)
+
+        if max_x == 0 or max_y == 0:
+            max_x, max_y = 1080, 2400
+            print(f"[WARN] Using default resolution {max_x}x{max_y}")
+
+        print(f"[OK] Touchscreen: {device} ({max_x} x {max_y})")
+        config.update({
+            "device": device,
+            "max_x": max_x,
+            "max_y": max_y,
+            "keys": keys,
+        })
+        save_config(config)
+
+        shared_config = SharedConfig(keys)
+        if "playzone" in config:
+            shared_config.update_from_phone({"playzone": config["playzone"]})
+
+        setup_failures = session.settings_backup.snapshot()
+        report_failures("Phone setup incomplete", setup_failures)
+
+        apply_phone_overrides = args.no_ui
+        if not args.no_ui:
+            print("[PHONE] Setting up controller UI...")
+            server = start_controller_server(shared_config, session)
+            apply_phone_overrides = server is not None
+            if server:
+                print()
+                print("  >> Configure the play zone on your phone,")
+                print("  >> then tap the LOCK button to start playing.")
+                print()
+
+        if apply_phone_overrides:
+            setup_failures = prevent_interruptions(
+                session.settings_backup,
+            )
+            report_failures("Phone setup incomplete", setup_failures)
+
+        processor = TouchProcessor(
+            keys=keys,
+            max_x=max_x,
+            max_y=max_y,
+            shared_config=shared_config,
+            test_mode=args.test,
+        )
+        session.processor = processor
+
+        print_banner(keys, device, max_x, max_y, args.test)
+        stream_events(device, processor, session.input_transport)
     except KeyboardInterrupt:
         pass
+    finally:
+        try:
+            cleanup_failures = session.cleanup()
+        except BaseException:
+            cleanup_failures = [
+                CleanupFailure(
+                    "cleanup coordinator",
+                    "unexpected cleanup failure",
+                ),
+            ]
 
-    # Cleanup
-    s = processor.stats
-    print(f"\n[STATS] Session: {s['presses']} presses, {s['releases']} releases, {s['drags']} drags")
+        if session.controller_started and shared_config is not None:
+            try:
+                config["playzone"] = shared_config.get_playzone()
+                save_config(config)
+            except BaseException:
+                cleanup_failures.append(
+                    CleanupFailure(
+                        "play-zone configuration",
+                        "could not save the final play-zone configuration",
+                    ),
+                )
 
-    if server or interruptions_armed:
-        print("[CLEANUP] Restoring phone...")
-        if server:
-            # Save final playzone config
-            config["playzone"] = shared_config.get_playzone()
-            save_config(config)
-        restore_phone()
+        if session.processor is not None:
+            s = session.processor.stats
+            print(
+                f"\n[STATS] Session: {s['presses']} presses, "
+                f"{s['releases']} releases, {s['drags']} drags"
+            )
 
-    print("[BYE] Done!")
+        report_failures("Cleanup incomplete", cleanup_failures)
+
+    if cleanup_failures:
+        print("[BYE] Exited with incomplete cleanup; see warnings above.")
+    else:
+        print("[BYE] Done!")
 
 
 if __name__ == "__main__":
