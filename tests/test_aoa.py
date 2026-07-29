@@ -158,6 +158,31 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(snapshot.samples, 2)
         self.assertAlmostEqual(snapshot.mean_excess_ms, 15.0)
         self.assertAlmostEqual(snapshot.max_excess_ms, 20.0)
+        self.assertAlmostEqual(snapshot.p50_excess_ms, 15.0)
+        self.assertAlmostEqual(snapshot.p90_excess_ms, 19.0)
+        self.assertAlmostEqual(snapshot.p95_excess_ms, 19.5)
+        self.assertAlmostEqual(snapshot.p99_excess_ms, 19.9)
+        self.assertAlmostEqual(snapshot.p99_9_excess_ms, 19.99)
+
+    def test_clock_normalization_reports_tail_percentiles(self):
+        latency = ClockNormalizedLatency()
+        start_phone = 100_000_000_000
+        host_epoch = 5_000_000_000_000
+        for delay_ms in range(1_001):
+            phone = start_phone + delay_ms * 1_000_000
+            latency.observe(
+                phone,
+                host_epoch + phone + delay_ms * 1_000_000,
+                True,
+            )
+
+        snapshot = latency.snapshot()
+        self.assertEqual(snapshot.samples, 1_001)
+        self.assertAlmostEqual(snapshot.p50_excess_ms, 500.0)
+        self.assertAlmostEqual(snapshot.p90_excess_ms, 900.0)
+        self.assertAlmostEqual(snapshot.p95_excess_ms, 950.0)
+        self.assertAlmostEqual(snapshot.p99_excess_ms, 990.0)
+        self.assertAlmostEqual(snapshot.p99_9_excess_ms, 999.0)
 
     def test_clock_normalization_removes_long_session_clock_skew(self):
         latency = ClockNormalizedLatency()

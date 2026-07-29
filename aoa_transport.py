@@ -274,6 +274,11 @@ class LatencySnapshot:
     samples: int
     mean_excess_ms: float
     max_excess_ms: float
+    p50_excess_ms: float
+    p90_excess_ms: float
+    p95_excess_ms: float
+    p99_excess_ms: float
+    p99_9_excess_ms: float
     window_seconds: float
     session_samples: int
 
@@ -387,6 +392,22 @@ class ClockNormalizedLatency:
         intercept = mean_y - slope * mean_x
         return reference_phone, reference_offset, intercept, slope
 
+    @staticmethod
+    def _percentile(
+        sorted_values: list[float], percentile: float
+    ) -> float:
+        """Return a linearly interpolated percentile from sorted values."""
+        if not sorted_values:
+            return 0.0
+        position = (len(sorted_values) - 1) * percentile / 100.0
+        lower = int(position)
+        upper = min(lower + 1, len(sorted_values) - 1)
+        fraction = position - lower
+        return (
+            sorted_values[lower] * (1.0 - fraction)
+            + sorted_values[upper] * fraction
+        )
+
     def snapshot(self) -> LatencySnapshot:
         observations = list(self._observations)
         if not observations:
@@ -394,6 +415,11 @@ class ClockNormalizedLatency:
                 samples=0,
                 mean_excess_ms=0.0,
                 max_excess_ms=0.0,
+                p50_excess_ms=0.0,
+                p90_excess_ms=0.0,
+                p95_excess_ms=0.0,
+                p99_excess_ms=0.0,
+                p99_9_excess_ms=0.0,
                 window_seconds=0.0,
                 session_samples=self._session_samples,
             )
@@ -427,7 +453,8 @@ class ClockNormalizedLatency:
         ]
         samples = len(excess_nanos)
         mean_ns = sum(excess_nanos) / samples if samples else 0.0
-        max_ns = max(excess_nanos, default=0.0)
+        sorted_excess_nanos = sorted(excess_nanos)
+        max_ns = sorted_excess_nanos[-1] if sorted_excess_nanos else 0.0
         window_seconds = max(
             0.0,
             (
@@ -440,6 +467,21 @@ class ClockNormalizedLatency:
             samples=samples,
             mean_excess_ms=mean_ns / 1_000_000.0,
             max_excess_ms=max_ns / 1_000_000.0,
+            p50_excess_ms=(
+                self._percentile(sorted_excess_nanos, 50.0) / 1_000_000.0
+            ),
+            p90_excess_ms=(
+                self._percentile(sorted_excess_nanos, 90.0) / 1_000_000.0
+            ),
+            p95_excess_ms=(
+                self._percentile(sorted_excess_nanos, 95.0) / 1_000_000.0
+            ),
+            p99_excess_ms=(
+                self._percentile(sorted_excess_nanos, 99.0) / 1_000_000.0
+            ),
+            p99_9_excess_ms=(
+                self._percentile(sorted_excess_nanos, 99.9) / 1_000_000.0
+            ),
             window_seconds=window_seconds,
             session_samples=self._session_samples,
         )

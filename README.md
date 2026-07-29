@@ -175,7 +175,9 @@ The benchmark estimates phone-to-PC clock-rate drift from minimum-delay samples
 inside a bounded 60-second rolling window. Its result is recent excess
 delay/jitter relative to the fastest corrected sample, not absolute one-way
 latency. The rolling window prevents longer sessions from inflating the result
-through clock skew or cumulative maximums.
+through clock skew or cumulative maximums. Experimental benchmark output also
+reports linearly interpolated p50, p90, p95, p99, and p99.9 tail latency from
+the same rolling window.
 
 ## Legacy ADB fallback
 

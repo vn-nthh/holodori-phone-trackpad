@@ -397,6 +397,14 @@ def run_aoa_mode(
                 f"{latency.samples} recent touch records"
             )
             print(
+                "            "
+                f"p50 {latency.p50_excess_ms:.3f} ms, "
+                f"p90 {latency.p90_excess_ms:.3f} ms, "
+                f"p95 {latency.p95_excess_ms:.3f} ms, "
+                f"p99 {latency.p99_excess_ms:.3f} ms, "
+                f"p99.9 {latency.p99_9_excess_ms:.3f} ms"
+            )
+            print(
                 f"            Rolling window {latency.window_seconds:.1f}s; "
                 f"{latency.session_samples} session records total. "
                 "Fastest recent sample is the zero baseline."
