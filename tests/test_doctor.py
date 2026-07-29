@@ -11,10 +11,18 @@ from unittest import mock
 from app_metadata import APP_VERSION
 from aoa_mode import AoaTouchRouter, make_disconnect_handler
 from aoa_transport import (
+    ACTION_CANCEL,
     ACTION_DOWN,
     ACTION_HEARTBEAT,
+    FLAG_HOST_RECOVERY,
     FLAG_INSIDE,
     FLAG_LOCKED,
+    FLAG_QUEUE_DIAGNOSTICS,
+    FLAG_QUEUE_FAILSAFE,
+    FLAG_QUEUE_RESYNC,
+    FLAG_QUEUE_WARNING,
+    FLAG_SESSION_RESET,
+    HOST_ATTACH_REQUEST,
     AOA_GET_PROTOCOL,
     AOA_SEND_IDENT,
     AoaError,
@@ -32,9 +40,31 @@ from connection_doctor import (
 )
 
 
-def packet(action, pointer_id=0, flags=0, sequence=0, version=1):
+def packet(action, pointer_id=0, flags=0, sequence=0, version=None,
+           x=0, y=0, event_nanos=0):
+    if version is None:
+        version = dc.TOUCH_PROTOCOL_VERSION
     return TOUCH_PACKET.pack(
-        TOUCH_MAGIC, version, action, pointer_id, flags, 0, 0, sequence, 0
+        TOUCH_MAGIC,
+        version,
+        action,
+        pointer_id,
+        flags,
+        x,
+        y,
+        sequence,
+        event_nanos,
+    )
+
+
+def session_reset(sequence=0, recovered=False):
+    return packet(
+        ACTION_CANCEL,
+        flags=(
+            FLAG_SESSION_RESET
+            | (FLAG_HOST_RECOVERY if recovered else 0)
+        ),
+        sequence=sequence,
     )
 
 
@@ -805,6 +835,7 @@ class StreamingConnection:
         self._idle = idle
         self.closed = False
         self.reads = 0
+        self.writes = []
 
     def read(self):
         self.reads += 1
@@ -815,6 +846,9 @@ class StreamingConnection:
         if self._idle:
             time.sleep(0.002)
         return b""
+
+    def write(self, payload, timeout_ms=1000):
+        self.writes.append((payload, timeout_ms))
 
     def close(self):
         self.closed = True
@@ -835,6 +869,7 @@ class RetryConnection:
         self.cancelled = threading.Event()
         self.closed = threading.Event()
         self.cancel_calls = 0
+        self.writes = []
 
     def read(self):
         if self._script:
@@ -845,6 +880,9 @@ class RetryConnection:
         else:
             time.sleep(0.002)
         return b""
+
+    def write(self, payload, timeout_ms=1000):
+        self.writes.append((payload, timeout_ms))
 
     def cancel_pending_read(self):
         self.cancel_calls += 1
@@ -889,7 +927,7 @@ def make_retry_host(plans):
 def run_receiver(connection_or_error=None, connections=None, doctor=None,
                  stop_after_events=3, heartbeat_timeout=None,
                  stop_codes=(), deadline_s=8.0,
-                 stop_delay_after_code_s=0.0):
+                 stop_delay_after_code_s=0.0, benchmark=False):
     """Drive AoaReceiver._run synchronously with a fake host.
 
     Stops once enough touch events were handled, or once the doctor records
@@ -919,6 +957,7 @@ def run_receiver(connection_or_error=None, connections=None, doctor=None,
         on_status=lambda text, connected: statuses.append((text, connected)),
         on_disconnect=on_disconnect,
         lane_count=2,
+        benchmark=benchmark,
         doctor=doctor,
     )
     if heartbeat_timeout is not None:
@@ -1016,6 +1055,7 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         doctor = ConnectionDoctor()
         connection = StreamingConnection(
             script=[
+                session_reset(sequence=0),
                 packet(ACTION_HEARTBEAT, sequence=1),
                 packet(ACTION_HEARTBEAT, sequence=2),
             ],
@@ -1053,10 +1093,81 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         )
         self.assertLess(waiting_index, ready_index)
 
+    def test_new_host_epoch_discards_old_android_backlog(self):
+        stale_report = packet(
+            ACTION_HEARTBEAT,
+            pointer_id=9,
+            flags=(
+                FLAG_QUEUE_DIAGNOSTICS
+                | FLAG_QUEUE_WARNING
+                | FLAG_QUEUE_RESYNC
+                | FLAG_QUEUE_FAILSAFE
+            ),
+            sequence=50,
+            x=32767,
+            y=67,
+            event_nanos=1_000_000_000,
+        )
+        stale_down = packet(
+            ACTION_DOWN,
+            pointer_id=2,
+            flags=FLAG_INSIDE | FLAG_LOCKED,
+            sequence=51,
+            x=7500,
+            event_nanos=1_001_000_000,
+        )
+        recovered_epoch = session_reset(sequence=52, recovered=True)
+        fresh_report = packet(
+            ACTION_HEARTBEAT,
+            pointer_id=1,
+            flags=FLAG_QUEUE_DIAGNOSTICS,
+            sequence=53,
+            x=500,
+            event_nanos=1_002_000_000,
+        )
+        fresh_down = packet(
+            ACTION_DOWN,
+            pointer_id=3,
+            flags=FLAG_INSIDE | FLAG_LOCKED,
+            sequence=54,
+            x=2500,
+            event_nanos=1_003_000_000,
+        )
+        connection = StreamingConnection(
+            script=[
+                stale_report + stale_down,
+                recovered_epoch + fresh_report + fresh_down,
+            ],
+            idle=True,
+        )
+
+        receiver, _, _, _, pressed, _ = run_receiver(
+            connection,
+            stop_after_events=2,
+            benchmark=True,
+        )
+
+        self.assertEqual(pressed, ["a"])
+        self.assertEqual(
+            connection.writes,
+            [(HOST_ATTACH_REQUEST, 500)],
+        )
+        queue = receiver.queue_telemetry_snapshot()
+        self.assertEqual(queue.reports, 1)
+        self.assertAlmostEqual(queue.max_age_ms, 5.0)
+        self.assertEqual(queue.max_depth, 1)
+        self.assertEqual(queue.warning_reports, 0)
+        self.assertEqual(queue.resyncs, 0)
+        self.assertEqual(queue.failsafe_reports, 0)
+        self.assertEqual(queue.host_recoveries, 1)
+        latency = receiver.latency_snapshot()
+        self.assertEqual(latency.samples, 1)
+        self.assertEqual(latency.session_samples, 1)
+
     def test_protocol_mismatch_is_reported(self):
         doctor = ConnectionDoctor()
         connection = StreamingConnection(
-            script=[packet(ACTION_HEARTBEAT, sequence=1, version=2)],
+            script=[packet(ACTION_HEARTBEAT, sequence=1, version=1)],
             idle=True,
         )
         receiver, statuses, _, _, _, _ = run_receiver(
@@ -1076,12 +1187,12 @@ class ReceiverDiagnosticTests(unittest.TestCase):
             for e in doctor.events()
             if e.code == dc.HPT_APP_PROTOCOL_MISMATCH
         ][0]
-        self.assertIn("v2", event.detail)
+        self.assertIn("v1", event.detail)
         self.assertEqual(
             event.metadata,
             {
-                "received_touch_protocol_version": 2,
-                "expected_touch_protocol_version": 1,
+                "received_touch_protocol_version": 1,
+                "expected_touch_protocol_version": 2,
             },
         )
         self.assertFalse(event.transient)
@@ -1090,7 +1201,7 @@ class ReceiverDiagnosticTests(unittest.TestCase):
             doctor.snapshot().last_code,
             dc.HPT_APP_PROTOCOL_MISMATCH,
         )
-        self.assertEqual(doctor.snapshot().touch_protocol_version, 2)
+        self.assertEqual(doctor.snapshot().touch_protocol_version, 1)
         self.assertFalse(any(connected for _, connected in statuses))
         self.assertFalse(receiver.session_ready.is_set())
         self.assertTrue(connection.closed)
@@ -1099,7 +1210,7 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         doctor = ConnectionDoctor()
         down = TOUCH_PACKET.pack(
             TOUCH_MAGIC,
-            1,
+            dc.TOUCH_PROTOCOL_VERSION,
             ACTION_DOWN,
             1,
             FLAG_INSIDE | FLAG_LOCKED,
@@ -1111,10 +1222,10 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         mismatch = packet(
             ACTION_HEARTBEAT,
             sequence=2,
-            version=2,
+            version=1,
         )
         connection = StreamingConnection(
-            script=[down, mismatch],
+            script=[session_reset(sequence=0), down, mismatch],
             idle=True,
         )
 
@@ -1146,7 +1257,10 @@ class ReceiverDiagnosticTests(unittest.TestCase):
     def test_stalled_stream_after_data(self):
         doctor = ConnectionDoctor()
         connection = StreamingConnection(
-            script=[packet(ACTION_HEARTBEAT, sequence=1)],
+            script=[
+                session_reset(sequence=0),
+                packet(ACTION_HEARTBEAT, sequence=1),
+            ],
             idle=True,
         )
         run_receiver(
@@ -1205,7 +1319,10 @@ class ReceiverDiagnosticTests(unittest.TestCase):
             native_code=-4,
         )
         live = StreamingConnection(
-            script=[packet(ACTION_HEARTBEAT, sequence=1)],
+            script=[
+                session_reset(sequence=0),
+                packet(ACTION_HEARTBEAT, sequence=1),
+            ],
             idle=True,
         )
         receiver, _, _, _, _, _ = run_receiver(
@@ -1228,11 +1345,11 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         doctor = ConnectionDoctor()
         # Place the touch in lane 1 of 2 (x=0.25 -> key "a").
         down_packet = TOUCH_PACKET.pack(
-            TOUCH_MAGIC, 1, ACTION_DOWN, 1,
+            TOUCH_MAGIC, dc.TOUCH_PROTOCOL_VERSION, ACTION_DOWN, 1,
             FLAG_INSIDE | FLAG_LOCKED, 2500, 5000, 1, 0,
         )
         dead = StreamingConnection(
-            script=[down_packet],
+            script=[session_reset(sequence=0), down_packet],
             error=WinUsbError(
                 "The device is not connected",
                 operation="read the AOA WinUSB stream",
@@ -1240,7 +1357,11 @@ class ReceiverDiagnosticTests(unittest.TestCase):
             ),
         )
         live = StreamingConnection(
-            script=[packet(ACTION_HEARTBEAT, sequence=1)], idle=True
+            script=[
+                session_reset(sequence=0),
+                packet(ACTION_HEARTBEAT, sequence=1),
+            ],
+            idle=True,
         )
         receiver, _, _, router, down, up = run_receiver(
             connections=[dead, live],
@@ -1308,7 +1429,9 @@ class RetrySemanticsTests(unittest.TestCase):
             flags=FLAG_INSIDE | FLAG_LOCKED,
             sequence=1,
         )
-        connection = RetryConnection(script=[down])
+        connection = RetryConnection(
+            script=[session_reset(sequence=0), down]
+        )
         host_type = make_retry_host([connection, "discovery"])
         held = threading.Event()
         released = threading.Event()

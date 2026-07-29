@@ -39,10 +39,10 @@ Each phone-to-PC record is 24 bytes, little-endian:
 | Offset | Type | Meaning |
 |---:|---|---|
 | 0 | 4 bytes | `HPT1` magic |
-| 4 | `u8` | Protocol version, currently `1` |
+| 4 | `u8` | Protocol version, currently `2` |
 | 5 | `u8` | Action: heartbeat `0`, down `1`, move `2`, up `3`, cancel `4` |
 | 6 | `u8` | Android pointer ID |
-| 7 | `u8` | Flags: inside zone `0x01`, play locked `0x02` |
+| 7 | `u8` | Flags; see below |
 | 8 | `i16` | Zone-local X multiplied by 10,000 |
 | 10 | `i16` | Zone-local Y multiplied by 10,000 |
 | 12 | `u32` | Monotonic sequence |
@@ -55,6 +55,17 @@ On Android 14 and newer, the timestamp comes from the nanosecond-precision
 motion-event API. Older Android versions retain the millisecond-source fallback.
 Phone and PC timestamps have different origins and must be aligned before
 benchmark comparisons.
+
+Protocol v2 adds an explicit transport epoch. The first record after Android
+opens the accessory is `CANCEL` with flag `0x04` (session reset). The PC does
+not accept touch input until that marker arrives. Each PC process sends one
+8-byte `HPTC` attach record on the accessory OUT endpoint. A later attach to
+the same Android transport makes Android drop the stale queue and send another
+session reset with flag `0x08` (host recovery). This prevents records and
+diagnostics from an old PC process from leaking into a new session.
+
+The remaining low flag bits are inside zone `0x01`, play locked `0x02`,
+session reset `0x04`, and host recovery `0x08`.
 
 Heartbeat records carry backward-compatible queue diagnostics. Flag `0x80`
 marks the fields as valid, pointer ID contains maximum queue depth, X contains

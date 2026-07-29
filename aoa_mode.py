@@ -378,24 +378,30 @@ def run_aoa_mode(
         f"{router.sequence_gaps} dropped records"
     )
     queue_stats = receiver.queue_telemetry_snapshot()
-    if queue_stats.reports:
+    if queue_stats.reports or queue_stats.host_recoveries:
         print(
             f"[AOA QUEUE] max {queue_stats.max_age_ms:.2f} ms old, "
             f"depth {queue_stats.max_depth}, "
             f"{queue_stats.warning_reports} warning reports, "
             f"{queue_stats.resyncs} resyncs, "
-            f"{queue_stats.failsafe_reports} failsafe reports"
+            f"{queue_stats.failsafe_reports} failsafe reports, "
+            f"{queue_stats.host_recoveries} host recoveries"
         )
     if benchmark:
         latency = receiver.latency_snapshot()
         if latency.samples:
             print(
-                "[AOA BENCH] clock-normalized event-to-host excess: "
+                "[AOA BENCH] clock-skew-corrected event-to-host excess: "
                 f"mean {latency.mean_excess_ms:.3f} ms, "
                 f"max {latency.max_excess_ms:.3f} ms across "
-                f"{latency.samples} touch records"
+                f"{latency.samples} recent touch records"
             )
             print(
-                "            Fastest sample is the zero baseline; this is "
-                "relative jitter, not absolute one-way latency."
+                f"            Rolling window {latency.window_seconds:.1f}s; "
+                f"{latency.session_samples} session records total. "
+                "Fastest recent sample is the zero baseline."
+            )
+            print(
+                "            This is relative jitter, not absolute "
+                "one-way latency."
             )

@@ -737,9 +737,9 @@ class WinUsbConnection:
             ctypes.byref(transferred),
             None,
         ):
-            raise self.api.last_error("write AOA configuration")
+            raise self.api.last_error("write AOA host attach")
         if transferred.value != len(payload):
-            raise WinUsbError("AOA configuration write was incomplete")
+            raise WinUsbError("AOA host attach write was incomplete")
 
     def cancel_pending_read(self) -> None:
         """Cancel overlapped reads without freeing handles on this thread."""

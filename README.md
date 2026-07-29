@@ -150,13 +150,19 @@ Native Android app ──AOA USB bulk──► PC input router ──key event�
 1. The Android view requests unbuffered touch dispatch and maps screen coordinates into its rotated play zone.
 2. Fixed 24-byte records carry finger ID, action, normalized coordinates, sequence, and source timestamp over AOA.
 3. The PC prefers pipelined WinUSB for AOA data, falls back to UsbDk when needed, and immediately maps records to key presses and releases.
-4. A separate queue mirrors coordinates to the visual overlay, so drawing never blocks the input path.
+4. A bounded latest-state mailbox mirrors coordinates to the visual overlay, so drawing never blocks the input path or accumulates stale movement.
 5. If USB disconnects, the PC releases every held key and automatically looks for the phone again.
 
 The phone records maximum queue age/depth and reports them in backward-compatible
 heartbeat fields. At 8 ms it records a warning; at 25 ms it drops the backlog,
 sends `CANCEL`, and resumes from current input. The original 100 ms limit remains
 as a separately counted failsafe.
+
+Touch protocol v2 also gives every host attachment an explicit session boundary.
+The PC ignores records queued for an older process until Android sends a session
+reset. A one-time host attach record tells an already-running Android transport
+to clear its stale queue and report a host recovery. Queue and benchmark
+summaries therefore describe only the current transport epoch.
 
 For an A/B check of the overlapped read pipeline, run comparable sessions with:
 
@@ -165,9 +171,11 @@ python phone_trackpad.py --aoa-benchmark --aoa-read-depth 1
 python phone_trackpad.py --aoa-benchmark --aoa-read-depth 2
 ```
 
-The benchmark aligns the unrelated phone and PC clock origins to the fastest
-sample in each connection. Its result is excess delay/jitter relative to that
-baseline, not absolute one-way latency.
+The benchmark estimates phone-to-PC clock-rate drift from minimum-delay samples
+inside a bounded 60-second rolling window. Its result is recent excess
+delay/jitter relative to the fastest corrected sample, not absolute one-way
+latency. The rolling window prevents longer sessions from inflating the result
+through clock skew or cumulative maximums.
 
 ## Legacy ADB fallback
 
@@ -197,7 +205,7 @@ ADB mode still requires Android Platform Tools, USB debugging, and the original 
 ## Troubleshooting
 
 - Every connection problem is reported with a stable `HPT-…` code and a recommended action. Connection Doctor distinguishes USB transport open, waiting for the Android companion, protocol handshake complete, and an active touch stream.
-- Opening WinUSB or UsbDk shows `USB connected … waiting for Android app…`; it is not reported as a usable/connected controller session until the first valid protocol packet arrives.
+- Opening WinUSB or UsbDk shows `USB connected … waiting for Android app…`; it is not reported as a usable/connected controller session until the protocol v2 session-reset marker arrives.
 - Run `python phone_trackpad.py --diagnose` for the live view. `report` copies a privacy-preserving report containing stable codes and allowlisted fields, not raw exceptions, USB serials, user/computer names, paths, IP addresses, touch coordinates, keystrokes, or free-form developer details. `retry` cancels discovery or the current USB read, releases held keys, closes the backend, and starts a fresh attempt immediately.
 - The Windows setup pre-stages WinUSB for `18D1:2D00` and interface 0 of `18D1:2D01`, and installs UsbDk when it is not already present. It does not replace the phone's normal MTP or ADB interfaces.
 - If WinUSB was unchecked or its installation failed, Holodori automatically uses UsbDk for the AOA data stream. No manual driver binding is required.

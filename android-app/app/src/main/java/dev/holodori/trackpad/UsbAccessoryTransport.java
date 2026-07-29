@@ -6,6 +6,7 @@ import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.util.Log;
 
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -20,6 +21,8 @@ final class UsbAccessoryTransport {
     private static final long QUEUE_LOG_INTERVAL_NANOS = 1_000_000_000L;
     // Heartbeats encode queue age in 10 us units, up to about 328 ms.
     private static final long QUEUE_AGE_REPORT_UNIT_NANOS = 10_000L;
+    private static final int HOST_CONTROL_SIZE = 8;
+    private static final int HOST_CONTROL_ATTACH = 1;
 
     interface Listener {
         void onConnectionChanged(boolean connected, String message);
@@ -40,6 +43,7 @@ final class UsbAccessoryTransport {
     private long queueResyncCount;
     private long queueFailsafeCount;
     private long coalescedMoveCount;
+    private long hostRecoveryCount;
     private long lastQueueLogNanos;
     private long reportMaxQueueAgeNanos;
     private int reportMaxQueueDepth;
@@ -47,10 +51,13 @@ final class UsbAccessoryTransport {
     private boolean reportQueueWarning;
     private boolean reportQueueFailsafe;
     private boolean queueWarningActive;
+    private boolean hostAttachSeen;
     private volatile int generation;
     private volatile boolean running;
     private ParcelFileDescriptor descriptor;
+    private FileInputStream input;
     private FileOutputStream output;
+    private Thread controlThread;
     private Thread writerThread;
 
     UsbAccessoryTransport(Listener listener) {
@@ -68,16 +75,26 @@ final class UsbAccessoryTransport {
             return false;
         }
 
+        synchronized (queueLock) {
+            replaceQueueWithSessionReset(System.nanoTime(), false);
+        }
         synchronized (lifecycleLock) {
             descriptor = nextDescriptor;
+            input = new FileInputStream(descriptor.getFileDescriptor());
             output = new FileOutputStream(descriptor.getFileDescriptor());
             running = true;
             int sessionGeneration = ++generation;
+            FileInputStream sessionInput = input;
             FileOutputStream sessionOutput = output;
+            controlThread = new Thread(
+                    () -> controlLoop(sessionGeneration, sessionInput),
+                    "AOA host control"
+            );
             writerThread = new Thread(
                     () -> writerLoop(sessionGeneration, sessionOutput),
                     "AOA touch writer"
             );
+            controlThread.start();
             writerThread.start();
         }
         listener.onConnectionChanged(true, "AOA connected");
@@ -283,6 +300,23 @@ final class UsbAccessoryTransport {
         head = (head + 1) % CAPACITY;
     }
 
+    private void replaceQueueWithSessionReset(
+            long eventNanos, boolean hostRecovery
+    ) {
+        tail = head;
+        resetQueueReport();
+        queueWarningActive = false;
+        TouchSample reset = queue[head];
+        reset.action = TouchSample.ACTION_CANCEL;
+        reset.pointerId = 0;
+        reset.flags = TouchSample.FLAG_SESSION_RESET
+                | (hostRecovery ? TouchSample.FLAG_HOST_RECOVERY : 0);
+        reset.x = 0;
+        reset.y = 0;
+        reset.eventNanos = eventNanos;
+        head = (head + 1) % CAPACITY;
+    }
+
     private static void updateSample(
             TouchSample sample,
             float x,
@@ -302,6 +336,63 @@ final class UsbAccessoryTransport {
     private static int clampFixed(float value) {
         int fixed = Math.round(value * 10000f);
         return Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, fixed));
+    }
+
+    private void controlLoop(
+            int sessionGeneration,
+            FileInputStream sessionInput
+    ) {
+        byte[] control = new byte[HOST_CONTROL_SIZE];
+        int filled = 0;
+        try {
+            while (isSessionActive(sessionGeneration)) {
+                int count = sessionInput.read(
+                        control, filled, HOST_CONTROL_SIZE - filled
+                );
+                if (count < 0) {
+                    throw new IOException("Host control stream closed");
+                }
+                filled += count;
+                if (filled < HOST_CONTROL_SIZE) {
+                    continue;
+                }
+                if (control[0] == 'H'
+                        && control[1] == 'P'
+                        && control[2] == 'T'
+                        && control[3] == 'C'
+                        && (control[4] & 0xFF)
+                        == TouchSample.PROTOCOL_VERSION
+                        && (control[5] & 0xFF) == HOST_CONTROL_ATTACH) {
+                    handleHostAttach(sessionGeneration);
+                }
+                filled = 0;
+            }
+        } catch (IOException error) {
+            if (isSessionActive(sessionGeneration)) {
+                Log.e(TAG, "Host control stream failed", error);
+                close();
+                listener.onConnectionChanged(false, "AOA connection lost");
+            }
+        }
+    }
+
+    private void handleHostAttach(int sessionGeneration) {
+        boolean recovered;
+        synchronized (queueLock) {
+            if (!isSessionActive(sessionGeneration)) {
+                return;
+            }
+            recovered = hostAttachSeen;
+            hostAttachSeen = true;
+            if (recovered) {
+                hostRecoveryCount++;
+                replaceQueueWithSessionReset(System.nanoTime(), true);
+                queueLock.notifyAll();
+            }
+        }
+        if (recovered) {
+            Log.w(TAG, "New host process attached; cleared stale touch queue");
+        }
     }
 
     private void writerLoop(
@@ -369,7 +460,7 @@ final class UsbAccessoryTransport {
                 packet.put((byte) 'P');
                 packet.put((byte) 'T');
                 packet.put((byte) '1');
-                packet.put((byte) 1);
+                packet.put((byte) TouchSample.PROTOCOL_VERSION);
                 packet.put((byte) action);
                 packet.put((byte) pointerId);
                 packet.put((byte) flags);
@@ -419,14 +510,18 @@ final class UsbAccessoryTransport {
         queueResyncCount = 0;
         queueFailsafeCount = 0;
         coalescedMoveCount = 0;
+        hostRecoveryCount = 0;
         lastQueueLogNanos = 0;
         queueWarningActive = false;
+        hostAttachSeen = false;
         resetQueueReport();
     }
 
     void close() {
         Thread previousWriter;
+        Thread previousControl;
         ParcelFileDescriptor previousDescriptor;
+        FileInputStream previousInput;
         FileOutputStream previousOutput;
         long summaryMaxAgeNanos;
         int summaryMaxDepth;
@@ -434,14 +529,19 @@ final class UsbAccessoryTransport {
         long summaryResyncCount;
         long summaryFailsafeCount;
         long summaryCoalescedMoves;
+        long summaryHostRecoveries;
         synchronized (lifecycleLock) {
             running = false;
             generation++;
             previousWriter = writerThread;
+            previousControl = controlThread;
             previousDescriptor = descriptor;
+            previousInput = input;
             previousOutput = output;
             writerThread = null;
+            controlThread = null;
             descriptor = null;
+            input = null;
             output = null;
         }
         synchronized (queueLock) {
@@ -451,6 +551,7 @@ final class UsbAccessoryTransport {
             summaryResyncCount = queueResyncCount;
             summaryFailsafeCount = queueFailsafeCount;
             summaryCoalescedMoves = coalescedMoveCount;
+            summaryHostRecoveries = hostRecoveryCount;
             head = 0;
             tail = 0;
             resetQueueStats();
@@ -460,6 +561,14 @@ final class UsbAccessoryTransport {
                 && previousWriter != Thread.currentThread()) {
             previousWriter.interrupt();
         }
+        if (previousControl != null
+                && previousControl != Thread.currentThread()) {
+            previousControl.interrupt();
+        }
+        try {
+            if (previousInput != null) previousInput.close();
+        } catch (IOException ignored) {
+        }
         try {
             if (previousOutput != null) previousOutput.close();
         } catch (IOException ignored) {
@@ -468,7 +577,7 @@ final class UsbAccessoryTransport {
             if (previousDescriptor != null) previousDescriptor.close();
         } catch (IOException ignored) {
         }
-        if (summaryMaxDepth > 0) {
+        if (summaryMaxDepth > 0 || summaryHostRecoveries > 0) {
             Log.i(
                     TAG,
                     "Queue summary: maxAge="
@@ -483,6 +592,8 @@ final class UsbAccessoryTransport {
                             + summaryFailsafeCount
                             + ", coalescedMoves="
                             + summaryCoalescedMoves
+                            + ", hostRecoveries="
+                            + summaryHostRecoveries
             );
         }
     }

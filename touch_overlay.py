@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ctypes
-import queue
+import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
@@ -80,6 +80,53 @@ class Dot:
     released_at: Optional[float] = None
 
 
+class _OverlayMailbox:
+    """Bounded latest-state handoff from the receiver to the Tk thread."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._touches: dict[int, tuple[float, float, bool, bool]] = {}
+        self._cancelled = False
+        self._status: Optional[tuple[str, bool]] = None
+
+    def publish_touch(
+        self,
+        pointer_id: int,
+        x: float,
+        y: float,
+        inside: bool,
+        released: bool,
+    ) -> None:
+        with self._lock:
+            self._touches[pointer_id] = (x, y, inside, released)
+
+    def publish_cancel(self) -> None:
+        with self._lock:
+            # A cancel supersedes every touch state published before it.
+            self._touches.clear()
+            self._cancelled = True
+
+    def publish_status(self, text: str, connected: bool) -> None:
+        with self._lock:
+            self._status = (text, connected)
+
+    def drain(
+        self,
+    ) -> tuple[
+        bool,
+        dict[int, tuple[float, float, bool, bool]],
+        Optional[tuple[str, bool]],
+    ]:
+        with self._lock:
+            cancelled = self._cancelled
+            touches = self._touches
+            status = self._status
+            self._cancelled = False
+            self._touches = {}
+            self._status = None
+        return cancelled, touches, status
+
+
 class TouchOverlay:
     HOTKEY_POLL_MS = 40
     RELEASE_FADE_SECONDS = 0.11
@@ -94,7 +141,7 @@ class TouchOverlay:
         self.lane_count = lane_count
         self.config = config
         self.save_config = save_config
-        self.events: queue.SimpleQueue = queue.SimpleQueue()
+        self._mailbox = _OverlayMailbox()
         self.dots: dict[int, Dot] = {}
         self.status = "Looking for phone…"
         self.connected = False
@@ -263,13 +310,15 @@ class TouchOverlay:
         inside: bool,
         released: bool,
     ) -> None:
-        self.events.put(("touch", pointer_id, x, y, inside, released))
+        self._mailbox.publish_touch(
+            pointer_id, x, y, inside, released
+        )
 
     def publish_cancel(self) -> None:
-        self.events.put(("cancel",))
+        self._mailbox.publish_cancel()
 
     def publish_status(self, text: str, connected: bool) -> None:
-        self.events.put(("status", text, connected))
+        self._mailbox.publish_status(text, connected)
 
     def _draw_static(self) -> None:
         self.canvas.delete("static")
@@ -355,31 +404,22 @@ class TouchOverlay:
     def _frame(self) -> None:
         if not self.running:
             return
-        redraw_static = False
-        while True:
-            try:
-                event = self.events.get_nowait()
-            except queue.Empty:
-                break
-            if event[0] == "touch":
-                _, pointer_id, x, y, inside, released = event
-                dot = self.dots.get(pointer_id)
-                if dot is None:
-                    dot = Dot(pointer_id, x, y, inside)
-                    self.dots[pointer_id] = dot
-                dot.x = x
-                dot.y = y
-                dot.inside = inside
-                dot.released_at = time.monotonic() if released else None
-            elif event[0] == "cancel":
-                now = time.monotonic()
-                for dot in self.dots.values():
-                    dot.released_at = now
-            elif event[0] == "status":
-                _, self.status, self.connected = event
-                redraw_static = True
-
-        if redraw_static:
+        cancelled, touches, status = self._mailbox.drain()
+        if cancelled:
+            now = time.monotonic()
+            for dot in self.dots.values():
+                dot.released_at = now
+        for pointer_id, (x, y, inside, released) in touches.items():
+            dot = self.dots.get(pointer_id)
+            if dot is None:
+                dot = Dot(pointer_id, x, y, inside)
+                self.dots[pointer_id] = dot
+            dot.x = x
+            dot.y = y
+            dot.inside = inside
+            dot.released_at = time.monotonic() if released else None
+        if status is not None:
+            self.status, self.connected = status
             self._draw_static()
         self._draw_touches()
         self.root.after(8, self._frame)

@@ -3,6 +3,7 @@ import time
 import unittest
 from unittest import mock
 
+import connection_doctor as doctor_codes
 from aoa_mode import AoaTouchRouter
 from aoa_transport import (
     ACTION_CANCEL,
@@ -15,11 +16,13 @@ from aoa_transport import (
     AoaReceiver,
     ClockNormalizedLatency,
     FLAG_INSIDE,
+    FLAG_HOST_RECOVERY,
     FLAG_LOCKED,
     FLAG_QUEUE_DIAGNOSTICS,
     FLAG_QUEUE_FAILSAFE,
     FLAG_QUEUE_RESYNC,
     FLAG_QUEUE_WARNING,
+    FLAG_SESSION_RESET,
     QueueTelemetry,
     TOUCH_MAGIC,
     TOUCH_PACKET,
@@ -37,10 +40,26 @@ def event(action, pointer_id, x, y, sequence=0, flags=None):
 class PacketParserTests(unittest.TestCase):
     def test_fragmented_and_concatenated_packets(self):
         first = TOUCH_PACKET.pack(
-            TOUCH_MAGIC, 1, ACTION_DOWN, 3, 3, 2500, 7500, 10, 123
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_DOWN,
+            3,
+            3,
+            2500,
+            7500,
+            10,
+            123,
         )
         second = TOUCH_PACKET.pack(
-            TOUCH_MAGIC, 1, ACTION_UP, 3, 2, 2500, 7500, 11, 456
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_UP,
+            3,
+            2,
+            2500,
+            7500,
+            11,
+            456,
         )
         parser = TouchPacketParser()
         self.assertEqual(list(parser.feed(first[:9])), [])
@@ -52,7 +71,15 @@ class PacketParserTests(unittest.TestCase):
 
     def test_parser_resynchronizes_after_noise(self):
         packet = TOUCH_PACKET.pack(
-            TOUCH_MAGIC, 1, ACTION_MOVE, 1, 3, 5000, 5000, 2, 0
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_MOVE,
+            1,
+            3,
+            5000,
+            5000,
+            2,
+            0,
         )
         parser = TouchPacketParser()
         parsed = list(parser.feed(b"garbage" + packet))
@@ -62,7 +89,7 @@ class PacketParserTests(unittest.TestCase):
     def test_heartbeat_carries_queue_telemetry(self):
         packet = TOUCH_PACKET.pack(
             TOUCH_MAGIC,
-            1,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
             ACTION_HEARTBEAT,
             7,
             FLAG_QUEUE_DIAGNOSTICS
@@ -91,6 +118,31 @@ class PacketParserTests(unittest.TestCase):
         self.assertEqual(snapshot.warning_reports, 1)
         self.assertEqual(snapshot.resyncs, 2)
         self.assertEqual(snapshot.failsafe_reports, 1)
+        self.assertEqual(snapshot.host_recoveries, 0)
+
+    def test_session_reset_marker_starts_a_recovered_epoch(self):
+        packet = TOUCH_PACKET.pack(
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_CANCEL,
+            0,
+            FLAG_SESSION_RESET | FLAG_HOST_RECOVERY,
+            0,
+            0,
+            10,
+            456,
+        )
+        parsed = list(TouchPacketParser().feed(packet))
+        self.assertEqual(len(parsed), 1)
+        marker = parsed[0]
+        self.assertTrue(marker.session_reset)
+        self.assertTrue(marker.host_recovery)
+
+        telemetry = QueueTelemetry()
+        telemetry.begin_epoch(marker.host_recovery)
+        snapshot = telemetry.snapshot()
+        self.assertEqual(snapshot.reports, 0)
+        self.assertEqual(snapshot.host_recoveries, 1)
 
 
 class LatencyTests(unittest.TestCase):
@@ -106,6 +158,101 @@ class LatencyTests(unittest.TestCase):
         self.assertEqual(snapshot.samples, 2)
         self.assertAlmostEqual(snapshot.mean_excess_ms, 15.0)
         self.assertAlmostEqual(snapshot.max_excess_ms, 20.0)
+
+    def test_clock_normalization_removes_long_session_clock_skew(self):
+        latency = ClockNormalizedLatency()
+        start_phone = 100_000_000_000
+        host_epoch = 5_000_000_000_000
+        interval_nanos = 10_000_000
+        skew = 25 / 1_000_000
+
+        for index in range(7_000):
+            elapsed = index * interval_nanos
+            phone = start_phone + elapsed
+            host = (
+                host_epoch
+                + phone
+                + 4_000_000
+                + int(elapsed * skew)
+            )
+            latency.observe(phone, host, True)
+
+        snapshot = latency.snapshot()
+        self.assertEqual(snapshot.session_samples, 7_000)
+        self.assertGreater(snapshot.samples, 5_900)
+        self.assertLess(snapshot.mean_excess_ms, 0.001)
+        self.assertLess(snapshot.max_excess_ms, 0.001)
+        self.assertAlmostEqual(snapshot.window_seconds, 60.0, places=2)
+
+    def test_clock_normalization_keeps_recent_latency_spike(self):
+        latency = ClockNormalizedLatency()
+        start_phone = 100_000_000_000
+        host_epoch = 5_000_000_000_000
+        interval_nanos = 10_000_000
+        skew = -30 / 1_000_000
+
+        for index in range(6_001):
+            elapsed = index * interval_nanos
+            phone = start_phone + elapsed
+            spike = 8_000_000 if index == 6_000 else 0
+            host = (
+                host_epoch
+                + phone
+                + 4_000_000
+                + int(elapsed * skew)
+                + spike
+            )
+            latency.observe(phone, host, True)
+
+        snapshot = latency.snapshot()
+        self.assertGreater(snapshot.max_excess_ms, 7.99)
+        self.assertLess(snapshot.max_excess_ms, 8.01)
+
+    def test_clock_normalization_bounds_history_to_recent_window(self):
+        latency = ClockNormalizedLatency()
+        start_phone = 100_000_000_000
+        for second in range(90):
+            phone = start_phone + second * 1_000_000_000
+            early_delay = 100_000_000 if second == 0 else 0
+            latency.observe(
+                phone,
+                5_000_000_000_000 + phone + early_delay,
+                True,
+            )
+
+        snapshot = latency.snapshot()
+        self.assertEqual(snapshot.session_samples, 90)
+        self.assertEqual(snapshot.samples, 61)
+        self.assertAlmostEqual(snapshot.window_seconds, 60.0)
+        self.assertAlmostEqual(snapshot.max_excess_ms, 0.0)
+
+    def test_clock_normalization_is_session_length_invariant(self):
+        def run_session(seconds):
+            latency = ClockNormalizedLatency()
+            start_phone = 100_000_000_000
+            interval_nanos = 100_000_000
+            for index in range(seconds * 10):
+                elapsed = index * interval_nanos
+                phone = start_phone + elapsed
+                jitter = index % 10 * 200_000
+                host = (
+                    5_000_000_000_000
+                    + phone
+                    + 4_000_000
+                    + int(elapsed * 25 / 1_000_000)
+                    + jitter
+                )
+                latency.observe(phone, host, True)
+            return latency.snapshot()
+
+        short = run_session(70)
+        long = run_session(3_600)
+        self.assertAlmostEqual(
+            short.mean_excess_ms, long.mean_excess_ms, places=3
+        )
+        self.assertAlmostEqual(
+            short.max_excess_ms, long.max_excess_ms, places=3
+        )
 
 
 class AoaHostTests(unittest.TestCase):
@@ -285,7 +432,7 @@ class ReceiverTests(unittest.TestCase):
         self.assertTrue(FakeHost.instance.closed)
         self.assertTrue(receiver.finished.is_set())
         self.assertIn(
-            ("AOA heartbeat timed out; reconnecting", False),
+            ("AOA session reset marker timed out; reconnecting", False),
             statuses,
         )
 

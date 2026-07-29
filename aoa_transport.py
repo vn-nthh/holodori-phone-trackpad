@@ -14,6 +14,7 @@ import os
 import struct
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional
 
@@ -41,6 +42,15 @@ LIBUSB_ERROR_TIMEOUT = -7
 
 TOUCH_MAGIC = b"HPT1"
 TOUCH_PACKET = struct.Struct("<4sBBBBhhIQ")
+HOST_CONTROL_MAGIC = b"HPTC"
+HOST_CONTROL_PACKET = struct.Struct("<4sBBH")
+HOST_CONTROL_ATTACH = 1
+HOST_ATTACH_REQUEST = HOST_CONTROL_PACKET.pack(
+    HOST_CONTROL_MAGIC,
+    doctor_codes.TOUCH_PROTOCOL_VERSION,
+    HOST_CONTROL_ATTACH,
+    0,
+)
 ACTION_HEARTBEAT = 0
 ACTION_DOWN = 1
 ACTION_MOVE = 2
@@ -48,6 +58,8 @@ ACTION_UP = 3
 ACTION_CANCEL = 4
 FLAG_INSIDE = 0x01
 FLAG_LOCKED = 0x02
+FLAG_SESSION_RESET = 0x04
+FLAG_HOST_RECOVERY = 0x08
 FLAG_QUEUE_WARNING = 0x10
 FLAG_QUEUE_RESYNC = 0x20
 FLAG_QUEUE_FAILSAFE = 0x40
@@ -221,6 +233,19 @@ class TouchEvent:
         return bool(self.flags & FLAG_LOCKED)
 
     @property
+    def session_reset(self) -> bool:
+        return bool(
+            self.action == ACTION_CANCEL
+            and self.flags & FLAG_SESSION_RESET
+        )
+
+    @property
+    def host_recovery(self) -> bool:
+        return bool(
+            self.session_reset and self.flags & FLAG_HOST_RECOVERY
+        )
+
+    @property
     def has_queue_diagnostics(self) -> bool:
         return bool(
             self.action == ACTION_HEARTBEAT
@@ -249,6 +274,8 @@ class LatencySnapshot:
     samples: int
     mean_excess_ms: float
     max_excess_ms: float
+    window_seconds: float
+    session_samples: int
 
 
 @dataclass(frozen=True)
@@ -259,26 +286,32 @@ class QueueTelemetrySnapshot:
     warning_reports: int
     resyncs: int
     failsafe_reports: int
+    host_recoveries: int
 
 
 class ClockNormalizedLatency:
-    """Measure excess delay without directly comparing clock epochs.
+    """Measure recent excess delay across independent, drifting clocks.
 
     Phone event time and ``perf_counter_ns`` have unrelated origins. The
-    smallest observed host-minus-phone delta is treated as the session's clock
-    offset plus irreducible path delay; other samples are reported relative to
-    that baseline. This is useful for short benchmark comparisons, not for
-    claiming absolute one-way latency.
+    lower envelope of recent host-minus-phone offsets estimates clock skew.
+    Residual delay is then reported relative to the fastest recent sample.
+    This remains a relative jitter benchmark, not absolute one-way latency.
     """
+
+    WINDOW_NANOS = 60_000_000_000
+    MAX_OBSERVATIONS = 65_536
+    SKEW_BUCKET_NANOS = 5_000_000_000
+    MIN_SKEW_SPAN_NANOS = 10_000_000_000
+    MIN_SKEW_BUCKETS = 3
+    MAX_ABS_SKEW_MS_PER_SECOND = 0.5
 
     def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
-        self._baseline_offset_ns: Optional[int] = None
-        self._samples = 0
-        self._total_excess_ns = 0
-        self._max_excess_ns = 0
+        self._observations = deque(maxlen=self.MAX_OBSERVATIONS)
+        self._latest_phone_nanos = 0
+        self._session_samples = 0
 
     def observe(
         self,
@@ -289,43 +322,151 @@ class ClockNormalizedLatency:
         if phone_event_nanos <= 0:
             return
         offset = host_arrival_nanos - phone_event_nanos
-        if self._baseline_offset_ns is None:
-            self._baseline_offset_ns = offset
-        elif offset < self._baseline_offset_ns:
-            shift = self._baseline_offset_ns - offset
-            self._total_excess_ns += shift * self._samples
-            if self._samples:
-                self._max_excess_ns += shift
-            self._baseline_offset_ns = offset
+        self._observations.append(
+            (phone_event_nanos, offset, include_sample)
+        )
+        self._latest_phone_nanos = max(
+            self._latest_phone_nanos, phone_event_nanos
+        )
+        if include_sample:
+            self._session_samples += 1
 
-        if not include_sample:
-            return
-        excess = max(0, offset - self._baseline_offset_ns)
-        self._samples += 1
-        self._total_excess_ns += excess
-        self._max_excess_ns = max(self._max_excess_ns, excess)
+        cutoff = self._latest_phone_nanos - self.WINDOW_NANOS
+        while (
+            self._observations
+            and self._observations[0][0] < cutoff
+        ):
+            self._observations.popleft()
+
+    def _skew_trend(
+        self, observations: list[tuple[int, int, bool]]
+    ) -> Optional[tuple[int, int, float, float]]:
+        """Fit clock-rate drift to minimum-delay points in 5-second buckets."""
+        if not observations:
+            return None
+        first_phone = observations[0][0]
+        buckets: dict[int, tuple[int, int]] = {}
+        for phone_nanos, offset_nanos, _ in observations:
+            bucket = (
+                phone_nanos - first_phone
+            ) // self.SKEW_BUCKET_NANOS
+            current = buckets.get(bucket)
+            if current is None or offset_nanos < current[1]:
+                buckets[bucket] = (phone_nanos, offset_nanos)
+
+        anchors = sorted(buckets.values(), key=lambda value: value[0])
+        if (
+            len(anchors) < self.MIN_SKEW_BUCKETS
+            or anchors[-1][0] - anchors[0][0]
+            < self.MIN_SKEW_SPAN_NANOS
+        ):
+            return None
+
+        reference_phone, reference_offset = anchors[0]
+        x_seconds = [
+            (phone - reference_phone) / 1_000_000_000.0
+            for phone, _ in anchors
+        ]
+        y_millis = [
+            (offset - reference_offset) / 1_000_000.0
+            for _, offset in anchors
+        ]
+        mean_x = sum(x_seconds) / len(x_seconds)
+        mean_y = sum(y_millis) / len(y_millis)
+        denominator = sum(
+            (value - mean_x) ** 2 for value in x_seconds
+        )
+        if denominator <= 0:
+            return None
+        slope = sum(
+            (x_value - mean_x) * (y_value - mean_y)
+            for x_value, y_value in zip(x_seconds, y_millis)
+        ) / denominator
+        limit = self.MAX_ABS_SKEW_MS_PER_SECOND
+        slope = max(-limit, min(limit, slope))
+        intercept = mean_y - slope * mean_x
+        return reference_phone, reference_offset, intercept, slope
 
     def snapshot(self) -> LatencySnapshot:
-        mean_ns = (
-            self._total_excess_ns / self._samples
-            if self._samples
-            else 0.0
+        observations = list(self._observations)
+        if not observations:
+            return LatencySnapshot(
+                samples=0,
+                mean_excess_ms=0.0,
+                max_excess_ms=0.0,
+                window_seconds=0.0,
+                session_samples=self._session_samples,
+            )
+
+        trend = self._skew_trend(observations)
+        residuals: list[tuple[float, bool]] = []
+        for phone_nanos, offset_nanos, include_sample in observations:
+            if trend is None:
+                residual = float(offset_nanos)
+            else:
+                (
+                    reference_phone,
+                    reference_offset,
+                    intercept,
+                    slope,
+                ) = trend
+                elapsed_seconds = (
+                    phone_nanos - reference_phone
+                ) / 1_000_000_000.0
+                predicted_offset = reference_offset + (
+                    intercept + slope * elapsed_seconds
+                ) * 1_000_000.0
+                residual = offset_nanos - predicted_offset
+            residuals.append((residual, include_sample))
+
+        baseline = min(residual for residual, _ in residuals)
+        excess_nanos = [
+            max(0.0, residual - baseline)
+            for residual, include_sample in residuals
+            if include_sample
+        ]
+        samples = len(excess_nanos)
+        mean_ns = sum(excess_nanos) / samples if samples else 0.0
+        max_ns = max(excess_nanos, default=0.0)
+        window_seconds = max(
+            0.0,
+            (
+                max(value[0] for value in observations)
+                - min(value[0] for value in observations)
+            )
+            / 1_000_000_000.0,
         )
         return LatencySnapshot(
-            samples=self._samples,
+            samples=samples,
             mean_excess_ms=mean_ns / 1_000_000.0,
-            max_excess_ms=self._max_excess_ns / 1_000_000.0,
+            max_excess_ms=max_ns / 1_000_000.0,
+            window_seconds=window_seconds,
+            session_samples=self._session_samples,
         )
 
 
 class QueueTelemetry:
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self, preserve_host_recoveries: bool = False) -> None:
+        host_recoveries = (
+            getattr(self, "host_recoveries", 0)
+            if preserve_host_recoveries
+            else 0
+        )
         self.reports = 0
         self.max_age_nanos = 0
         self.max_depth = 0
         self.warning_reports = 0
         self.resyncs = 0
         self.failsafe_reports = 0
+        self.host_recoveries = host_recoveries
+
+    def begin_epoch(self, recovered: bool) -> None:
+        self.reset(preserve_host_recoveries=True)
+        if recovered:
+            self.host_recoveries += 1
 
     def observe(self, event: TouchEvent) -> None:
         if not event.has_queue_diagnostics:
@@ -349,6 +490,7 @@ class QueueTelemetry:
             warning_reports=self.warning_reports,
             resyncs=self.resyncs,
             failsafe_reports=self.failsafe_reports,
+            host_recoveries=self.host_recoveries,
         )
 
 
@@ -675,9 +817,9 @@ class AoaConnection:
             ctypes.byref(transferred),
             timeout_ms,
         )
-        self.usb.check(rc, "write AOA configuration")
+        self.usb.check(rc, "write AOA host attach")
         if transferred.value != len(payload):
-            raise AoaError("AOA configuration write was incomplete")
+            raise AoaError("AOA host attach write was incomplete")
 
     def close(self) -> None:
         if self._closed:
@@ -1497,11 +1639,12 @@ class AoaReceiver:
                         "waiting for Android app…",
                         False,
                     )
-                    # Keep the accessory path one-way. The phone streams touch
-                    # packets to the host; avoiding an idle reverse reader also
-                    # avoids composite-driver teardown on affected devices.
+                    # Touch traffic remains phone-to-host. One small attach
+                    # control record gives Android a reliable host-process
+                    # boundary without adding work to the steady-state path.
                     last_error = ""
                     handshake_done = False
+                    attach_requested = False
                     self._app_handshake_done = False
 
                     def bad_version(version: int) -> None:
@@ -1509,7 +1652,9 @@ class AoaReceiver:
 
                     parser = TouchPacketParser(on_bad_version=bad_version)
                     self._latency.reset()
+                    self._queue_telemetry.reset()
                     last_packet_at = time.monotonic()
+                    epoch_wait_started_at = last_packet_at
                     while not self._stop.is_set():
                         if self._control_event.is_set():
                             raise _AoaOperationCancelled()
@@ -1519,11 +1664,28 @@ class AoaReceiver:
                         arrival_nanos = time.perf_counter_ns()
                         now = time.monotonic()
                         parsed_events = list(parser.feed(chunk))
-                        received_packet = bool(parsed_events)
+                        if parsed_events and not attach_requested:
+                            connection.write(
+                                HOST_ATTACH_REQUEST, timeout_ms=500
+                            )
+                            attach_requested = True
+                        received_epoch_packet = False
                         became_ready = False
                         for event in parsed_events:
+                            if not handshake_done and not event.session_reset:
+                                # A restarted host may first drain records that
+                                # Android queued for the previous process. They
+                                # do not belong to this transport epoch.
+                                continue
+
+                            if event.session_reset:
+                                self._latency.reset()
+                                self._queue_telemetry.begin_epoch(
+                                    event.host_recovery
+                                )
+
                             last_packet_at = now
-                            self._queue_telemetry.observe(event)
+                            received_epoch_packet = True
                             if doctor is not None:
                                 doctor.note_packet(
                                     event.action == ACTION_HEARTBEAT,
@@ -1554,14 +1716,27 @@ class AoaReceiver:
                                             .TOUCH_STREAM_ACTIVE
                                         ),
                                     )
+                            elif event.session_reset:
+                                # A write that resumed after the host reader
+                                # disappeared defines a fresh epoch. Route its
+                                # CANCEL so no pre-stall key state survives.
+                                self.on_event(event)
+
+                            self._queue_telemetry.observe(event)
                             if self.benchmark:
                                 self._latency.observe(
                                     event.phone_event_nanos,
                                     arrival_nanos,
                                     include_sample=(
                                         event.action != ACTION_HEARTBEAT
+                                        and not event.session_reset
                                     ),
                                 )
+                            if event.session_reset:
+                                # The initial marker only establishes the
+                                # epoch. A later recovery marker was already
+                                # routed above to clear host input state.
+                                continue
                             # Heartbeats participate in sequence tracking. The
                             # router ignores them after verifying no wire record
                             # was skipped.
@@ -1572,17 +1747,25 @@ class AoaReceiver:
                                 "touch stream active",
                                 True,
                             )
-                        if not received_packet and (
-                            now - last_packet_at
+                        if (
+                            not handshake_done
+                            and now - epoch_wait_started_at
+                            >= self.HEARTBEAT_TIMEOUT_SECONDS
+                        ):
+                            raise AoaError(
+                                "AOA session reset marker timed out; "
+                                "reconnecting",
+                                diag_code=doctor_codes.HPT_APP_NOT_RESPONDING,
+                            )
+                        if (
+                            handshake_done
+                            and not received_epoch_packet
+                            and now - last_packet_at
                             >= self.HEARTBEAT_TIMEOUT_SECONDS
                         ):
                             raise AoaError(
                                 "AOA heartbeat timed out; reconnecting",
-                                diag_code=(
-                                    doctor_codes.HPT_STREAM_STALLED
-                                    if handshake_done
-                                    else doctor_codes.HPT_APP_NOT_RESPONDING
-                                ),
+                                diag_code=doctor_codes.HPT_STREAM_STALLED,
                             )
                 except _AoaOperationCancelled:
                     retry_attempt = not self._stop.is_set()
