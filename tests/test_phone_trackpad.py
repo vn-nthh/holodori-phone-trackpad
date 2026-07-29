@@ -230,6 +230,51 @@ class KeyReferenceCountTests(unittest.TestCase):
         processor.shared_config.update_from_phone({"locked": locked})
         KeyReferenceCountTests.sync(processor)
 
+    def test_extended_zones_cover_height_and_controls_stay_excluded(self):
+        processor = self.make_processor(keys=("a", "b"))
+        processor.shared_config.update_from_phone({
+            "hw_zones": [
+                {
+                    "key": "a",
+                    "x_min": 0.0,
+                    "x_max": 0.5,
+                    "y_min": 0.0,
+                    "y_max": 1.0,
+                },
+                {
+                    "key": "b",
+                    "x_min": 0.5,
+                    "x_max": 1.0,
+                    "y_min": 0.0,
+                    "y_max": 1.0,
+                },
+            ],
+            "hw_exclusions": [
+                {
+                    "x_min": 0.8,
+                    "x_max": 1.0,
+                    "y_min": 0.0,
+                    "y_max": 0.2,
+                },
+            ],
+        })
+
+        with mock.patch.object(
+            phone_trackpad, "press_key", return_value=True,
+        ) as press:
+            self.stage_touch(processor, 0, 90)
+            processor.process_event(EV_ABS, ABS_MT_POSITION_Y, 10)
+            self.sync(processor)
+            self.move(processor, 0, 50)
+            press.assert_not_called()
+
+            self.lift(processor, 0)
+            self.stage_touch(processor, 0, 60, tracking_id=20)
+            processor.process_event(EV_ABS, ABS_MT_POSITION_Y, 100)
+            self.sync(processor)
+
+        press.assert_called_once_with("b")
+
     def test_shared_lane_uses_reference_count_for_full_touch_lifecycle(self):
         processor = self.make_processor()
         with mock.patch.object(

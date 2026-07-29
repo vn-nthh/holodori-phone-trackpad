@@ -194,6 +194,7 @@ class SharedConfig:
         self.playzone = {'x': 0.10, 'y': 0.75, 'w': 0.80, 'h': 0.15, 'r': 0}
         self.locked = False
         self.hw_zones = []  # Pre-computed zone hitboxes in hardware coords
+        self.hw_exclusions = []  # Phone controls that never synthesize keys
         self._version = 0   # Bumped on every update so consumers can cache
 
     def update_from_phone(self, data: dict):
@@ -205,6 +206,8 @@ class SharedConfig:
                 self.locked = data['locked']
             if 'hw_zones' in data:
                 self.hw_zones = data['hw_zones']
+            if 'hw_exclusions' in data:
+                self.hw_exclusions = data['hw_exclusions']
             self._version += 1
 
     @property
@@ -212,10 +215,15 @@ class SharedConfig:
         """Monotonic config version; int read is atomic, safe to poll lock-free."""
         return self._version
 
-    def snapshot_runtime(self) -> Tuple[int, bool, list]:
-        """(version, locked, hw_zones) consistently read under the lock."""
+    def snapshot_runtime(self) -> Tuple[int, bool, list, list]:
+        """Return the input-path configuration under one lock."""
         with self._lock:
-            return self._version, self.locked, list(self.hw_zones)
+            return (
+                self._version,
+                self.locked,
+                list(self.hw_zones),
+                list(self.hw_exclusions),
+            )
 
     def get_dict(self) -> dict:
         """Get a snapshot of the current config."""
@@ -289,6 +297,7 @@ class TouchProcessor:
         self._cfg_version = -1
         self._cfg_locked = True
         self._cfg_zones: list = []
+        self._cfg_exclusions: list = []
         self._previous_locked: Optional[bool] = None
 
     def _refresh_config(self):
@@ -297,13 +306,15 @@ class TouchProcessor:
         if not cfg:
             self._cfg_locked = True
             self._cfg_zones = []
+            self._cfg_exclusions = []
             return
         if cfg.version == self._cfg_version:
             return  # Nothing changed since last sync frame
-        version, locked, zones = cfg.snapshot_runtime()
+        version, locked, zones, exclusions = cfg.snapshot_runtime()
         self._cfg_version = version
         self._cfg_locked = locked
         self._cfg_zones = zones
+        self._cfg_exclusions = exclusions
 
     def _get_slot(self, idx: int) -> SlotState:
         if idx not in self.slots:
@@ -333,6 +344,13 @@ class TouchProcessor:
         col = int(nx * n)
         col = max(0, min(n - 1, col))
         return self.keys[col]
+
+    def _is_excluded(self, nx: float, ny: float) -> bool:
+        return any(
+            region['x_min'] <= nx <= region['x_max']
+            and region['y_min'] <= ny <= region['y_max']
+            for region in self._cfg_exclusions
+        )
 
     def process_event(self, ev_type: int, ev_code: int, ev_value: int):
         self.stats["events"] += 1
@@ -436,7 +454,11 @@ class TouchProcessor:
                 new_key = None
             else:
                 nx, ny = self._normalize(slot.x, slot.y)
-                new_key = self._find_key(nx, ny)
+                if self._is_excluded(nx, ny):
+                    slot.blocked_until_lift = True
+                    new_key = None
+                else:
+                    new_key = self._find_key(nx, ny)
             old_key = self.active_keys.get(slot_idx)
 
             if new_key != old_key:

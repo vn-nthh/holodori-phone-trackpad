@@ -80,14 +80,11 @@ class AoaTouchRouter:
 
         old_key = self.active_keys.get(event.pointer_id)
         new_key = None
-        if (
-            not released
-            and event.locked
-            and event.inside
-            and 0.0 <= event.x <= 1.0
-            and 0.0 <= event.y <= 1.0
-        ):
-            column = min(len(self.keys) - 1, int(event.x * len(self.keys)))
+        if not released and event.locked and self.keys:
+            column = max(
+                0,
+                min(len(self.keys) - 1, int(event.x * len(self.keys))),
+            )
             new_key = self.keys[column]
 
         if new_key == old_key:

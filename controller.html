@@ -351,7 +351,7 @@ function applySideResize(edit, clientX, clientY) {
   S.pz.y = newCY / vh - h / 2;
 }
 
-function hitZone(x, y) {
+function hitZone(x, y, extended = false) {
   const vw = innerWidth, vh = innerHeight;
   const cx = (S.pz.x + S.pz.w / 2) * vw, cy = (S.pz.y + S.pz.h / 2) * vh;
   const a = -S.pz.r * Math.PI / 180;
@@ -359,7 +359,7 @@ function hitZone(x, y) {
   const lx = dx * Math.cos(a) - dy * Math.sin(a);
   const ly = dx * Math.sin(a) + dy * Math.cos(a);
   const hw = S.pz.w * vw / 2, hh = S.pz.h * vh / 2;
-  if (Math.abs(lx) > hw || Math.abs(ly) > hh) return -1;
+  if (!extended && (Math.abs(lx) > hw || Math.abs(ly) > hh)) return -1;
   let col = Math.floor((lx + hw) / (S.pz.w * vw) * S.keys.length);
   return Math.max(0, Math.min(S.keys.length - 1, col));
 }
@@ -552,7 +552,7 @@ document.addEventListener('touchcancel', onEnd,   { passive: false });
 function feedback(touches) {
   const active = new Set();
   for (let i = 0; i < touches.length; i++) {
-    const z = hitZone(touches[i].clientX, touches[i].clientY);
+    const z = hitZone(touches[i].clientX, touches[i].clientY, true);
     if (z >= 0) active.add(z);
   }
   $pz.querySelectorAll('.zone-col').forEach((c, i) =>
@@ -604,6 +604,27 @@ function screenToHW(sx, sy) {
   return { x: sx, y: sy };
 }
 
+function computeHWExclusions() {
+  const fs = document.getElementById('fs-btn');
+  const controls = [$lock];
+  if (!fs.classList.contains('hidden')) controls.push(fs);
+  return controls.map(element => {
+    const rect = element.getBoundingClientRect();
+    const hw = [
+      screenToHW(rect.left / innerWidth, rect.top / innerHeight),
+      screenToHW(rect.right / innerWidth, rect.top / innerHeight),
+      screenToHW(rect.left / innerWidth, rect.bottom / innerHeight),
+      screenToHW(rect.right / innerWidth, rect.bottom / innerHeight),
+    ];
+    const xs = hw.map(point => point.x);
+    const ys = hw.map(point => point.y);
+    return {
+      x_min: Math.min(...xs), x_max: Math.max(...xs),
+      y_min: Math.min(...ys), y_max: Math.max(...ys),
+    };
+  });
+}
+
 /** Compute per-zone hitboxes in hardware coordinates */
 function computeHWZones() {
   const vw = innerWidth, vh = innerHeight;
@@ -642,18 +663,25 @@ function computeHWZones() {
     });
   }
 
-  // Extend outermost zones to the screen edges
-  if (zones.length >= 2) {
+  // Extend the lane partition beyond every visible playzone edge.
+  if (zones.length === 1) {
+    zones[0].x_min = 0;
+    zones[0].x_max = 1;
+    zones[0].y_min = 0;
+    zones[0].y_max = 1;
+  } else if (zones.length >= 2) {
     const f = zones[0], l = zones[zones.length - 1];
     const fcx = (f.x_min + f.x_max) / 2, fcy = (f.y_min + f.y_max) / 2;
     const lcx = (l.x_min + l.x_max) / 2, lcy = (l.y_min + l.y_max) / 2;
 
     if (Math.abs(lcx - fcx) > Math.abs(lcy - fcy)) {
       // Zones arranged along X axis
+      zones.forEach(z => { z.y_min = 0; z.y_max = 1; });
       if (fcx < lcx) { f.x_min = 0; l.x_max = 1; }
       else            { f.x_max = 1; l.x_min = 0; }
     } else {
       // Zones arranged along Y axis
+      zones.forEach(z => { z.x_min = 0; z.x_max = 1; });
       if (fcy < lcy) { f.y_min = 0; l.y_max = 1; }
       else            { f.y_max = 1; l.y_min = 0; }
     }
@@ -671,6 +699,7 @@ async function sync() {
         playzone: S.pz,
         locked: S.locked,
         hw_zones: computeHWZones(),
+        hw_exclusions: computeHWExclusions(),
       }),
     });
   } catch(e) {}
@@ -758,6 +787,7 @@ function onFSChange() {
   const isFS = !!(document.fullscreenElement || document.webkitFullscreenElement);
   $fs.classList.toggle('hidden', isFS);
   if (isFS) keepAwake();
+  sync();
 }
 document.addEventListener('fullscreenchange', onFSChange);
 document.addEventListener('webkitfullscreenchange', onFSChange);

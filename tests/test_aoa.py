@@ -194,15 +194,20 @@ class RouterTests(unittest.TestCase):
         self.router.handle(event(ACTION_UP, 2, 0.3, 0.5, 4))
         self.assertEqual(self.up, ["a"])
 
-    def test_outside_and_cancel_release_keys(self):
+    def test_extended_hitbox_clamps_outer_lanes_and_ignores_height(self):
         self.router.handle(event(ACTION_DOWN, 1, 0.2, 0.5, 1))
         self.router.handle(
             event(ACTION_MOVE, 1, -0.1, 0.5, 2, FLAG_LOCKED)
         )
-        self.assertEqual(self.up, ["a"])
-        self.router.handle(event(ACTION_DOWN, 2, 0.8, 0.5, 3))
-        self.router.handle(event(ACTION_CANCEL, 0, 0, 0, 4, 0))
-        self.assertEqual(self.up, ["a", "b"])
+        self.router.handle(
+            event(ACTION_MOVE, 1, 1.1, -2.0, 3, FLAG_LOCKED)
+        )
+        self.router.handle(
+            event(ACTION_MOVE, 1, 0.2, 2.0, 4, FLAG_LOCKED)
+        )
+        self.router.handle(event(ACTION_CANCEL, 0, 0, 0, 5, 0))
+        self.assertEqual(self.down, ["a", "b", "a"])
+        self.assertEqual(self.up, ["a", "b", "a"])
 
     def test_heartbeat_participates_in_sequence_without_touching_keys(self):
         self.router.handle(event(ACTION_DOWN, 1, 0.2, 0.5, 1))

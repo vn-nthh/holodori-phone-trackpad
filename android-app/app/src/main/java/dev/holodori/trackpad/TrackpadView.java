@@ -25,6 +25,19 @@ final class TrackpadView extends View {
     private static final int MUTED = Color.rgb(108, 137, 145);
     private static final int CONNECTED = Color.rgb(111, 230, 139);
     private static final int HANDLE_SIZE_DP = 56;
+    private static final int HANDLE_NONE = 0;
+    private static final int HANDLE_TOP_LEFT = 1;
+    private static final int HANDLE_TOP_RIGHT = 2;
+    private static final int HANDLE_BOTTOM_LEFT = 3;
+    private static final int HANDLE_BOTTOM_RIGHT = 4;
+    private static final int HANDLE_TOP = 5;
+    private static final int HANDLE_RIGHT = 6;
+    private static final int HANDLE_BOTTOM = 7;
+    private static final int HANDLE_LEFT = 8;
+    private static final int EDIT_NONE = 0;
+    private static final int EDIT_MOVE = 1;
+    private static final int EDIT_SIDE = 2;
+    private static final int EDIT_CORNERS = 3;
 
     private final UsbAccessoryTransport transport;
     private final SharedPreferences preferences;
@@ -44,6 +57,8 @@ final class TrackpadView extends View {
     private String status = "Connect the USB cable";
     private int lockPointerId = -1;
 
+    private int editType = EDIT_NONE;
+    private int editHandle = HANDLE_NONE;
     private int gesturePointerA = -1;
     private int gesturePointerB = -1;
     private float gestureStartX;
@@ -55,6 +70,11 @@ final class TrackpadView extends View {
     private float startZoneRotation;
     private float startDistance;
     private float startAngle;
+    private final PointF startCornerA = new PointF();
+    private final PointF startCornerB = new PointF();
+    private final PointF lastCornerA = new PointF();
+    private final PointF lastCornerB = new PointF();
+    private final PointF startMidpoint = new PointF();
 
     TrackpadView(Context context, UsbAccessoryTransport transport) {
         super(context);
@@ -139,6 +159,9 @@ final class TrackpadView extends View {
             );
         }
         paint.setFakeBoldText(false);
+        if (!locked) {
+            drawEditorHandles(canvas, zone);
+        }
         canvas.restore();
 
         if (locked) {
@@ -176,12 +199,62 @@ final class TrackpadView extends View {
             paint.setTextSize(dp(13));
             paint.setColor(MUTED);
             canvas.drawText(
-                    "Drag to position  •  Pinch to resize and rotate  •  Tap lock to play",
+                    "Corners: resize / rotate  •  Sides: stretch one axis  •  Drag zone: move",
                     width / 2,
                     height - dp(22),
                     paint
             );
         }
+    }
+
+    private void drawEditorHandles(Canvas canvas, RectF zone) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(withAlpha(ACCENT, 195));
+        float cornerRadius = dp(9);
+        canvas.drawCircle(zone.left, zone.top, cornerRadius, paint);
+        canvas.drawCircle(zone.right, zone.top, cornerRadius, paint);
+        canvas.drawCircle(zone.left, zone.bottom, cornerRadius, paint);
+        canvas.drawCircle(zone.right, zone.bottom, cornerRadius, paint);
+
+        float longSide = dp(22);
+        float shortSide = dp(10);
+        float radius = dp(5);
+        canvas.drawRoundRect(
+                zone.centerX() - longSide / 2,
+                zone.top - shortSide / 2,
+                zone.centerX() + longSide / 2,
+                zone.top + shortSide / 2,
+                radius,
+                radius,
+                paint
+        );
+        canvas.drawRoundRect(
+                zone.centerX() - longSide / 2,
+                zone.bottom - shortSide / 2,
+                zone.centerX() + longSide / 2,
+                zone.bottom + shortSide / 2,
+                radius,
+                radius,
+                paint
+        );
+        canvas.drawRoundRect(
+                zone.left - shortSide / 2,
+                zone.centerY() - longSide / 2,
+                zone.left + shortSide / 2,
+                zone.centerY() + longSide / 2,
+                radius,
+                radius,
+                paint
+        );
+        canvas.drawRoundRect(
+                zone.right - shortSide / 2,
+                zone.centerY() - longSide / 2,
+                zone.right + shortSide / 2,
+                zone.centerY() + longSide / 2,
+                radius,
+                radius,
+                paint
+        );
     }
 
     private void drawLockIcon(Canvas canvas, float x, float y, boolean locked) {
@@ -252,8 +325,6 @@ final class TrackpadView extends View {
     private void sendPointer(MotionEvent event, int index, int action) {
         int pointerId = event.getPointerId(index);
         PointF local = toZoneLocal(event.getX(index), event.getY(index));
-        boolean inside =
-                local.x >= 0 && local.x <= 1 && local.y >= 0 && local.y <= 1;
         activeTouches.put(
                 pointerId, new PointF(event.getX(index), event.getY(index))
         );
@@ -263,7 +334,7 @@ final class TrackpadView extends View {
                 pointerId,
                 local.x,
                 local.y,
-                inside,
+                true,
                 true,
                 eventTimeNanos(event)
         );
@@ -277,108 +348,354 @@ final class TrackpadView extends View {
                 lockPointerId = pointerId;
                 return;
             }
-            PointF local = toZoneLocal(event.getX(), event.getY());
-            if (local.x >= 0 && local.x <= 1 && local.y >= 0 && local.y <= 1) {
-                gesturePointerA = pointerId;
-                gestureStartX = event.getX();
-                gestureStartY = event.getY();
-                snapshotZone();
-            }
-        } else if (action == MotionEvent.ACTION_POINTER_DOWN
-                && gesturePointerA >= 0 && gesturePointerB < 0) {
-            gesturePointerB = pointerId;
-            snapshotZone();
-            recordTwoPointerStart(event);
+            beginEditorPointer(
+                    pointerId,
+                    event.getX(actionIndex),
+                    event.getY(actionIndex)
+            );
+        } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
+            beginEditorPointer(
+                    pointerId,
+                    event.getX(actionIndex),
+                    event.getY(actionIndex)
+            );
         } else if (action == MotionEvent.ACTION_MOVE) {
-            if (gesturePointerA >= 0 && gesturePointerB >= 0) {
-                int a = event.findPointerIndex(gesturePointerA);
-                int b = event.findPointerIndex(gesturePointerB);
-                if (a >= 0 && b >= 0) {
-                    float dx = event.getX(b) - event.getX(a);
-                    float dy = event.getY(b) - event.getY(a);
-                    float distance = Math.max(1, (float) Math.hypot(dx, dy));
-                    float scale = distance / Math.max(1, startDistance);
-                    zoneWidth = clamp(startZoneWidth * scale, 0.18f, 0.96f);
-                    zoneHeight = clamp(startZoneHeight * scale, 0.08f, 0.70f);
-                    zoneRotation = startZoneRotation
-                            + (float) Math.toDegrees(Math.atan2(dy, dx))
-                            - startAngle;
-                    zoneX = clamp(
-                            ((event.getX(a) + event.getX(b)) / 2) / getWidth(),
-                            0.05f,
-                            0.95f
-                    );
-                    zoneY = clamp(
-                            ((event.getY(a) + event.getY(b)) / 2) / getHeight(),
-                            0.05f,
-                            0.95f
-                    );
-                }
-            } else if (gesturePointerA >= 0) {
+            if (editType == EDIT_MOVE) {
                 int index = event.findPointerIndex(gesturePointerA);
                 if (index >= 0) {
-                    zoneX = clamp(
-                            startZoneX
-                                    + (event.getX(index) - gestureStartX) / getWidth(),
-                            0.05f,
-                            0.95f
-                    );
-                    zoneY = clamp(
-                            startZoneY
-                                    + (event.getY(index) - gestureStartY) / getHeight(),
-                            0.05f,
-                            0.95f
-                    );
+                    zoneX = startZoneX
+                            + (event.getX(index) - gestureStartX) / getWidth();
+                    zoneY = startZoneY
+                            + (event.getY(index) - gestureStartY) / getHeight();
                 }
+            } else if (editType == EDIT_SIDE) {
+                int index = event.findPointerIndex(gesturePointerA);
+                if (index >= 0) {
+                    applySideResize(event.getX(index), event.getY(index));
+                }
+            } else if (editType == EDIT_CORNERS) {
+                updateCornerPointers(event);
+                applyCornerResize();
             }
-        } else if (action == MotionEvent.ACTION_POINTER_UP) {
-            if (pointerId == gesturePointerB) {
-                gesturePointerB = -1;
-                int a = event.findPointerIndex(gesturePointerA);
-                if (a >= 0) {
-                    gestureStartX = event.getX(a);
-                    gestureStartY = event.getY(a);
-                    snapshotZone();
-                }
-            } else if (pointerId == gesturePointerA) {
-                gesturePointerA = gesturePointerB;
-                gesturePointerB = -1;
-                if (gesturePointerA >= 0) {
-                    int a = event.findPointerIndex(gesturePointerA);
-                    gestureStartX = event.getX(a);
-                    gestureStartY = event.getY(a);
-                    snapshotZone();
-                }
-            }
-        } else if (action == MotionEvent.ACTION_UP) {
+        } else if (action == MotionEvent.ACTION_POINTER_UP
+                || action == MotionEvent.ACTION_UP) {
             if (pointerId == lockPointerId) {
-                if (lockButton.contains(event.getX(), event.getY())) {
+                if (lockButton.contains(
+                        event.getX(actionIndex), event.getY(actionIndex)
+                )) {
                     setLocked(true);
                 }
                 lockPointerId = -1;
+                return;
             }
-            gesturePointerA = -1;
-            gesturePointerB = -1;
-            saveZone();
+            finishEditorPointer(pointerId);
         } else if (action == MotionEvent.ACTION_CANCEL) {
-            gesturePointerA = -1;
-            gesturePointerB = -1;
+            clearEdit();
             lockPointerId = -1;
         }
     }
 
-    private void recordTwoPointerStart(MotionEvent event) {
-        int a = event.findPointerIndex(gesturePointerA);
-        int b = event.findPointerIndex(gesturePointerB);
-        if (a < 0 || b < 0) return;
-        float dx = event.getX(b) - event.getX(a);
-        float dy = event.getY(b) - event.getY(a);
+    private void beginEditorPointer(int pointerId, float x, float y) {
+        int handle = hitHandle(x, y);
+        if (isSideHandle(handle)) {
+            editType = EDIT_SIDE;
+            editHandle = handle;
+            gesturePointerA = pointerId;
+            gesturePointerB = -1;
+            gestureStartX = x;
+            gestureStartY = y;
+            snapshotZone();
+            return;
+        }
+
+        if (isCornerHandle(handle)) {
+            if (editType == EDIT_CORNERS) {
+                if (handle == oppositeCorner(editHandle)
+                        && gesturePointerB < 0) {
+                    gesturePointerB = pointerId;
+                    return;
+                }
+                if (handle == editHandle) {
+                    return;
+                }
+            }
+            beginCornerEdit(handle, pointerId);
+            return;
+        }
+
+        if (editType == EDIT_NONE && isInsideZone(x, y)) {
+            editType = EDIT_MOVE;
+            editHandle = HANDLE_NONE;
+            gesturePointerA = pointerId;
+            gesturePointerB = -1;
+            gestureStartX = x;
+            gestureStartY = y;
+            snapshotZone();
+        }
+    }
+
+    private void beginCornerEdit(int handle, int pointerId) {
+        editType = EDIT_CORNERS;
+        editHandle = handle;
+        gesturePointerA = pointerId;
+        gesturePointerB = -1;
+        PointF a = cornerToScreen(handle);
+        PointF b = cornerToScreen(oppositeCorner(handle));
+        startCornerA.set(a.x, a.y);
+        startCornerB.set(b.x, b.y);
+        lastCornerA.set(a.x, a.y);
+        lastCornerB.set(b.x, b.y);
+        snapshotZone();
+        snapshotCornerPair();
+    }
+
+    private void updateCornerPointers(MotionEvent event) {
+        for (int index = 0; index < event.getPointerCount(); index++) {
+            int pointerId = event.getPointerId(index);
+            if (pointerId == gesturePointerA) {
+                lastCornerA.set(event.getX(index), event.getY(index));
+            }
+            if (pointerId == gesturePointerB) {
+                lastCornerB.set(event.getX(index), event.getY(index));
+            }
+        }
+    }
+
+    private void applyCornerResize() {
+        PointF currentA =
+                gesturePointerA >= 0 ? lastCornerA : startCornerA;
+        PointF currentB =
+                gesturePointerB >= 0 ? lastCornerB : startCornerB;
+        float dx = currentB.x - currentA.x;
+        float dy = currentB.y - currentA.y;
+        float distance = (float) Math.hypot(dx, dy);
+        float angle = (float) Math.toDegrees(Math.atan2(dy, dx));
+        float midpointX = (currentA.x + currentB.x) / 2;
+        float midpointY = (currentA.y + currentB.y) / 2;
+        float scale = Math.max(0.15f, distance / Math.max(1, startDistance));
+
+        zoneWidth = Math.max(0.08f, startZoneWidth * scale);
+        zoneHeight = Math.max(0.04f, startZoneHeight * scale);
+        zoneRotation = startZoneRotation + angle - startAngle;
+        zoneX = startZoneX + (midpointX - startMidpoint.x) / getWidth();
+        zoneY = startZoneY + (midpointY - startMidpoint.y) / getHeight();
+    }
+
+    private void applySideResize(float x, float y) {
+        float radians = (float) Math.toRadians(startZoneRotation);
+        float cos = (float) Math.cos(radians);
+        float sin = (float) Math.sin(radians);
+        float dx = x - gestureStartX;
+        float dy = y - gestureStartY;
+        float localX = dx * cos + dy * sin;
+        float localY = -dx * sin + dy * cos;
+        float newWidth = startZoneWidth;
+        float newHeight = startZoneHeight;
+        float centerX = startZoneX * getWidth();
+        float centerY = startZoneY * getHeight();
+
+        if (editHandle == HANDLE_RIGHT) {
+            newWidth = Math.max(
+                    0.08f, startZoneWidth + localX / getWidth()
+            );
+            float half = (newWidth - startZoneWidth) * getWidth() / 2;
+            centerX += half * cos;
+            centerY += half * sin;
+        } else if (editHandle == HANDLE_LEFT) {
+            newWidth = Math.max(
+                    0.08f, startZoneWidth - localX / getWidth()
+            );
+            float half = (newWidth - startZoneWidth) * getWidth() / 2;
+            centerX -= half * cos;
+            centerY -= half * sin;
+        } else if (editHandle == HANDLE_BOTTOM) {
+            newHeight = Math.max(
+                    0.04f, startZoneHeight + localY / getHeight()
+            );
+            float half = (newHeight - startZoneHeight) * getHeight() / 2;
+            centerX -= half * sin;
+            centerY += half * cos;
+        } else if (editHandle == HANDLE_TOP) {
+            newHeight = Math.max(
+                    0.04f, startZoneHeight - localY / getHeight()
+            );
+            float half = (newHeight - startZoneHeight) * getHeight() / 2;
+            centerX += half * sin;
+            centerY -= half * cos;
+        }
+
+        zoneWidth = newWidth;
+        zoneHeight = newHeight;
+        zoneRotation = startZoneRotation;
+        zoneX = centerX / getWidth();
+        zoneY = centerY / getHeight();
+    }
+
+    private void finishEditorPointer(int pointerId) {
+        if ((editType == EDIT_MOVE || editType == EDIT_SIDE)
+                && pointerId == gesturePointerA) {
+            clearEdit();
+            saveZone();
+            return;
+        }
+        if (editType != EDIT_CORNERS) {
+            return;
+        }
+        if (pointerId == gesturePointerA) {
+            gesturePointerA = -1;
+        }
+        if (pointerId == gesturePointerB) {
+            gesturePointerB = -1;
+        }
+        if (gesturePointerA < 0 && gesturePointerB < 0) {
+            clearEdit();
+            saveZone();
+            return;
+        }
+
+        startCornerA.set(lastCornerA.x, lastCornerA.y);
+        startCornerB.set(lastCornerB.x, lastCornerB.y);
+        snapshotZone();
+        snapshotCornerPair();
+    }
+
+    private void snapshotCornerPair() {
+        float dx = startCornerB.x - startCornerA.x;
+        float dy = startCornerB.y - startCornerA.y;
         startDistance = (float) Math.hypot(dx, dy);
         startAngle = (float) Math.toDegrees(Math.atan2(dy, dx));
-        zoneX = ((event.getX(a) + event.getX(b)) / 2) / getWidth();
-        zoneY = ((event.getY(a) + event.getY(b)) / 2) / getHeight();
-        startZoneX = zoneX;
-        startZoneY = zoneY;
+        startMidpoint.set(
+                (startCornerA.x + startCornerB.x) / 2,
+                (startCornerA.y + startCornerB.y) / 2
+        );
+    }
+
+    private void clearEdit() {
+        editType = EDIT_NONE;
+        editHandle = HANDLE_NONE;
+        gesturePointerA = -1;
+        gesturePointerB = -1;
+    }
+
+    private int hitHandle(float screenX, float screenY) {
+        PointF local = toZonePixel(screenX, screenY);
+        float halfWidth = zoneWidth * getWidth() / 2;
+        float halfHeight = zoneHeight * getHeight() / 2;
+        float hitHalf = dp(HANDLE_SIZE_DP) / 2;
+
+        if (contains(
+                local.x, local.y, -halfWidth, -halfHeight, hitHalf, hitHalf
+        )) {
+            return HANDLE_TOP_LEFT;
+        }
+        if (contains(
+                local.x, local.y, halfWidth, -halfHeight, hitHalf, hitHalf
+        )) {
+            return HANDLE_TOP_RIGHT;
+        }
+        if (contains(
+                local.x, local.y, -halfWidth, halfHeight, hitHalf, hitHalf
+        )) {
+            return HANDLE_BOTTOM_LEFT;
+        }
+        if (contains(
+                local.x, local.y, halfWidth, halfHeight, hitHalf, hitHalf
+        )) {
+            return HANDLE_BOTTOM_RIGHT;
+        }
+
+        float horizontalHalf = Math.min(
+                zoneWidth * getWidth() * 0.42f, dp(160)
+        ) / 2;
+        float verticalHalf = Math.min(
+                zoneHeight * getHeight() * 0.42f, dp(160)
+        ) / 2;
+        if (contains(
+                local.x, local.y, 0, -halfHeight, horizontalHalf, hitHalf
+        )) {
+            return HANDLE_TOP;
+        }
+        if (contains(
+                local.x, local.y, halfWidth, 0, hitHalf, verticalHalf
+        )) {
+            return HANDLE_RIGHT;
+        }
+        if (contains(
+                local.x, local.y, 0, halfHeight, horizontalHalf, hitHalf
+        )) {
+            return HANDLE_BOTTOM;
+        }
+        if (contains(
+                local.x, local.y, -halfWidth, 0, hitHalf, verticalHalf
+        )) {
+            return HANDLE_LEFT;
+        }
+        return HANDLE_NONE;
+    }
+
+    private PointF cornerToScreen(int handle) {
+        float localX = (
+                handle == HANDLE_TOP_LEFT || handle == HANDLE_BOTTOM_LEFT
+        ) ? -zoneWidth * getWidth() / 2 : zoneWidth * getWidth() / 2;
+        float localY = (
+                handle == HANDLE_TOP_LEFT || handle == HANDLE_TOP_RIGHT
+        ) ? -zoneHeight * getHeight() / 2 : zoneHeight * getHeight() / 2;
+        double angle = Math.toRadians(zoneRotation);
+        float centerX = zoneX * getWidth();
+        float centerY = zoneY * getHeight();
+        return new PointF(
+                centerX + (float) (
+                        localX * Math.cos(angle) - localY * Math.sin(angle)
+                ),
+                centerY + (float) (
+                        localX * Math.sin(angle) + localY * Math.cos(angle)
+                )
+        );
+    }
+
+    private PointF toZonePixel(float screenX, float screenY) {
+        float centerX = zoneX * getWidth();
+        float centerY = zoneY * getHeight();
+        double angle = Math.toRadians(-zoneRotation);
+        float dx = screenX - centerX;
+        float dy = screenY - centerY;
+        return new PointF(
+                (float) (dx * Math.cos(angle) - dy * Math.sin(angle)),
+                (float) (dx * Math.sin(angle) + dy * Math.cos(angle))
+        );
+    }
+
+    private boolean isInsideZone(float screenX, float screenY) {
+        PointF local = toZoneLocal(screenX, screenY);
+        return local.x >= 0 && local.x <= 1
+                && local.y >= 0 && local.y <= 1;
+    }
+
+    private static boolean contains(
+            float x,
+            float y,
+            float centerX,
+            float centerY,
+            float halfWidth,
+            float halfHeight
+    ) {
+        return Math.abs(x - centerX) <= halfWidth
+                && Math.abs(y - centerY) <= halfHeight;
+    }
+
+    private static boolean isCornerHandle(int handle) {
+        return handle >= HANDLE_TOP_LEFT && handle <= HANDLE_BOTTOM_RIGHT;
+    }
+
+    private static boolean isSideHandle(int handle) {
+        return handle >= HANDLE_TOP && handle <= HANDLE_LEFT;
+    }
+
+    private static int oppositeCorner(int handle) {
+        if (handle == HANDLE_TOP_LEFT) return HANDLE_BOTTOM_RIGHT;
+        if (handle == HANDLE_TOP_RIGHT) return HANDLE_BOTTOM_LEFT;
+        if (handle == HANDLE_BOTTOM_LEFT) return HANDLE_TOP_RIGHT;
+        return HANDLE_TOP_LEFT;
     }
 
     private void snapshotZone() {
@@ -409,6 +726,7 @@ final class TrackpadView extends View {
             cancelAll(System.nanoTime());
         }
         this.locked = locked;
+        clearEdit();
         activeTouches.clear();
         sentPointers.clear();
         saveZone();
@@ -448,10 +766,6 @@ final class TrackpadView extends View {
         return Color.argb(
                 alpha, Color.red(color), Color.green(color), Color.blue(color)
         );
-    }
-
-    private static float clamp(float value, float min, float max) {
-        return Math.max(min, Math.min(max, value));
     }
 
     private static long eventTimeNanos(MotionEvent event) {
