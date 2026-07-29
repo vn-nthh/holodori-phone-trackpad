@@ -72,3 +72,15 @@ marks the fields as valid, pointer ID contains maximum queue depth, X contains
 maximum age in 10-microsecond units, and Y contains the number of queue
 resynchronizations since the previous heartbeat. Flags `0x10`, `0x20`, and
 `0x40` indicate a warning, resynchronization, and 100 ms failsafe respectively.
+
+Exact queue incidents are additional heartbeat records marked with contextual
+flag `0x04`. Their timestamp is the instant Android detects the incident rather
+than the later aggregate-report time. Pointer ID is queue depth and X is queue
+age in 10-microsecond units. Contextual flag `0x01` means a touch was active;
+`0x02` means the writer was blocked in the USB write. The low 16 timestamp bits
+pack a two-bit reason (warning, 25 ms resync, 100 ms failsafe, or capacity)
+above a 14-bit USB-write age measured in 20-microsecond units; incident time
+therefore retains about 66-microsecond resolution. Y remains zero so older
+protocol-v2 hosts do not misread incident metadata as a resync count. Touch
+records retain priority, so incident diagnostics are transmitted only after
+the live touch queue drains.

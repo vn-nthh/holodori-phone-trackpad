@@ -15,14 +15,20 @@ from aoa_transport import (
     AoaHost,
     AoaReceiver,
     ClockNormalizedLatency,
+    FLAG_INCIDENT_ACTIVE_TOUCH,
+    FLAG_INCIDENT_WRITER_BLOCKED,
     FLAG_INSIDE,
     FLAG_HOST_RECOVERY,
     FLAG_LOCKED,
     FLAG_QUEUE_DIAGNOSTICS,
     FLAG_QUEUE_FAILSAFE,
+    FLAG_QUEUE_INCIDENT,
     FLAG_QUEUE_RESYNC,
     FLAG_QUEUE_WARNING,
     FLAG_SESSION_RESET,
+    INCIDENT_DETAIL_REASON_SHIFT,
+    INCIDENT_REASON_CAPACITY,
+    INCIDENT_REASON_WARNING,
     QueueTelemetry,
     TOUCH_MAGIC,
     TOUCH_PACKET,
@@ -138,6 +144,103 @@ class PacketParserTests(unittest.TestCase):
         self.assertEqual(
             snapshot.warning_reports_from_first_stroke_s, ()
         )
+        self.assertEqual(snapshot.incidents, ())
+
+    def test_exact_queue_incident_carries_stall_context(self):
+        detail = (
+            INCIDENT_REASON_WARNING << INCIDENT_DETAIL_REASON_SHIFT
+        ) | 500
+        packet = TOUCH_PACKET.pack(
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_HEARTBEAT,
+            2,
+            FLAG_QUEUE_DIAGNOSTICS
+            | FLAG_QUEUE_INCIDENT
+            | FLAG_INCIDENT_ACTIVE_TOUCH
+            | FLAG_INCIDENT_WRITER_BLOCKED,
+            842,
+            0,
+            12,
+            (5_250_000_000 & ~0xFFFF) | detail,
+        )
+        incident = list(TouchPacketParser().feed(packet))[0]
+        self.assertTrue(incident.is_queue_incident)
+        self.assertAlmostEqual(
+            incident.queue_age_nanos / 1_000_000.0, 8.42
+        )
+        self.assertEqual(incident.queue_depth, 2)
+        self.assertTrue(incident.incident_active_touch)
+        self.assertTrue(incident.incident_writer_blocked)
+        self.assertAlmostEqual(
+            incident.incident_write_age_nanos / 1_000_000.0,
+            10.0,
+        )
+
+        telemetry = QueueTelemetry()
+        telemetry.observe(
+            event(
+                ACTION_DOWN,
+                1,
+                0.25,
+                0.5,
+                phone_event_nanos=2_000_000_000,
+            )
+        )
+        telemetry.observe(incident, delivery_excess_ms=54.862)
+        snapshot = telemetry.snapshot()
+        self.assertEqual(len(snapshot.incidents), 1)
+        self.assertAlmostEqual(snapshot.max_age_ms, 8.42)
+        self.assertEqual(snapshot.max_depth, 2)
+        diagnosed = snapshot.incidents[0]
+        self.assertAlmostEqual(
+            diagnosed.from_first_stroke_s, 3.25, places=3
+        )
+        self.assertAlmostEqual(diagnosed.queue_age_ms, 8.42)
+        self.assertEqual(diagnosed.queue_depth, 2)
+        self.assertEqual(diagnosed.reason, INCIDENT_REASON_WARNING)
+        self.assertTrue(diagnosed.active_touch)
+        self.assertTrue(diagnosed.writer_blocked)
+        self.assertAlmostEqual(diagnosed.write_block_ms, 10.0)
+        self.assertAlmostEqual(diagnosed.delivery_excess_ms, 54.862)
+        self.assertEqual(
+            len(snapshot.warning_reports_from_first_stroke_s), 1
+        )
+        self.assertAlmostEqual(
+            snapshot.warning_reports_from_first_stroke_s[0],
+            3.25,
+            places=3,
+        )
+
+        telemetry.begin_epoch(recovered=False)
+        self.assertEqual(telemetry.snapshot().incidents, ())
+
+    def test_queue_incident_decodes_capacity_and_saturated_write(self):
+        detail = (
+            INCIDENT_REASON_CAPACITY << INCIDENT_DETAIL_REASON_SHIFT
+        ) | 0x3FFF
+        packet = TOUCH_PACKET.pack(
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_HEARTBEAT,
+            255,
+            FLAG_QUEUE_DIAGNOSTICS
+            | FLAG_QUEUE_INCIDENT
+            | FLAG_INCIDENT_WRITER_BLOCKED,
+            32767,
+            0,
+            13,
+            (6_000_000_000 & ~0xFFFF) | detail,
+        )
+
+        incident = list(TouchPacketParser().feed(packet))[0]
+        self.assertEqual(
+            incident.incident_reason, INCIDENT_REASON_CAPACITY
+        )
+        self.assertAlmostEqual(
+            incident.incident_write_age_nanos / 1_000_000.0,
+            327.66,
+        )
 
     def test_queue_warning_is_timed_from_first_stroke(self):
         telemetry = QueueTelemetry()
@@ -210,6 +313,18 @@ class PacketParserTests(unittest.TestCase):
 
 
 class LatencyTests(unittest.TestCase):
+    def test_estimates_delivery_excess_for_incident_record(self):
+        latency = ClockNormalizedLatency()
+        latency.observe(100_000_000, 1_100_000_000, False)
+        latency.observe(200_000_000, 1_205_000_000, False)
+
+        self.assertAlmostEqual(
+            latency.estimate_excess_ms(
+                200_000_000, 1_205_000_000
+            ),
+            5.0,
+        )
+
     def test_clock_normalization_uses_fastest_offset_as_baseline(self):
         latency = ClockNormalizedLatency()
         latency.observe(100_000_000, 1_100_000_000, True)

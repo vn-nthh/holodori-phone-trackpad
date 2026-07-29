@@ -60,11 +60,21 @@ FLAG_INSIDE = 0x01
 FLAG_LOCKED = 0x02
 FLAG_SESSION_RESET = 0x04
 FLAG_HOST_RECOVERY = 0x08
+FLAG_QUEUE_INCIDENT = 0x04
+FLAG_INCIDENT_ACTIVE_TOUCH = 0x01
+FLAG_INCIDENT_WRITER_BLOCKED = 0x02
 FLAG_QUEUE_WARNING = 0x10
 FLAG_QUEUE_RESYNC = 0x20
 FLAG_QUEUE_FAILSAFE = 0x40
 FLAG_QUEUE_DIAGNOSTICS = 0x80
 QUEUE_AGE_REPORT_UNIT_NANOS = 10_000
+INCIDENT_WRITE_AGE_UNIT_NANOS = 20_000
+INCIDENT_DETAIL_DURATION_MASK = 0x3FFF
+INCIDENT_DETAIL_REASON_SHIFT = 14
+INCIDENT_REASON_WARNING = 0
+INCIDENT_REASON_RESYNC = 1
+INCIDENT_REASON_FAILSAFE = 2
+INCIDENT_REASON_CAPACITY = 3
 WINUSB_ATTACH_GRACE_SECONDS = 1.5
 INTERRUPTIBLE_READ_TIMEOUT_MS = 100
 
@@ -223,6 +233,7 @@ class TouchEvent:
     phone_event_nanos: int
     raw_x: int = 0
     raw_y: int = 0
+    incident_detail: int = 0
 
     @property
     def inside(self) -> bool:
@@ -253,6 +264,13 @@ class TouchEvent:
         )
 
     @property
+    def is_queue_incident(self) -> bool:
+        return bool(
+            self.has_queue_diagnostics
+            and self.flags & FLAG_QUEUE_INCIDENT
+        )
+
+    @property
     def queue_age_nanos(self) -> int:
         if not self.has_queue_diagnostics:
             return 0
@@ -264,9 +282,36 @@ class TouchEvent:
 
     @property
     def queue_resyncs(self) -> int:
-        if not self.has_queue_diagnostics:
+        if not self.has_queue_diagnostics or self.is_queue_incident:
             return 0
         return max(0, self.raw_y)
+
+    @property
+    def incident_reason(self) -> int:
+        if not self.is_queue_incident:
+            return INCIDENT_REASON_WARNING
+        return self.incident_detail >> INCIDENT_DETAIL_REASON_SHIFT
+
+    @property
+    def incident_active_touch(self) -> bool:
+        return bool(
+            self.is_queue_incident
+            and self.flags & FLAG_INCIDENT_ACTIVE_TOUCH
+        )
+
+    @property
+    def incident_writer_blocked(self) -> bool:
+        return bool(
+            self.is_queue_incident
+            and self.flags & FLAG_INCIDENT_WRITER_BLOCKED
+        )
+
+    @property
+    def incident_write_age_nanos(self) -> int:
+        if not self.is_queue_incident:
+            return 0
+        units = self.incident_detail & INCIDENT_DETAIL_DURATION_MASK
+        return units * INCIDENT_WRITE_AGE_UNIT_NANOS
 
 
 @dataclass(frozen=True)
@@ -293,6 +338,20 @@ class QueueTelemetrySnapshot:
     failsafe_reports: int
     host_recoveries: int
     warning_reports_from_first_stroke_s: tuple[float, ...]
+    incidents: tuple["QueueIncidentSnapshot", ...]
+
+
+@dataclass(frozen=True)
+class QueueIncidentSnapshot:
+    sequence: int
+    from_first_stroke_s: Optional[float]
+    queue_age_ms: float
+    queue_depth: int
+    reason: int
+    active_touch: bool
+    writer_blocked: bool
+    write_block_ms: float
+    delivery_excess_ms: Optional[float]
 
 
 class ClockNormalizedLatency:
@@ -409,6 +468,49 @@ class ClockNormalizedLatency:
             + sorted_values[upper] * fraction
         )
 
+    @staticmethod
+    def _residual_nanos(
+        phone_nanos: int,
+        offset_nanos: int,
+        trend: Optional[tuple[int, int, float, float]],
+    ) -> float:
+        if trend is None:
+            return float(offset_nanos)
+        (
+            reference_phone,
+            reference_offset,
+            intercept,
+            slope,
+        ) = trend
+        elapsed_seconds = (
+            phone_nanos - reference_phone
+        ) / 1_000_000_000.0
+        predicted_offset = reference_offset + (
+            intercept + slope * elapsed_seconds
+        ) * 1_000_000.0
+        return offset_nanos - predicted_offset
+
+    def estimate_excess_ms(
+        self, phone_event_nanos: int, host_arrival_nanos: int
+    ) -> Optional[float]:
+        """Estimate corrected excess for one observed diagnostic record."""
+        if phone_event_nanos <= 0:
+            return None
+        observations = list(self._observations)
+        if not observations:
+            return None
+        trend = self._skew_trend(observations)
+        residuals = [
+            self._residual_nanos(phone, offset, trend)
+            for phone, offset, _ in observations
+        ]
+        baseline = min(residuals)
+        target_offset = host_arrival_nanos - phone_event_nanos
+        target = self._residual_nanos(
+            phone_event_nanos, target_offset, trend
+        )
+        return max(0.0, target - baseline) / 1_000_000.0
+
     def snapshot(self) -> LatencySnapshot:
         observations = list(self._observations)
         if not observations:
@@ -428,22 +530,9 @@ class ClockNormalizedLatency:
         trend = self._skew_trend(observations)
         residuals: list[tuple[float, bool]] = []
         for phone_nanos, offset_nanos, include_sample in observations:
-            if trend is None:
-                residual = float(offset_nanos)
-            else:
-                (
-                    reference_phone,
-                    reference_offset,
-                    intercept,
-                    slope,
-                ) = trend
-                elapsed_seconds = (
-                    phone_nanos - reference_phone
-                ) / 1_000_000_000.0
-                predicted_offset = reference_offset + (
-                    intercept + slope * elapsed_seconds
-                ) * 1_000_000.0
-                residual = offset_nanos - predicted_offset
+            residual = self._residual_nanos(
+                phone_nanos, offset_nanos, trend
+            )
             residuals.append((residual, include_sample))
 
         baseline = min(residual for residual, _ in residuals)
@@ -507,13 +596,20 @@ class QueueTelemetry:
         self.host_recoveries = host_recoveries
         self.first_stroke_nanos: Optional[int] = None
         self.warning_report_nanos: list[int] = []
+        self.incident_records: list[
+            tuple[TouchEvent, Optional[float]]
+        ] = []
 
     def begin_epoch(self, recovered: bool) -> None:
         self.reset(preserve_host_recoveries=True)
         if recovered:
             self.host_recoveries += 1
 
-    def observe(self, event: TouchEvent) -> None:
+    def observe(
+        self,
+        event: TouchEvent,
+        delivery_excess_ms: Optional[float] = None,
+    ) -> None:
         if (
             event.action == ACTION_DOWN
             and event.phone_event_nanos > 0
@@ -521,6 +617,13 @@ class QueueTelemetry:
         ):
             self.first_stroke_nanos = event.phone_event_nanos
         if not event.has_queue_diagnostics:
+            return
+        if event.is_queue_incident:
+            self.max_age_nanos = max(
+                self.max_age_nanos, event.queue_age_nanos
+            )
+            self.max_depth = max(self.max_depth, event.queue_depth)
+            self.incident_records.append((event, delivery_excess_ms))
             return
         self.reports += 1
         self.max_age_nanos = max(
@@ -536,8 +639,40 @@ class QueueTelemetry:
             self.failsafe_reports += 1
 
     def snapshot(self) -> QueueTelemetrySnapshot:
-        warning_offsets: tuple[float, ...] = ()
-        if self.first_stroke_nanos is not None:
+        incident_snapshots: tuple[QueueIncidentSnapshot, ...] = tuple(
+            QueueIncidentSnapshot(
+                sequence=event.sequence,
+                from_first_stroke_s=(
+                    (
+                        event.phone_event_nanos
+                        - self.first_stroke_nanos
+                    )
+                    / 1_000_000_000.0
+                    if self.first_stroke_nanos is not None
+                    and event.phone_event_nanos > 0
+                    else None
+                ),
+                queue_age_ms=event.queue_age_nanos / 1_000_000.0,
+                queue_depth=event.queue_depth,
+                reason=event.incident_reason,
+                active_touch=event.incident_active_touch,
+                writer_blocked=event.incident_writer_blocked,
+                write_block_ms=(
+                    event.incident_write_age_nanos / 1_000_000.0
+                ),
+                delivery_excess_ms=delivery_excess_ms,
+            )
+            for event, delivery_excess_ms in self.incident_records
+        )
+        warning_offsets: tuple[float, ...] = tuple(
+            incident.from_first_stroke_s
+            for incident in incident_snapshots
+            if incident.from_first_stroke_s is not None
+        )
+        if (
+            not warning_offsets
+            and self.first_stroke_nanos is not None
+        ):
             warning_offsets = tuple(
                 (warning_nanos - self.first_stroke_nanos)
                 / 1_000_000_000.0
@@ -552,6 +687,7 @@ class QueueTelemetry:
             failsafe_reports=self.failsafe_reports,
             host_recoveries=self.host_recoveries,
             warning_reports_from_first_stroke_s=warning_offsets,
+            incidents=incident_snapshots,
         )
 
 
@@ -591,6 +727,14 @@ class TouchPacketParser:
                     if self._on_bad_version is not None:
                         self._on_bad_version(version)
                 continue
+            incident_detail = 0
+            if (
+                action == ACTION_HEARTBEAT
+                and flags & FLAG_QUEUE_DIAGNOSTICS
+                and flags & FLAG_QUEUE_INCIDENT
+            ):
+                incident_detail = event_ns & 0xFFFF
+                event_ns &= ~0xFFFF
             yield TouchEvent(
                 action=action,
                 pointer_id=pointer_id,
@@ -601,6 +745,7 @@ class TouchPacketParser:
                 phone_event_nanos=event_ns,
                 raw_x=x,
                 raw_y=y,
+                incident_detail=incident_detail,
             )
 
 
@@ -1783,7 +1928,7 @@ class AoaReceiver:
                                 # CANCEL so no pre-stall key state survives.
                                 self.on_event(event)
 
-                            self._queue_telemetry.observe(event)
+                            delivery_excess_ms = None
                             if self.benchmark:
                                 self._latency.observe(
                                     event.phone_event_nanos,
@@ -1793,6 +1938,17 @@ class AoaReceiver:
                                         and not event.session_reset
                                     ),
                                 )
+                                if event.is_queue_incident:
+                                    delivery_excess_ms = (
+                                        self._latency.estimate_excess_ms(
+                                            event.phone_event_nanos,
+                                            arrival_nanos,
+                                        )
+                                    )
+                            self._queue_telemetry.observe(
+                                event,
+                                delivery_excess_ms=delivery_excess_ms,
+                            )
                             if event.session_reset:
                                 # The initial marker only establishes the
                                 # epoch. A later recovery marker was already

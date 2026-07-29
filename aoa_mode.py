@@ -13,6 +13,10 @@ from aoa_transport import (
     ACTION_HEARTBEAT,
     ACTION_UP,
     AoaReceiver,
+    INCIDENT_REASON_CAPACITY,
+    INCIDENT_REASON_FAILSAFE,
+    INCIDENT_REASON_RESYNC,
+    INCIDENT_REASON_WARNING,
     TouchEvent,
 )
 from connection_doctor import (
@@ -26,6 +30,12 @@ from touch_overlay import TouchOverlay
 
 STATUS_REPEAT_WINDOW_SECONDS = 5.0
 DIAGNOSTIC_VIEW_INTERVAL_SECONDS = 3.0
+QUEUE_INCIDENT_LABELS = {
+    INCIDENT_REASON_WARNING: "warning-only (no CANCEL)",
+    INCIDENT_REASON_RESYNC: "25 ms resync (CANCEL sent)",
+    INCIDENT_REASON_FAILSAFE: "100 ms failsafe (CANCEL sent)",
+    INCIDENT_REASON_CAPACITY: "capacity resync (CANCEL sent)",
+}
 
 
 class AoaTouchRouter:
@@ -375,19 +385,58 @@ def run_aoa_mode(
     print(
         f"[STATS] Session: {stats['presses']} presses, "
         f"{stats['releases']} releases, {stats['drags']} drags, "
-        f"{router.sequence_gaps} dropped records"
+        f"{router.sequence_gaps} USB sequence gaps"
     )
     queue_stats = receiver.queue_telemetry_snapshot()
-    if queue_stats.reports or queue_stats.host_recoveries:
+    if (
+        queue_stats.reports
+        or queue_stats.host_recoveries
+        or queue_stats.incidents
+    ):
         print(
             f"[AOA QUEUE] max {queue_stats.max_age_ms:.2f} ms old, "
             f"depth {queue_stats.max_depth}, "
-            f"{queue_stats.warning_reports} warning reports, "
+            f"{queue_stats.warning_reports} aggregate warning reports, "
+            f"{len(queue_stats.incidents)} exact incidents, "
             f"{queue_stats.resyncs} resyncs, "
             f"{queue_stats.failsafe_reports} failsafe reports, "
             f"{queue_stats.host_recoveries} host recoveries"
         )
-        if queue_stats.warning_reports_from_first_stroke_s:
+        if queue_stats.incidents:
+            for index, incident in enumerate(
+                queue_stats.incidents, start=1
+            ):
+                offset = (
+                    f"{incident.from_first_stroke_s:+.3f}s"
+                    if incident.from_first_stroke_s is not None
+                    else "time unavailable"
+                )
+                reason = QUEUE_INCIDENT_LABELS.get(
+                    incident.reason, "unknown queue incident"
+                )
+                print(
+                    f"[AOA INCIDENT {index}] {offset}: {reason}; "
+                    f"queue {incident.queue_age_ms:.2f} ms old, "
+                    f"depth {incident.queue_depth}, "
+                    "active touch "
+                    f"{'yes' if incident.active_touch else 'no'}"
+                )
+                writer = (
+                    "cause hint: USB/host-reader backpressure; "
+                    "Android write stalled for at least "
+                    f"{incident.write_block_ms:.2f} ms"
+                    if incident.writer_blocked
+                    else "cause hint: Android writer scheduling/lock delay; "
+                    "no slow USB write overlapped the queued sample"
+                )
+                delivery = (
+                    f"; diagnostic delivery excess "
+                    f"{incident.delivery_excess_ms:.3f} ms"
+                    if incident.delivery_excess_ms is not None
+                    else ""
+                )
+                print(f"                 {writer}{delivery}")
+        elif queue_stats.warning_reports_from_first_stroke_s:
             warning_times = ", ".join(
                 f"{offset:+.3f}s"
                 for offset in queue_stats.warning_reports_from_first_stroke_s

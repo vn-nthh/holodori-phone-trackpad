@@ -11,6 +11,10 @@ final class TouchSample {
     static final int FLAG_LOCKED = 2;
     static final int FLAG_SESSION_RESET = 0x04;
     static final int FLAG_HOST_RECOVERY = 0x08;
+    // Heartbeat-only contextual flags for exact queue incidents.
+    static final int FLAG_INCIDENT_ACTIVE_TOUCH = 0x01;
+    static final int FLAG_INCIDENT_WRITER_BLOCKED = 0x02;
+    static final int FLAG_QUEUE_INCIDENT = 0x04;
     static final int FLAG_QUEUE_WARNING = 0x10;
     static final int FLAG_QUEUE_RESYNC = 0x20;
     static final int FLAG_QUEUE_FAILSAFE = 0x40;

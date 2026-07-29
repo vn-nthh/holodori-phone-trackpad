@@ -163,8 +163,12 @@ The PC ignores records queued for an older process until Android sends a session
 reset. A one-time host attach record tells an already-running Android transport
 to clear its stale queue and report a host recovery. Queue and benchmark
 summaries therefore describe only the current transport epoch. Experimental
-queue output lists every warning report timestamp relative to the first
-`ACTION_DOWN` stroke in that epoch.
+queue output lists every warning incident relative to the first `ACTION_DOWN`
+stroke in that epoch. Each incident distinguishes warning-only stalls from
+destructive resyncs and reports queue age/depth, whether a touch was active,
+whether Android was blocked in the USB write, and clock-corrected diagnostic
+delivery excess when `--aoa-benchmark` is active. Session stats call wire-level
+losses “USB sequence gaps”; phone-side queue incidents are reported separately.
 
 For an A/B check of the overlapped read pipeline, run comparable sessions with:
 
