@@ -258,10 +258,16 @@ class SlotState:
     x: int = 0
     y: int = 0
     changed: bool = False
+    blocked_until_lift: bool = False
 
 
 class TouchProcessor:
-    """Processes raw getevent data, maps touches to play zone columns, sends keys."""
+    """
+    Process raw getevent frames and map touches to play-zone keys.
+
+    Unlocking cancels all gameplay input. Relocking consumes its boundary
+    frame, and contacts already down must lift before they can press a key.
+    """
 
     def __init__(self, keys: List[str], max_x: int, max_y: int,
                  shared_config: Optional[SharedConfig] = None,
@@ -276,12 +282,14 @@ class TouchProcessor:
         self.current_slot = 0
         self.active_keys: Dict[int, str] = {}  # slot -> key name
         self.key_counts: Dict[str, int] = {}
+        self._possibly_held_keys = set()
         self.stats = {"events": 0, "presses": 0, "releases": 0, "drags": 0}
 
         # Cached view of SharedConfig, refreshed only when its version changes
         self._cfg_version = -1
         self._cfg_locked = True
         self._cfg_zones: list = []
+        self._previous_locked: Optional[bool] = None
 
     def _refresh_config(self):
         """Re-read shared config only when it actually changed (cheap hot path)."""
@@ -335,6 +343,8 @@ class TouchProcessor:
             elif ev_code == ABS_MT_TRACKING_ID:
                 slot = self._get_slot(self.current_slot)
                 slot.tracking_id = ev_value
+                if ev_value == -1:
+                    slot.blocked_until_lift = False
                 slot.changed = True
             elif ev_code == ABS_MT_POSITION_X:
                 slot = self._get_slot(self.current_slot)
@@ -370,10 +380,41 @@ class TouchProcessor:
 
     def _handle_sync(self):
         self._refresh_config()
-        # Don't send keys if phone UI is unlocked (user is configuring zones)
+        previous_locked = self._previous_locked
+        self._previous_locked = self._cfg_locked
+
+        if previous_locked is True and not self._cfg_locked:
+            # Unlocking the editor is an input-cancellation boundary. Preserve
+            # raw touch coordinates for visualization, but discard every
+            # gameplay owner and consume this frame even if a key-up fails.
+            try:
+                self.release_all_keys(
+                    preserve_touches=True,
+                    raise_on_failure=True,
+                )
+            finally:
+                self.active_keys.clear()
+                self.key_counts.clear()
+                for slot in self.slots.values():
+                    slot.changed = False
+                    slot.blocked_until_lift = False
+            return
+
+        # Don't send keys if phone UI is unlocked (user is configuring zones).
         if not self._cfg_locked:
-            # Still track positions but don't send keys
+            # Raw slot state remains current for editor visualization, while
+            # every gameplay transition is consumed at its SYN_REPORT.
             for slot in self.slots.values():
+                slot.changed = False
+            return
+
+        if previous_locked is False:
+            # Relocking starts a new gameplay epoch. Fingers that are already
+            # touching must lift before their slot can synthesize input.
+            self.active_keys.clear()
+            self.key_counts.clear()
+            for slot in self.slots.values():
+                slot.blocked_until_lift = slot.tracking_id != -1
                 slot.changed = False
             return
 
@@ -387,6 +428,9 @@ class TouchProcessor:
             if not slot.changed:
                 continue
             slot.changed = False
+
+            if slot.blocked_until_lift:
+                continue
 
             if slot.tracking_id == -1:
                 new_key = None
@@ -424,8 +468,12 @@ class TouchProcessor:
         for key in keys_down:
             try:
                 self._inject_key_down(key)
+                self._possibly_held_keys.add(key)
                 self.stats["presses"] += 1
             except BaseException as exc:
+                # A failed injection can be ambiguous: retain the key for
+                # conservative final cleanup even if SendInput reported false.
+                self._possibly_held_keys.add(key)
                 failures.append(("down", key, exc))
                 if primary_error is None:
                     primary_error = exc
@@ -433,23 +481,24 @@ class TouchProcessor:
         for key in keys_up:
             try:
                 self._inject_key_up(key)
+                self._possibly_held_keys.discard(key)
                 self.stats["releases"] += 1
             except BaseException as exc:
+                self._possibly_held_keys.add(key)
                 failures.append(("up", key, exc))
                 if primary_error is None:
                     primary_error = exc
 
         if failures:
-            # Abort touch ownership and retain one conservative count for each
-            # key that may still be down. Outer cleanup releases this union.
-            possibly_held = dict.fromkeys(
-                list(old_key_counts) + keys_down, 1,
-            )
+            # Abort touch ownership. The separate possibly-held set retains
+            # every ambiguous physical key for outer cleanup without treating
+            # uncertainty as active touch ownership or a reference count.
             self.active_keys.clear()
-            self.key_counts = possibly_held
+            self.key_counts.clear()
             for slot in self.slots.values():
                 slot.tracking_id = -1
                 slot.changed = False
+                slot.blocked_until_lift = False
             try:
                 primary_error.touch_failures = tuple(failures)
             except BaseException:
@@ -463,21 +512,34 @@ class TouchProcessor:
             if old_key and new_key
         )
 
-    def release_all_keys(self):
+    def release_all_keys(
+            self,
+            *,
+            preserve_touches: bool = False,
+            raise_on_failure: bool = False):
         """Best-effort release of every synthesized key; safe to call twice."""
-        held_keys = [
+        candidates = set(self._possibly_held_keys)
+        candidates.update(
             key for key, count in self.key_counts.items() if count > 0
-        ]
+        )
+        candidates.update(self.active_keys.values())
+        held_keys = [key for key in self.keys if key in candidates]
+        held_keys.extend(sorted(candidates.difference(held_keys)))
 
-        # Counts are the authoritative Windows key-down ownership state.
-        # Clear all logical state before injection so repeated cleanup is safe.
+        # Clear gameplay ownership before injection. Each candidate remains in
+        # the conservative set until its key-up succeeds, so a failed cleanup
+        # is retryable without reviving slot ownership or reference counts.
         self.key_counts.clear()
         self.active_keys.clear()
-        for slot in self.slots.values():
-            slot.tracking_id = -1
-            slot.changed = False
+        self._possibly_held_keys.update(held_keys)
+        if not preserve_touches:
+            for slot in self.slots.values():
+                slot.tracking_id = -1
+                slot.changed = False
+                slot.blocked_until_lift = False
 
         failures = []
+        primary_error = None
         for key in held_keys:
             try:
                 if self.test_mode:
@@ -485,12 +547,24 @@ class TouchProcessor:
                 else:
                     released = release_key(key)
                 if not released:
-                    failures.append(key)
-            except BaseException:
-                failures.append(key)
+                    raise RuntimeError(f"Could not release key {key!r}")
+                self._possibly_held_keys.discard(key)
+            except BaseException as exc:
+                self._possibly_held_keys.add(key)
+                failures.append(("up", key, exc))
+                if primary_error is None:
+                    primary_error = exc
             finally:
                 self.stats["releases"] += 1
-        return failures
+
+        if primary_error is not None and raise_on_failure:
+            try:
+                primary_error.touch_failures = tuple(failures)
+            except BaseException:
+                pass
+            raise primary_error
+
+        return [key for _, key, _ in failures]
 
 
 # ============================================================================
