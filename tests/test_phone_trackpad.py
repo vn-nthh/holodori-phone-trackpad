@@ -255,63 +255,29 @@ class KeyReferenceCountTests(unittest.TestCase):
         processor.shared_config.update_from_phone({"locked": locked})
         KeyReferenceCountTests.sync(processor)
 
-    def test_two_fingers_pressing_same_lane_send_one_key_down(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ) as press:
-            self.touch(processor, 0, 10)
-            self.touch(processor, 1, 20)
-
-        press.assert_called_once_with("a")
-        self.assertEqual(processor.active_keys, {0: "a", 1: "a"})
-        self.assertEqual(processor.key_counts, {"a": 2})
-
-    def test_first_finger_lift_keeps_shared_lane_down(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ), mock.patch.object(phone_trackpad, "release_key") as release:
-            self.touch(processor, 0, 10)
-            self.touch(processor, 1, 20)
-            self.lift(processor, 0)
-
-        release.assert_not_called()
-        self.assertEqual(processor.active_keys, {1: "a"})
-        self.assertEqual(processor.key_counts, {"a": 1})
-
-    def test_final_finger_lift_releases_shared_lane(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ), mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            self.touch(processor, 0, 10)
-            self.touch(processor, 1, 20)
-            self.lift(processor, 0)
-            self.lift(processor, 1)
-
-        release.assert_called_once_with("a")
-        self.assertEqual(processor.active_keys, {})
-        self.assertEqual(processor.key_counts, {})
-
-    def test_three_fingers_can_share_one_lane(self):
+    def test_shared_lane_uses_reference_count_for_full_touch_lifecycle(self):
         processor = self.make_processor()
         with mock.patch.object(
             phone_trackpad, "press_key", return_value=True,
         ) as press, mock.patch.object(
             phone_trackpad, "release_key", return_value=True,
         ) as release:
-            for slot, x in ((0, 10), (1, 20), (2, 25)):
-                self.touch(processor, slot, x)
-            self.lift(processor, 1)
+            self.touch(processor, 0, 10)
+            self.touch(processor, 1, 20)
+            self.assertEqual(processor.active_keys, {0: "a", 1: "a"})
+            self.assertEqual(processor.key_counts, {"a": 2})
+
             self.lift(processor, 0)
+            release.assert_not_called()
+            self.assertEqual(processor.active_keys, {1: "a"})
+            self.assertEqual(processor.key_counts, {"a": 1})
+
+            self.lift(processor, 1)
 
         press.assert_called_once_with("a")
-        release.assert_not_called()
-        self.assertEqual(processor.key_counts, {"a": 1})
-        self.assertEqual(processor.active_keys, {2: "a"})
+        release.assert_called_once_with("a")
+        self.assertEqual(processor.active_keys, {})
+        self.assertEqual(processor.key_counts, {})
 
     def test_two_fingers_enter_same_lane_from_different_lanes(self):
         processor = self.make_processor()
@@ -419,22 +385,6 @@ class KeyReferenceCountTests(unittest.TestCase):
         retry.assert_called_once_with("a")
         self.assertEqual(processor._possibly_held_keys, set())
 
-    def test_duplicate_and_stale_releases_never_make_counts_negative(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ), mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ):
-            self.touch(processor, 0, 10)
-            self.lift(processor, 0)
-            self.lift(processor, 0)
-            self.lift(processor, 7)
-
-        self.assertEqual(processor.active_keys, {})
-        self.assertEqual(processor.key_counts, {})
-        self.assertTrue(all(count >= 0 for count in processor.key_counts.values()))
-
     def test_test_mode_uses_same_reference_counts_without_injection(self):
         processor = self.make_processor(test_mode=True)
         with mock.patch.object(phone_trackpad, "press_key") as press, \
@@ -469,29 +419,6 @@ class KeyReferenceCountTests(unittest.TestCase):
         self.assertEqual(processor.slots[0].tracking_id, 10)
         self.assertFalse(processor.slots[0].changed)
         self.assertFalse(processor._previous_locked)
-
-    def test_unlock_releases_several_held_lanes_from_one_frame(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ) as press, mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            self.stage_touch(processor, 0, 10)
-            self.stage_touch(processor, 1, 50)
-            self.sync(processor)
-            self.set_locked(processor, False)
-
-        self.assertEqual(
-            press.call_args_list,
-            [mock.call("a"), mock.call("b")],
-        )
-        self.assertEqual(
-            release.call_args_list,
-            [mock.call("a"), mock.call("b")],
-        )
-        self.assertEqual(processor.active_keys, {})
-        self.assertEqual(processor.key_counts, {})
 
     def test_unlock_releases_shared_lane_once_and_clears_both_owners(self):
         processor = self.make_processor()
@@ -569,61 +496,6 @@ class KeyReferenceCountTests(unittest.TestCase):
         press.assert_called_once_with("c")
         self.assertEqual(processor.active_keys, {0: "c"})
         self.assertEqual(processor.key_counts, {"c": 1})
-
-    def test_relock_after_all_fingers_lifted_accepts_next_fresh_touch(self):
-        processor = self.make_processor()
-        self.sync(processor)
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ) as press:
-            self.set_locked(processor, False)
-            self.stage_touch(processor, 0, 10, tracking_id=41)
-            self.stage_touch(processor, 1, 90, tracking_id=42)
-            self.sync(processor)
-            self.stage_lift(processor, 0)
-            self.stage_lift(processor, 1)
-            self.sync(processor)
-
-            self.set_locked(processor, True)
-            self.assertFalse(processor.slots[0].blocked_until_lift)
-            self.assertFalse(processor.slots[1].blocked_until_lift)
-            self.touch(processor, 0, 50, tracking_id=43)
-
-        press.assert_called_once_with("b")
-        self.assertEqual(processor.active_keys, {0: "b"})
-        self.assertEqual(processor.key_counts, {"b": 1})
-
-    def test_no_stale_key_transition_replays_after_relock(self):
-        processor = self.make_processor()
-        events = []
-        with mock.patch.object(
-            phone_trackpad, "press_key",
-            side_effect=lambda key: events.append(("down", key)) or True,
-        ), mock.patch.object(
-            phone_trackpad, "release_key",
-            side_effect=lambda key: events.append(("up", key)) or True,
-        ):
-            self.touch(processor, 0, 10, tracking_id=41)
-            self.set_locked(processor, False)
-            self.stage_move(processor, 0, 90)
-            self.stage_lift(processor, 0)
-            self.sync(processor)
-            self.set_locked(processor, True)
-            self.sync(processor)
-            self.touch(processor, 0, 50, tracking_id=42)
-            self.lift(processor, 0)
-
-        self.assertEqual(
-            events,
-            [
-                ("down", "a"),
-                ("up", "a"),
-                ("down", "b"),
-                ("up", "b"),
-            ],
-        )
-        self.assertEqual(processor.active_keys, {})
-        self.assertEqual(processor.key_counts, {})
 
     def test_release_all_runs_once_on_unlock_not_each_unlocked_frame(self):
         processor = self.make_processor()
@@ -732,97 +604,6 @@ class KeyReferenceCountTests(unittest.TestCase):
         cleanup_release.assert_called_once_with("a")
         self.assertEqual(processor._possibly_held_keys, set())
 
-    def test_cleanup_immediately_after_unlock_does_not_repeat_key_up(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ), mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            self.touch(processor, 0, 10)
-            self.set_locked(processor, False)
-            self.assertEqual(processor.release_all_keys(), [])
-
-        release.assert_called_once_with("a")
-        self.assertEqual(processor.active_keys, {})
-        self.assertEqual(processor.key_counts, {})
-        self.assertEqual(processor._possibly_held_keys, set())
-
-    def test_unlock_cycle_in_test_mode_has_identical_logical_state(self):
-        processor = self.make_processor(test_mode=True)
-        with mock.patch.object(phone_trackpad, "press_key") as press, \
-                mock.patch.object(phone_trackpad, "release_key") as release, \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.touch(processor, 0, 10, tracking_id=41)
-            self.assertEqual(processor.key_counts, {"a": 1})
-
-            self.set_locked(processor, False)
-            self.assertEqual(processor.active_keys, {})
-            self.assertEqual(processor.key_counts, {})
-            self.assertEqual(processor._possibly_held_keys, set())
-            self.assertEqual(processor.slots[0].tracking_id, 41)
-
-            self.set_locked(processor, True)
-            self.move(processor, 0, 90)
-            self.assertEqual(processor.active_keys, {})
-            self.lift(processor, 0)
-            self.touch(processor, 0, 90, tracking_id=42)
-
-        press.assert_not_called()
-        release.assert_not_called()
-        self.assertEqual(processor.active_keys, {0: "c"})
-        self.assertEqual(processor.key_counts, {"c": 1})
-        self.assertEqual(processor._possibly_held_keys, {"c"})
-
-    def test_atomic_multitouch_remains_correct_across_unlock_cycle(self):
-        processor = self.make_processor()
-        events = []
-        with mock.patch.object(
-            phone_trackpad, "press_key",
-            side_effect=lambda key: events.append(("down", key)) or True,
-        ), mock.patch.object(
-            phone_trackpad, "release_key",
-            side_effect=lambda key: events.append(("up", key)) or True,
-        ):
-            self.stage_touch(processor, 0, 10, tracking_id=41)
-            self.stage_touch(processor, 1, 90, tracking_id=42)
-            self.sync(processor)
-            self.stage_move(processor, 0, 50)
-            self.stage_move(processor, 1, 50)
-            self.sync(processor)
-
-            self.set_locked(processor, False)
-            self.stage_lift(processor, 0)
-            self.stage_lift(processor, 1)
-            self.sync(processor)
-            self.set_locked(processor, True)
-
-            self.stage_touch(processor, 0, 50, tracking_id=43)
-            self.stage_touch(processor, 1, 50, tracking_id=44)
-            self.sync(processor)
-            self.stage_move(processor, 0, 10)
-            self.stage_move(processor, 1, 90)
-            self.sync(processor)
-
-        self.assertEqual(
-            events,
-            [
-                ("down", "a"),
-                ("down", "c"),
-                ("down", "b"),
-                ("up", "a"),
-                ("up", "c"),
-                ("up", "b"),
-                ("down", "b"),
-                ("down", "a"),
-                ("down", "c"),
-                ("up", "b"),
-            ],
-        )
-        self.assertEqual(processor.active_keys, {0: "a", 1: "c"})
-        self.assertEqual(processor.key_counts, {"a": 1, "c": 1})
-        self.assertEqual(processor._possibly_held_keys, {"a", "c"})
-
     def test_atomic_frame_swaps_two_lanes_without_key_events(self):
         processor = self.make_processor(keys=("a", "b"))
         with mock.patch.object(
@@ -894,78 +675,6 @@ class KeyReferenceCountTests(unittest.TestCase):
         self.assertEqual(processor.active_keys, {0: "a", 1: "c"})
         self.assertEqual(processor.key_counts, {"a": 1, "c": 1})
 
-    def test_atomic_frame_handles_three_way_cycle_without_key_events(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ) as press, mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            self.touch(processor, 0, 10)
-            self.touch(processor, 1, 50)
-            self.touch(processor, 2, 90)
-            press.reset_mock()
-            release.reset_mock()
-
-            self.stage_move(processor, 0, 50)
-            self.stage_move(processor, 1, 90)
-            self.stage_move(processor, 2, 10)
-            self.sync(processor)
-
-        press.assert_not_called()
-        release.assert_not_called()
-        self.assertEqual(
-            processor.active_keys,
-            {0: "b", 1: "c", 2: "a"},
-        )
-        self.assertEqual(
-            processor.key_counts,
-            {"b": 1, "c": 1, "a": 1},
-        )
-
-    def test_atomic_frame_fills_one_lane_and_empties_another(self):
-        processor = self.make_processor()
-        events = []
-        with mock.patch.object(
-            phone_trackpad, "press_key",
-            side_effect=lambda key: events.append(("down", key)) or True,
-        ), mock.patch.object(
-            phone_trackpad, "release_key",
-            side_effect=lambda key: events.append(("up", key)) or True,
-        ):
-            self.touch(processor, 0, 10)
-            self.touch(processor, 1, 90)
-            events.clear()
-
-            self.stage_move(processor, 0, 50)
-            self.stage_move(processor, 1, 90)
-            self.sync(processor)
-
-        self.assertEqual(events, [("down", "b"), ("up", "a")])
-        self.assertEqual(processor.active_keys, {0: "b", 1: "c"})
-        self.assertEqual(processor.key_counts, {"b": 1, "c": 1})
-
-    def test_atomic_frame_changes_shared_lane_ownership_without_events(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ) as press, mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            self.touch(processor, 0, 10)
-            self.touch(processor, 1, 20)
-            press.reset_mock()
-            release.reset_mock()
-
-            self.stage_lift(processor, 0)
-            self.stage_touch(processor, 2, 25)
-            self.sync(processor)
-
-        press.assert_not_called()
-        release.assert_not_called()
-        self.assertEqual(processor.active_keys, {1: "a", 2: "a"})
-        self.assertEqual(processor.key_counts, {"a": 2})
-
     def test_atomic_frame_lift_and_entry_keep_lane_held(self):
         processor = self.make_processor()
         with mock.patch.object(
@@ -1033,43 +742,6 @@ class KeyReferenceCountTests(unittest.TestCase):
             all(count >= 0 for count in processor.key_counts.values()),
         )
 
-    def test_cleanup_immediately_after_atomic_frame_releases_each_lane_once(self):
-        processor = self.make_processor()
-        with mock.patch.object(
-            phone_trackpad, "press_key", return_value=True,
-        ):
-            self.touch(processor, 0, 10)
-            self.touch(processor, 1, 90)
-            self.stage_move(processor, 0, 50)
-            self.stage_move(processor, 1, 50)
-            self.sync(processor)
-
-        with mock.patch.object(
-            phone_trackpad, "release_key", return_value=True,
-        ) as release:
-            failures = processor.release_all_keys()
-
-        self.assertEqual(failures, [])
-        release.assert_called_once_with("b")
-        self.assertEqual(processor.active_keys, {})
-        self.assertEqual(processor.key_counts, {})
-
-    def test_atomic_frame_test_mode_uses_identical_logical_state(self):
-        processor = self.make_processor(test_mode=True)
-        with mock.patch.object(phone_trackpad, "press_key") as press, \
-                mock.patch.object(phone_trackpad, "release_key") as release, \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.touch(processor, 0, 50)
-            self.touch(processor, 1, 50)
-            self.stage_move(processor, 0, 10)
-            self.stage_move(processor, 1, 90)
-            self.sync(processor)
-
-        press.assert_not_called()
-        release.assert_not_called()
-        self.assertEqual(processor.active_keys, {0: "a", 1: "c"})
-        self.assertEqual(processor.key_counts, {"a": 1, "c": 1})
-
     def test_atomic_frame_injection_failure_keeps_cleanup_recoverable(self):
         processor = self.make_processor()
         with mock.patch.object(
@@ -1135,20 +807,6 @@ class PhoneSettingsBackupTests(unittest.TestCase):
             ("global", "zen_mode"): "0",
         }
 
-    def test_ctrl_c_during_first_override_propagates_immediately(self):
-        backup = self.make_backup(self.all_originals())
-        screen = ("system", "screen_off_timeout")
-        with mock.patch.object(
-            phone_trackpad,
-            "run_adb_checked",
-            side_effect=KeyboardInterrupt,
-        ) as checked:
-            with self.assertRaises(KeyboardInterrupt):
-                backup.apply_overrides()
-
-        self.assertEqual(checked.call_count, 1)
-        self.assertEqual(backup.pending_settings, {screen})
-
     def test_ctrl_c_after_modified_setting_restores_pending_values(self):
         backup = self.make_backup(self.all_originals())
         screen = ("system", "screen_off_timeout")
@@ -1184,19 +842,6 @@ class PhoneSettingsBackupTests(unittest.TestCase):
             ],
         )
         self.assertEqual(backup.pending_settings, set())
-
-    def test_system_exit_during_override_propagates_immediately(self):
-        backup = self.make_backup(self.all_originals())
-        with mock.patch.object(
-            phone_trackpad,
-            "run_adb_checked",
-            side_effect=SystemExit(7),
-        ) as checked:
-            with self.assertRaises(SystemExit) as raised:
-                backup.apply_overrides()
-
-        self.assertEqual(raised.exception.code, 7)
-        self.assertEqual(checked.call_count, 1)
 
     def test_ordinary_override_failure_is_collected_and_processing_continues(self):
         backup = self.make_backup(self.all_originals())

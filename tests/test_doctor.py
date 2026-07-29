@@ -1227,41 +1227,10 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         )
         self.assertEqual(doctor.snapshot().reconnect_attempts, 1)
 
-    def test_active_winusb_disconnect_is_not_reported_as_missing_driver(self):
+    def test_disconnect_while_keys_held_releases_everything(self):
         from winusb_transport import WinUsbError
 
-        dead = StreamingConnection(
-            script=[packet(ACTION_HEARTBEAT, sequence=1)],
-            error=WinUsbError(
-                "The device is not connected",
-                operation="read the AOA WinUSB stream",
-                native_code=1167,
-            ),
-        )
-        live = StreamingConnection(
-            script=[packet(ACTION_HEARTBEAT, sequence=1)], idle=True
-        )
         doctor = ConnectionDoctor()
-
-        run_receiver(
-            connections=[dead, live],
-            doctor=doctor,
-            heartbeat_timeout=0.5,
-            stop_after_events=2,
-        )
-
-        seen = codes(doctor)
-        self.assertIn(dc.HPT_LINK_DISCONNECTED, seen)
-        self.assertNotIn(dc.HPT_USB_WINUSB_UNAVAILABLE, seen)
-
-    def test_disconnect_while_keys_held_releases_everything(self):
-        doctor = ConnectionDoctor()
-        down_packet = packet(
-            ACTION_DOWN,
-            pointer_id=1,
-            flags=FLAG_INSIDE | FLAG_LOCKED,
-            sequence=1,
-        )
         # Place the touch in lane 1 of 2 (x=0.25 -> key "a").
         down_packet = TOUCH_PACKET.pack(
             TOUCH_MAGIC, 1, ACTION_DOWN, 1,
@@ -1269,10 +1238,10 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         )
         dead = StreamingConnection(
             script=[down_packet],
-            error=AoaError(
-                "read the AOA touch stream: LIBUSB_ERROR_NO_DEVICE",
-                native_name="LIBUSB_ERROR_NO_DEVICE",
-                native_code=-4,
+            error=WinUsbError(
+                "The device is not connected",
+                operation="read the AOA WinUSB stream",
+                native_code=1167,
             ),
         )
         live = StreamingConnection(
@@ -1287,9 +1256,11 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         self.assertEqual(down, ["a"])
         self.assertEqual(up, ["a"])
         self.assertEqual(router.key_counts, {})
+        self.assertIn(dc.HPT_LINK_DISCONNECTED, codes(doctor))
         self.assertIn(
             dc.HPT_LINK_DISCONNECT_ACTIVE_INPUT, codes(doctor)
         )
+        self.assertNotIn(dc.HPT_USB_WINUSB_UNAVAILABLE, codes(doctor))
         event = [
             e
             for e in doctor.events()
