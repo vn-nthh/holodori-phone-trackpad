@@ -100,16 +100,30 @@ class FakeApi:
 
 
 class WinUsbReadPipelineTests(unittest.TestCase):
-    def test_two_ordered_reads_reuse_the_same_two_buffers(self):
+    @staticmethod
+    def make_connection(
+        read_depth=None,
+        pending=False,
+        wait_results=(),
+    ):
         api = FakeApi()
+        api.winusb.pending = pending
+        api.kernel.wait_results = list(wait_results)
+        options = {}
+        if read_depth is not None:
+            options["read_depth"] = read_depth
         connection = WinUsbConnection(
             api=api,
             file_handle=1,
             interface_handle=ctypes.c_void_p(2),
             endpoint_in=0x81,
             endpoint_out=0x01,
-            read_depth=2,
+            **options,
         )
+        return api, connection
+
+    def test_two_ordered_reads_reuse_the_same_two_buffers(self):
+        api, connection = self.make_connection(read_depth=2)
 
         self.assertEqual(connection.read(), b"first")
         self.assertEqual(connection.read(), b"second")
@@ -126,16 +140,10 @@ class WinUsbReadPipelineTests(unittest.TestCase):
         self.assertEqual(len(api.winusb.freed), 1)
 
     def test_pending_read_timeout_keeps_request_posted(self):
-        api = FakeApi()
-        api.winusb.pending = True
-        api.kernel.wait_results = [WAIT_TIMEOUT, WAIT_OBJECT_0]
-        connection = WinUsbConnection(
-            api=api,
-            file_handle=1,
-            interface_handle=ctypes.c_void_p(2),
-            endpoint_in=0x81,
-            endpoint_out=0x01,
+        api, connection = self.make_connection(
             read_depth=2,
+            pending=True,
+            wait_results=(WAIT_TIMEOUT, WAIT_OBJECT_0),
         )
 
         with mock.patch(
@@ -151,14 +159,7 @@ class WinUsbReadPipelineTests(unittest.TestCase):
         self.assertEqual(len(api.kernel.cancelled), 2)
 
     def test_cancel_pending_read_cancels_all_file_io(self):
-        api = FakeApi()
-        connection = WinUsbConnection(
-            api=api,
-            file_handle=1,
-            interface_handle=ctypes.c_void_p(2),
-            endpoint_in=0x81,
-            endpoint_out=0x01,
-        )
+        api, connection = self.make_connection()
 
         connection.cancel_pending_read()
         connection.cancel_pending_read()

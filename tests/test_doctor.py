@@ -63,18 +63,17 @@ def host_skeleton(doctor, using_usbdk=False, prefer_usbdk=True):
 
 
 class ClassificationTests(unittest.TestCase):
-    def test_libusb_not_supported_maps_to_winusb_code(self):
-        error = AoaError(
-            "Could not open the Android USB device: LIBUSB_ERROR_NOT_SUPPORTED",
+    def test_native_error_mapping(self):
+        not_supported = AoaError(
+            "Could not open the Android USB device",
             operation="open the Android USB device",
             native_name="LIBUSB_ERROR_NOT_SUPPORTED",
             native_code=-12,
         )
         self.assertEqual(
-            dc.classify_error(error), dc.HPT_USB_WINUSB_NOT_SUPPORTED
+            dc.classify_error(not_supported),
+            dc.HPT_USB_WINUSB_NOT_SUPPORTED,
         )
-
-    def test_disconnect_and_transient_mapping(self):
         for name in (
             "LIBUSB_ERROR_NO_DEVICE",
             "LIBUSB_ERROR_IO",
@@ -195,28 +194,24 @@ class DoctorCoreTests(unittest.TestCase):
         self.assertEqual(len(doctor.events()), 2)
 
     def test_redaction_strips_private_fragments(self):
-        text = redact(
-            r"open \\?\usb#vid_18d1&pid_2d01&mi_00#7&2f3a4b5c&0#{guid} "
-            r"from C:\Users\bob\Desktop to 10.0.0.8"
-        )
-        self.assertNotIn("2f3a4b5c", text)
-        self.assertNotIn("bob", text)
-        self.assertNotIn("C:\\", text)
-        self.assertNotIn("10.0.0.8", text)
-        self.assertIn("vid_18d1&pid_2d01&mi_00", text)
-
-    def test_redaction_handles_path_variants_ipv6_and_case(self):
         with mock.patch.dict(
             os.environ,
             {"USERNAME": "AliceUser", "COMPUTERNAME": "DevBox"},
         ):
             text = redact(
+                r"open \\?\usb#vid_18d1&pid_2d01&mi_00#"
+                "7&2f3a4b5c&0#{guid} "
+                "from C:\\Users\\bob\\Desktop to 10.0.0.8\n"
                 "C:/Users/Alice User/Desktop/private.log\n"
                 "/home/alice/private/report.log\n"
                 "2001:db8::1\nALICEUSER\ndevbox\n"
                 r"USB\VID_18D1&PID_2D01\SERIAL123"
             )
         for private in (
+            "2f3a4b5c",
+            "bob",
+            "C:\\",
+            "10.0.0.8",
             "Alice User",
             "/home/alice",
             "2001:db8::1",

@@ -109,31 +109,35 @@ class LatencyTests(unittest.TestCase):
 
 
 class AoaHostTests(unittest.TestCase):
-    def test_data_connection_prefers_winusb_without_enabling_fallback(self):
-        connection = object()
+    @staticmethod
+    def make_host(*find_results, prefer_usbdk=True):
         host = object.__new__(AoaHost)
-        host.prefer_usbdk = True
-        host.usb = type("Usb", (), {"using_usbdk": False})()
-        host._find_data_accessory = mock.Mock(return_value=connection)
-        host._replace_usb = mock.Mock()
-
-        self.assertIs(host._wait_for_data_accessory(0.1), connection)
-        host._replace_usb.assert_not_called()
-
-    def test_data_connection_falls_back_to_usbdk_after_winusb_error(self):
-        connection = object()
-        host = object.__new__(AoaHost)
-        host.prefer_usbdk = True
+        host.prefer_usbdk = prefer_usbdk
         host.usb = type("Usb", (), {"using_usbdk": False})()
 
-        def replace_usb(use_usbdk):
+        def replace_usb(use_usbdk=False):
             host.usb = type(
                 "Usb", (), {"using_usbdk": bool(use_usbdk)}
             )()
 
         host._replace_usb = mock.Mock(side_effect=replace_usb)
         host._find_data_accessory = mock.Mock(
-            side_effect=[AoaError("LIBUSB_ERROR_NOT_SUPPORTED"), connection]
+            side_effect=list(find_results),
+        )
+        return host
+
+    def test_data_connection_prefers_winusb_without_enabling_fallback(self):
+        connection = object()
+        host = self.make_host(connection)
+
+        self.assertIs(host._wait_for_data_accessory(0.1), connection)
+        host._replace_usb.assert_not_called()
+
+    def test_data_connection_falls_back_to_usbdk_after_winusb_error(self):
+        connection = object()
+        host = self.make_host(
+            AoaError("LIBUSB_ERROR_NOT_SUPPORTED"),
+            connection,
         )
 
         self.assertIs(host._wait_for_data_accessory(0.1), connection)
@@ -142,19 +146,7 @@ class AoaHostTests(unittest.TestCase):
 
     def test_data_connection_falls_back_after_winusb_attach_grace(self):
         connection = object()
-        host = object.__new__(AoaHost)
-        host.prefer_usbdk = True
-        host.usb = type("Usb", (), {"using_usbdk": False})()
-
-        def replace_usb(use_usbdk):
-            host.usb = type(
-                "Usb", (), {"using_usbdk": bool(use_usbdk)}
-            )()
-
-        host._replace_usb = mock.Mock(side_effect=replace_usb)
-        host._find_data_accessory = mock.Mock(
-            side_effect=[None, connection]
-        )
+        host = self.make_host(None, connection)
 
         with (
             mock.patch(
@@ -168,10 +160,7 @@ class AoaHostTests(unittest.TestCase):
         host._replace_usb.assert_called_once_with(use_usbdk=True)
 
     def test_data_fallback_is_disabled_when_usbdk_was_opted_out(self):
-        host = object.__new__(AoaHost)
-        host.prefer_usbdk = False
-        host.usb = type("Usb", (), {"using_usbdk": False})()
-        host._replace_usb = mock.Mock()
+        host = self.make_host(prefer_usbdk=False)
 
         self.assertFalse(host._enable_usbdk_data_fallback())
         host._replace_usb.assert_not_called()
