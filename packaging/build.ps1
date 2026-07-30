@@ -122,12 +122,12 @@ if ($Target -in @("All", "Android")) {
     & (Join-Path $AndroidDir "gradlew.bat") `
         --project-dir $AndroidDir `
         --no-daemon `
-        assembleDebug
+        assembleRelease
     if ($LASTEXITCODE -ne 0) {
         throw "Gradle failed to build the Android package."
     }
 
-    $BuiltApk = Join-Path $AndroidDir "app\build\outputs\apk\debug\app-debug.apk"
+    $BuiltApk = Join-Path $AndroidDir "app\build\outputs\apk\release\app-release.apk"
     if (-not (Test-Path $BuiltApk)) {
         throw "Android build completed without producing $BuiltApk"
     }

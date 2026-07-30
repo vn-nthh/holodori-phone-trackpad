@@ -6,7 +6,7 @@ Holodori's keyboard layout is built for hands on a desk. This tool turns a phone
 
 > **Unofficial.** Not affiliated with COVER Corp., hololive production, or QualiArts. Use at your own risk and follow the game's Terms of Service.
 
-## Download v0.2.0
+## Download v0.2.1
 
 Install the Windows setup and Android companion app, connect the phone with a
 data-capable USB cable, and approve Android's accessory prompt. The Windows
@@ -16,19 +16,18 @@ administrator prompt and restart only if setup asks you to.
 The PC touch overlay is off by default, keeping play unobstructed. Launch the
 separate **with Touch Overlay** Start-menu shortcut when you want it.
 
-- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.0/HolodoriPhoneTrackpadSetup.exe)
-- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.0/HolodoriPhoneTrackpad.apk)
-- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.0/HolodoriPhoneTrackpad.exe)
-- [View the v0.2.0 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.2.0)
+- [Download the Windows setup (`HolodoriPhoneTrackpadSetup.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.1/HolodoriPhoneTrackpadSetup.exe)
+- [Download the Android app (`HolodoriPhoneTrackpad.apk`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.1/HolodoriPhoneTrackpad.apk)
+- [Portable Windows app (`HolodoriPhoneTrackpad.exe`)](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.1/HolodoriPhoneTrackpad.exe)
+- [View the v0.2.1 release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.2.1)
 
 The original ADB transport remains available if you prefer it. ADB mode still
 requires USB debugging; AOA mode does not.
 
-This release also includes an experimental PC touch overlay. The phone sends
-live touch positions rather than virtual button presses, and the overlay
-mirrors those positions in real time. It is an early proof of concept that
-direct touch transfer is practical; the PC maps the received coordinates to
-game keys only after they arrive.
+Version 0.2.1 fixes fast slides occasionally skipping a lane. Android sometimes
+bundles several finger positions into one update; the app now replays all of
+them in order and never combines movement across a lane boundary. Diagnostic
+and benchmark logs are also shorter while retaining their important numbers.
 
 The project is free and open source under the [MIT License](LICENSE).
 
@@ -36,6 +35,7 @@ The project is free and open source under the [MIT License](LICENSE).
 
 - **No USB debugging required**: the native Android app communicates through Android Open Accessory (AOA)
 - **Low-latency native touch capture**: requests unbuffered Android input dispatch and sends compact binary events
+- **Reliable slide paths**: preserves Android's bundled movement history and every lane crossing
 - **Pipelined WinUSB receive path**: keeps two ordered overlapped reads posted into reusable buffers
 - **Queue safety telemetry**: warns at 8 ms and resynchronizes stale rhythm input at 25 ms
 - **Forgiving lane hit areas**: touches beyond the drawn zone still map to the nearest outer lane
@@ -59,7 +59,7 @@ The project is free and open source under the [MIT License](LICENSE).
 
 ## Quick start
 
-1. Download the [Windows setup](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.0/HolodoriPhoneTrackpadSetup.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.0/HolodoriPhoneTrackpad.apk).
+1. Download the [Windows setup](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.1/HolodoriPhoneTrackpadSetup.exe) and [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.1/HolodoriPhoneTrackpad.apk).
 2. Run the Windows setup. Leave both **WinUSB low-latency data support** and **UsbDk handshake and fallback support** selected for the recommended configuration. If WinUSB is skipped or cannot be installed, the app automatically carries the AOA data stream over UsbDk. Approve the administrator prompt, then restart Windows only if setup asks you to.
 3. Install the APK on the phone, then launch Holodori Phone Trackpad from the Start menu or desktop shortcut.
 4. When running from source instead, install the PC dependency:
@@ -96,8 +96,8 @@ survive the temporary extraction used by the single-file executable.
 
 The Android build requires JDK 17 or newer and an Android SDK containing
 Platform 35. Set `JAVA_HOME` and `ANDROID_SDK_ROOT`, or pass `-JavaHome` and
-`-AndroidSdk` to the script. It creates the installable, development-signed
-`release\HolodoriPhoneTrackpad.apk`.
+`-AndroidSdk` to the script. It creates the optimized, non-debuggable,
+development-signed `release\HolodoriPhoneTrackpad.apk`.
 
 Build only one package with `-Target Windows` or `-Target Android`.
 
@@ -147,10 +147,10 @@ Native Android app ──AOA USB bulk──► PC input router ──key event�
         └── native play-zone editor
 ```
 
-1. The Android view requests unbuffered touch dispatch and maps screen coordinates into its rotated play zone.
-2. Fixed 24-byte records carry finger ID, action, normalized coordinates, sequence, and source timestamp over AOA.
+1. The Android view requests unbuffered touch dispatch and maps screen coordinates into its rotated play zone without allocating on the locked touch path.
+2. Android replays batched MOVE history chronologically; fixed 24-byte records carry each preserved sample over AOA.
 3. The PC prefers pipelined WinUSB for AOA data, falls back to UsbDk when needed, and immediately maps records to key presses and releases.
-4. A bounded latest-state mailbox mirrors coordinates to the visual overlay, so drawing never blocks the input path or accumulates stale movement.
+4. USB enqueue happens before phone drawing state is updated. Locked-mode visualization is limited to 30 Hz while touch capture and USB transmission remain unthrottled.
 5. If USB disconnects, the PC releases every held key and automatically looks for the phone again.
 
 The phone records maximum queue age/depth and reports them in backward-compatible
@@ -166,9 +166,18 @@ summaries therefore describe only the current transport epoch. Experimental
 queue output lists every warning incident relative to the first `ACTION_DOWN`
 stroke in that epoch. Each incident distinguishes warning-only stalls from
 destructive resyncs and reports queue age/depth, whether a touch was active,
-whether Android was blocked in the USB write, and clock-corrected diagnostic
-delivery excess when `--aoa-benchmark` is active. Session stats call wire-level
+and a measured breakdown of input dispatch, app handling, writer-queue
+residence, USB write, and timing-report delivery. Older app builds fall back to
+the coarser writer-blocked context. New reports also show the historical sample
+count, batch span, and lane-boundary crossings associated with each incident.
+Session stats call wire-level
 losses “USB sequence gaps”; phone-side queue incidents are reported separately.
+
+Release APKs include a Baseline Profile for the startup, locked touch, and USB
+writer paths. Android does not report the transport connected until the
+priority writer thread is initialized. The PC sends its configured lane count
+to Android; queued MOVE samples can coalesce only within the same lane, so lane
+transitions are never erased.
 
 For an A/B check of the overlapped read pipeline, run comparable sessions with:
 
