@@ -22,7 +22,7 @@ from aoa_transport import (
     FLAG_QUEUE_RESYNC,
     FLAG_QUEUE_WARNING,
     FLAG_SESSION_RESET,
-    HOST_ATTACH_REQUEST,
+    make_host_attach_request,
     AOA_GET_PROTOCOL,
     AOA_SEND_IDENT,
     AoaError,
@@ -1150,7 +1150,7 @@ class ReceiverDiagnosticTests(unittest.TestCase):
         self.assertEqual(pressed, ["a"])
         self.assertEqual(
             connection.writes,
-            [(HOST_ATTACH_REQUEST, 500)],
+            [(make_host_attach_request(2), 500)],
         )
         queue = receiver.queue_telemetry_snapshot()
         self.assertEqual(queue.reports, 1)

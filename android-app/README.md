@@ -62,7 +62,10 @@ not accept touch input until that marker arrives. Each PC process sends one
 8-byte `HPTC` attach record on the accessory OUT endpoint. A later attach to
 the same Android transport makes Android drop the stale queue and send another
 session reset with flag `0x08` (host recovery). This prevents records and
-diagnostics from an old PC process from leaking into a new session.
+diagnostics from an old PC process from leaking into a new session. The attach
+record's reserved 16-bit field carries capabilities and configuration. Bit
+`0x0001` requests exact timing-breakdown companions, bit `0x0002` requests
+motion-batch companions, and bits 8-15 carry the PC's configured lane count.
 
 The remaining low flag bits are inside zone `0x01`, play locked `0x02`,
 session reset `0x04`, and host recovery `0x08`.
@@ -80,7 +83,30 @@ age in 10-microsecond units. Contextual flag `0x01` means a touch was active;
 `0x02` means the writer was blocked in the USB write. The low 16 timestamp bits
 pack a two-bit reason (warning, 25 ms resync, 100 ms failsafe, or capacity)
 above a 14-bit USB-write age measured in 20-microsecond units; incident time
-therefore retains about 66-microsecond resolution. Y remains zero so older
-protocol-v2 hosts do not misread incident metadata as a resync count. Touch
-records retain priority, so incident diagnostics are transmitted only after
-the live touch queue drains.
+therefore retains about 66-microsecond resolution. Y is zero for an older host,
+or contains an 8-bit incident token when the host requested timing breakdowns.
+
+A capable host receives a second heartbeat with flags `0x80 | 0x04 | 0x08`.
+Pointer ID repeats the incident token. Four unsigned 12-bit durations are
+packed across X, Y, and the low 16 timestamp bits in 25-microsecond units:
+hardware-event to callback, callback to enqueue, enqueue to writer dequeue, and
+USB write. Each field saturates at 102.375 ms. The remaining timestamp bits
+identify when the delayed sample's write completed, allowing the benchmark to
+estimate the subsequent timing-report delivery excess. Touch records retain
+priority, so incident diagnostics are transmitted only after the live touch
+queue drains.
+
+A host that requests motion-batch diagnostics receives another companion with
+flags `0x80 | 0x04 | 0x10`. Pointer ID repeats the incident token, X is the
+number of historical samples carried by the original `MotionEvent`, Y is the
+number of lane boundaries crossed by that event, and the low 16 timestamp bits
+contain its historical time span in 25-microsecond units.
+
+The locked touch path reuses primitive pointer storage and precomputed zone
+transforms. It enqueues to USB before updating visual state, and limits only the
+phone visualization to 30 Hz; input sampling and USB output are not throttled.
+All historical `ACTION_MOVE` samples are processed chronologically. Pending
+moves may coalesce only within the same PC-configured lane, so redundant
+coordinates do not consume USB bandwidth while lane transitions remain intact.
+The release APK also carries a Baseline Profile for the startup, touch, and
+writer paths.

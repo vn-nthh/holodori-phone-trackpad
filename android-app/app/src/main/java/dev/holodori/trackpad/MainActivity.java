@@ -204,6 +204,11 @@ public final class MainActivity extends Activity
         });
     }
 
+    @Override
+    public void onHostLaneCountChanged(int laneCount) {
+        runOnUiThread(() -> trackpadView.setLaneCount(laneCount));
+    }
+
     private void scheduleReconnect() {
         if (destroyed || reconnectScheduled || transport.isRunning()) {
             return;

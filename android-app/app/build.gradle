@@ -12,15 +12,20 @@ android {
         applicationId "dev.holodori.trackpad"
         minSdk 23
         targetSdk 35
-        versionCode 6
+        versionCode 7
         versionName holodoriVersion
     }
 
     buildTypes {
         release {
+            signingConfig signingConfigs.debug
             minifyEnabled true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"),
                     "proguard-rules.pro"
         }
     }
+}
+
+dependencies {
+    implementation "androidx.profileinstaller:profileinstaller:1.4.1"
 }

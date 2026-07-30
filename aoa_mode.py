@@ -31,10 +31,10 @@ from touch_overlay import TouchOverlay
 STATUS_REPEAT_WINDOW_SECONDS = 5.0
 DIAGNOSTIC_VIEW_INTERVAL_SECONDS = 3.0
 QUEUE_INCIDENT_LABELS = {
-    INCIDENT_REASON_WARNING: "warning-only (no CANCEL)",
-    INCIDENT_REASON_RESYNC: "25 ms resync (CANCEL sent)",
-    INCIDENT_REASON_FAILSAFE: "100 ms failsafe (CANCEL sent)",
-    INCIDENT_REASON_CAPACITY: "capacity resync (CANCEL sent)",
+    INCIDENT_REASON_WARNING: "warning (no cancel)",
+    INCIDENT_REASON_RESYNC: "25 ms reset (cancel sent)",
+    INCIDENT_REASON_FAILSAFE: "100 ms failsafe (cancel sent)",
+    INCIDENT_REASON_CAPACITY: "queue-full reset (cancel sent)",
 }
 
 
@@ -383,9 +383,9 @@ def run_aoa_mode(
 
     stats = router.stats
     print(
-        f"[STATS] Session: {stats['presses']} presses, "
+        f"[STATS] {stats['presses']} presses, "
         f"{stats['releases']} releases, {stats['drags']} drags, "
-        f"{router.sequence_gaps} USB sequence gaps"
+        f"{router.sequence_gaps} USB gaps"
     )
     queue_stats = receiver.queue_telemetry_snapshot()
     if (
@@ -394,14 +394,31 @@ def run_aoa_mode(
         or queue_stats.incidents
     ):
         print(
-            f"[AOA QUEUE] max {queue_stats.max_age_ms:.2f} ms old, "
-            f"depth {queue_stats.max_depth}, "
-            f"{queue_stats.warning_reports} aggregate warning reports, "
-            f"{len(queue_stats.incidents)} exact incidents, "
-            f"{queue_stats.resyncs} resyncs, "
-            f"{queue_stats.failsafe_reports} failsafe reports, "
-            f"{queue_stats.host_recoveries} host recoveries"
+            f"[AOA QUEUE] peak {queue_stats.max_age_ms:.2f} ms "
+            f"event->writer, depth {queue_stats.max_depth}; "
+            f"warnings {queue_stats.warning_reports}, "
+            f"incidents {len(queue_stats.incidents)}, "
+            f"resets {queue_stats.resyncs}, "
+            f"failsafes {queue_stats.failsafe_reports}, "
+            f"recoveries {queue_stats.host_recoveries}"
         )
+        if queue_stats.max_input_dispatch_ms is not None:
+            print(
+                "            stage peaks (ms): "
+                f"dispatch {queue_stats.max_input_dispatch_ms:.3f}, "
+                f"app {queue_stats.max_app_processing_ms:.3f}, "
+                f"queue {queue_stats.max_queue_residence_ms:.3f}, "
+                f"USB {queue_stats.max_usb_write_ms:.3f}"
+            )
+        if queue_stats.max_history_size is not None:
+            print(
+                "            motion: history in "
+                f"{queue_stats.incidents_with_history}/"
+                f"{len(queue_stats.incidents)} incidents; max "
+                f"{queue_stats.max_history_size} samples/"
+                f"{queue_stats.max_history_span_ms:.3f} ms, "
+                f"{queue_stats.max_crossed_lane_count} lane crossings"
+            )
         if queue_stats.incidents:
             for index, incident in enumerate(
                 queue_stats.incidents, start=1
@@ -415,44 +432,85 @@ def run_aoa_mode(
                     incident.reason, "unknown queue incident"
                 )
                 print(
-                    f"[AOA INCIDENT {index}] {offset}: {reason}; "
-                    f"queue {incident.queue_age_ms:.2f} ms old, "
+                    f"[AOA INCIDENT {index} {offset}] {reason}; "
+                    f"event->writer {incident.queue_age_ms:.2f} ms, "
                     f"depth {incident.queue_depth}, "
-                    "active touch "
-                    f"{'yes' if incident.active_touch else 'no'}"
+                    f"touch {'active' if incident.active_touch else 'idle'}"
                 )
-                writer = (
-                    "cause hint: USB/host-reader backpressure; "
-                    "Android write stalled for at least "
-                    f"{incident.write_block_ms:.2f} ms"
-                    if incident.writer_blocked
-                    else "cause hint: Android writer scheduling/lock delay; "
-                    "no slow USB write overlapped the queued sample"
-                )
-                delivery = (
-                    f"; diagnostic delivery excess "
-                    f"{incident.delivery_excess_ms:.3f} ms"
-                    if incident.delivery_excess_ms is not None
-                    else ""
-                )
-                print(f"                 {writer}{delivery}")
+                if incident.input_dispatch_ms is not None:
+                    stages = (
+                        ("dispatch", incident.input_dispatch_ms),
+                        ("app", incident.app_processing_ms),
+                        ("queue", incident.queue_residence_ms),
+                        ("USB", incident.usb_write_ms),
+                    )
+                    dominant_name, dominant_ms = max(
+                        stages, key=lambda item: item[1]
+                    )
+                    host = (
+                        ", host excess "
+                        f"{incident.post_write_delivery_excess_ms:.3f}"
+                        if (
+                            incident.post_write_delivery_excess_ms
+                            is not None
+                        )
+                        else ""
+                    )
+                    print(
+                        "                 stages (ms): "
+                        f"dispatch {incident.input_dispatch_ms:.3f}, "
+                        f"app {incident.app_processing_ms:.3f}, "
+                        f"queue {incident.queue_residence_ms:.3f}, "
+                        f"USB {incident.usb_write_ms:.3f}"
+                        f"{host}; bottleneck {dominant_name} "
+                        f"{dominant_ms:.3f}"
+                    )
+                else:
+                    writer = (
+                        "context: USB/host backpressure; write blocked >= "
+                        f"{incident.write_block_ms:.2f} ms"
+                        if incident.writer_blocked
+                        else "context: delay before writer; "
+                        "no slow USB write"
+                    )
+                    delivery = (
+                        f"; report excess "
+                        f"{incident.delivery_excess_ms:.3f} ms"
+                        if incident.delivery_excess_ms is not None
+                        else ""
+                    )
+                    print(f"                 {writer}{delivery}")
+                if incident.history_size is not None:
+                    crossing_label = (
+                        "crossing"
+                        if incident.crossed_lane_count == 1
+                        else "crossings"
+                    )
+                    print(
+                        "                 motion: history "
+                        f"{incident.history_size}/"
+                        f"{incident.history_span_ms:.3f} ms, "
+                        f"{incident.crossed_lane_count} lane "
+                        f"{crossing_label} preserved"
+                    )
         elif queue_stats.warning_reports_from_first_stroke_s:
             warning_times = ", ".join(
                 f"{offset:+.3f}s"
                 for offset in queue_stats.warning_reports_from_first_stroke_s
             )
             print(
-                "[AOA QUEUE] warning reports from first stroke: "
+                "[AOA QUEUE] warnings after first stroke: "
                 f"{warning_times}"
             )
     if benchmark:
         latency = receiver.latency_snapshot()
         if latency.samples:
             print(
-                "[AOA BENCH] clock-skew-corrected event-to-host excess: "
+                f"[AOA BENCH] jitter {latency.window_seconds:.1f}s: "
                 f"mean {latency.mean_excess_ms:.3f} ms, "
-                f"max {latency.max_excess_ms:.3f} ms across "
-                f"{latency.samples} recent touch records"
+                f"max {latency.max_excess_ms:.3f} ms; "
+                f"{latency.samples} recent, "
+                f"{latency.session_samples} session records"
             )
             print(
                 "            "
@@ -463,11 +521,6 @@ def run_aoa_mode(
                 f"p99.9 {latency.p99_9_excess_ms:.3f} ms"
             )
             print(
-                f"            Rolling window {latency.window_seconds:.1f}s; "
-                f"{latency.session_samples} session records total. "
-                "Fastest recent sample is the zero baseline."
-            )
-            print(
-                "            This is relative jitter, not absolute "
-                "one-way latency."
+                "            relative jitter; fastest corrected sample "
+                "= 0 ms (not one-way latency)"
             )

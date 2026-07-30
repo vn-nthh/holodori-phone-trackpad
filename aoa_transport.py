@@ -45,12 +45,27 @@ TOUCH_PACKET = struct.Struct("<4sBBBBhhIQ")
 HOST_CONTROL_MAGIC = b"HPTC"
 HOST_CONTROL_PACKET = struct.Struct("<4sBBH")
 HOST_CONTROL_ATTACH = 1
-HOST_ATTACH_REQUEST = HOST_CONTROL_PACKET.pack(
-    HOST_CONTROL_MAGIC,
-    doctor_codes.TOUCH_PROTOCOL_VERSION,
-    HOST_CONTROL_ATTACH,
-    0,
-)
+HOST_CAP_TIMING_BREAKDOWN = 0x0001
+HOST_CAP_MOTION_BATCH_DIAGNOSTICS = 0x0002
+HOST_LANE_COUNT_SHIFT = 8
+
+
+def make_host_attach_request(lane_count: int) -> bytes:
+    lane_count = max(1, min(16, int(lane_count)))
+    capabilities = (
+        HOST_CAP_TIMING_BREAKDOWN
+        | HOST_CAP_MOTION_BATCH_DIAGNOSTICS
+        | (lane_count << HOST_LANE_COUNT_SHIFT)
+    )
+    return HOST_CONTROL_PACKET.pack(
+        HOST_CONTROL_MAGIC,
+        doctor_codes.TOUCH_PROTOCOL_VERSION,
+        HOST_CONTROL_ATTACH,
+        capabilities,
+    )
+
+
+HOST_ATTACH_REQUEST = make_host_attach_request(6)
 ACTION_HEARTBEAT = 0
 ACTION_DOWN = 1
 ACTION_MOVE = 2
@@ -67,10 +82,19 @@ FLAG_QUEUE_WARNING = 0x10
 FLAG_QUEUE_RESYNC = 0x20
 FLAG_QUEUE_FAILSAFE = 0x40
 FLAG_QUEUE_DIAGNOSTICS = 0x80
+FLAG_INCIDENT_TIMING_BREAKDOWN = 0x08
+FLAG_INCIDENT_MOTION_BATCH = 0x10
 QUEUE_AGE_REPORT_UNIT_NANOS = 10_000
 INCIDENT_WRITE_AGE_UNIT_NANOS = 20_000
 INCIDENT_DETAIL_DURATION_MASK = 0x3FFF
 INCIDENT_DETAIL_REASON_SHIFT = 14
+TIMING_DURATION_UNIT_NANOS = 25_000
+TIMING_DURATION_MASK = 0x0FFF
+TIMING_DISPATCH_SHIFT = 0
+TIMING_APP_SHIFT = 12
+TIMING_QUEUE_SHIFT = 24
+TIMING_WRITE_SHIFT = 36
+MOTION_HISTORY_SPAN_UNIT_NANOS = 25_000
 INCIDENT_REASON_WARNING = 0
 INCIDENT_REASON_RESYNC = 1
 INCIDENT_REASON_FAILSAFE = 2
@@ -268,21 +292,55 @@ class TouchEvent:
         return bool(
             self.has_queue_diagnostics
             and self.flags & FLAG_QUEUE_INCIDENT
+            and not self.flags & FLAG_INCIDENT_TIMING_BREAKDOWN
+            and not self.flags & FLAG_INCIDENT_MOTION_BATCH
+        )
+
+    @property
+    def is_queue_timing_breakdown(self) -> bool:
+        return bool(
+            self.has_queue_diagnostics
+            and self.flags & FLAG_QUEUE_INCIDENT
+            and self.flags & FLAG_INCIDENT_TIMING_BREAKDOWN
+        )
+
+    @property
+    def is_queue_motion_batch(self) -> bool:
+        return bool(
+            self.has_queue_diagnostics
+            and self.flags & FLAG_QUEUE_INCIDENT
+            and self.flags & FLAG_INCIDENT_MOTION_BATCH
+            and not self.flags & FLAG_INCIDENT_TIMING_BREAKDOWN
         )
 
     @property
     def queue_age_nanos(self) -> int:
-        if not self.has_queue_diagnostics:
+        if (
+            not self.has_queue_diagnostics
+            or self.is_queue_timing_breakdown
+            or self.is_queue_motion_batch
+        ):
             return 0
         return max(0, self.raw_x) * QUEUE_AGE_REPORT_UNIT_NANOS
 
     @property
     def queue_depth(self) -> int:
-        return self.pointer_id if self.has_queue_diagnostics else 0
+        return (
+            self.pointer_id
+            if self.has_queue_diagnostics
+            and not self.is_queue_timing_breakdown
+            and not self.is_queue_motion_batch
+            else 0
+        )
 
     @property
     def queue_resyncs(self) -> int:
-        if not self.has_queue_diagnostics or self.is_queue_incident:
+        if (
+            not self.has_queue_diagnostics
+            or self.is_queue_incident
+            or self.is_queue_timing_breakdown
+            or self.is_queue_motion_batch
+        ):
             return 0
         return max(0, self.raw_y)
 
@@ -313,6 +371,62 @@ class TouchEvent:
         units = self.incident_detail & INCIDENT_DETAIL_DURATION_MASK
         return units * INCIDENT_WRITE_AGE_UNIT_NANOS
 
+    @property
+    def incident_token(self) -> int:
+        return self.raw_y & 0xFF if self.is_queue_incident else 0
+
+    @property
+    def timing_token(self) -> int:
+        return self.pointer_id if self.is_queue_timing_breakdown else 0
+
+    @property
+    def _timing_packed(self) -> int:
+        if not self.is_queue_timing_breakdown:
+            return 0
+        return (
+            (self.raw_x & 0xFFFF)
+            | ((self.raw_y & 0xFFFF) << 16)
+            | ((self.incident_detail & 0xFFFF) << 32)
+        )
+
+    def _timing_duration_nanos(self, shift: int) -> int:
+        units = (self._timing_packed >> shift) & TIMING_DURATION_MASK
+        return units * TIMING_DURATION_UNIT_NANOS
+
+    @property
+    def timing_input_dispatch_nanos(self) -> int:
+        return self._timing_duration_nanos(TIMING_DISPATCH_SHIFT)
+
+    @property
+    def timing_app_processing_nanos(self) -> int:
+        return self._timing_duration_nanos(TIMING_APP_SHIFT)
+
+    @property
+    def timing_queue_residence_nanos(self) -> int:
+        return self._timing_duration_nanos(TIMING_QUEUE_SHIFT)
+
+    @property
+    def timing_usb_write_nanos(self) -> int:
+        return self._timing_duration_nanos(TIMING_WRITE_SHIFT)
+
+    @property
+    def motion_token(self) -> int:
+        return self.pointer_id if self.is_queue_motion_batch else 0
+
+    @property
+    def motion_history_size(self) -> int:
+        return max(0, self.raw_x) if self.is_queue_motion_batch else 0
+
+    @property
+    def motion_crossed_lane_count(self) -> int:
+        return max(0, self.raw_y) if self.is_queue_motion_batch else 0
+
+    @property
+    def motion_history_span_nanos(self) -> int:
+        if not self.is_queue_motion_batch:
+            return 0
+        return self.incident_detail * MOTION_HISTORY_SPAN_UNIT_NANOS
+
 
 @dataclass(frozen=True)
 class LatencySnapshot:
@@ -339,6 +453,14 @@ class QueueTelemetrySnapshot:
     host_recoveries: int
     warning_reports_from_first_stroke_s: tuple[float, ...]
     incidents: tuple["QueueIncidentSnapshot", ...]
+    max_input_dispatch_ms: Optional[float]
+    max_app_processing_ms: Optional[float]
+    max_queue_residence_ms: Optional[float]
+    max_usb_write_ms: Optional[float]
+    incidents_with_history: int
+    max_history_size: Optional[int]
+    max_history_span_ms: Optional[float]
+    max_crossed_lane_count: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -352,6 +474,14 @@ class QueueIncidentSnapshot:
     writer_blocked: bool
     write_block_ms: float
     delivery_excess_ms: Optional[float]
+    input_dispatch_ms: Optional[float]
+    app_processing_ms: Optional[float]
+    queue_residence_ms: Optional[float]
+    usb_write_ms: Optional[float]
+    post_write_delivery_excess_ms: Optional[float]
+    history_size: Optional[int]
+    history_span_ms: Optional[float]
+    crossed_lane_count: Optional[int]
 
 
 class ClockNormalizedLatency:
@@ -599,6 +729,10 @@ class QueueTelemetry:
         self.incident_records: list[
             tuple[TouchEvent, Optional[float]]
         ] = []
+        self.timing_records: dict[
+            int, list[tuple[TouchEvent, Optional[float]]]
+        ] = {}
+        self.motion_records: dict[int, list[TouchEvent]] = {}
 
     def begin_epoch(self, recovered: bool) -> None:
         self.reset(preserve_host_recoveries=True)
@@ -617,6 +751,18 @@ class QueueTelemetry:
         ):
             self.first_stroke_nanos = event.phone_event_nanos
         if not event.has_queue_diagnostics:
+            return
+        if event.is_queue_timing_breakdown:
+            if event.timing_token:
+                self.timing_records.setdefault(
+                    event.timing_token, []
+                ).append((event, delivery_excess_ms))
+            return
+        if event.is_queue_motion_batch:
+            if event.motion_token:
+                self.motion_records.setdefault(
+                    event.motion_token, []
+                ).append(event)
             return
         if event.is_queue_incident:
             self.max_age_nanos = max(
@@ -639,8 +785,36 @@ class QueueTelemetry:
             self.failsafe_reports += 1
 
     def snapshot(self) -> QueueTelemetrySnapshot:
-        incident_snapshots: tuple[QueueIncidentSnapshot, ...] = tuple(
-            QueueIncidentSnapshot(
+        incident_snapshots_list: list[QueueIncidentSnapshot] = []
+        timing_indices: dict[int, int] = {}
+        motion_indices: dict[int, int] = {}
+        for event, delivery_excess_ms in self.incident_records:
+            token = event.incident_token
+            timing_index = timing_indices.get(token, 0)
+            timing_matches = self.timing_records.get(token, [])
+            timing_record = (
+                timing_matches[timing_index]
+                if token and timing_index < len(timing_matches)
+                else None
+            )
+            if token:
+                timing_indices[token] = timing_index + 1
+            timing_event = (
+                timing_record[0] if timing_record is not None else None
+            )
+            post_write_delivery_excess_ms = (
+                timing_record[1] if timing_record is not None else None
+            )
+            motion_index = motion_indices.get(token, 0)
+            motion_matches = self.motion_records.get(token, [])
+            motion_event = (
+                motion_matches[motion_index]
+                if token and motion_index < len(motion_matches)
+                else None
+            )
+            if token:
+                motion_indices[token] = motion_index + 1
+            incident_snapshots_list.append(QueueIncidentSnapshot(
                 sequence=event.sequence,
                 from_first_stroke_s=(
                     (
@@ -661,9 +835,52 @@ class QueueTelemetry:
                     event.incident_write_age_nanos / 1_000_000.0
                 ),
                 delivery_excess_ms=delivery_excess_ms,
-            )
-            for event, delivery_excess_ms in self.incident_records
-        )
+                input_dispatch_ms=(
+                    timing_event.timing_input_dispatch_nanos / 1_000_000.0
+                    if timing_event is not None else None
+                ),
+                app_processing_ms=(
+                    timing_event.timing_app_processing_nanos / 1_000_000.0
+                    if timing_event is not None else None
+                ),
+                queue_residence_ms=(
+                    timing_event.timing_queue_residence_nanos / 1_000_000.0
+                    if timing_event is not None else None
+                ),
+                usb_write_ms=(
+                    timing_event.timing_usb_write_nanos / 1_000_000.0
+                    if timing_event is not None else None
+                ),
+                post_write_delivery_excess_ms=(
+                    post_write_delivery_excess_ms
+                ),
+                history_size=(
+                    motion_event.motion_history_size
+                    if motion_event is not None else None
+                ),
+                history_span_ms=(
+                    motion_event.motion_history_span_nanos / 1_000_000.0
+                    if motion_event is not None else None
+                ),
+                crossed_lane_count=(
+                    motion_event.motion_crossed_lane_count
+                    if motion_event is not None else None
+                ),
+            ))
+        incident_snapshots = tuple(incident_snapshots_list)
+        timing_events = [
+            timing_event
+            for records in self.timing_records.values()
+            for timing_event, _ in records
+        ]
+
+        def max_timing_ms(attribute: str) -> Optional[float]:
+            if not timing_events:
+                return None
+            return max(
+                getattr(event, attribute) for event in timing_events
+            ) / 1_000_000.0
+
         warning_offsets: tuple[float, ...] = tuple(
             incident.from_first_stroke_s
             for incident in incident_snapshots
@@ -678,6 +895,16 @@ class QueueTelemetry:
                 / 1_000_000_000.0
                 for warning_nanos in self.warning_report_nanos
             )
+        motion_incidents = [
+            incident
+            for incident in incident_snapshots
+            if incident.history_size is not None
+        ]
+        history_incidents = [
+            incident
+            for incident in motion_incidents
+            if incident.history_size > 0
+        ]
         return QueueTelemetrySnapshot(
             reports=self.reports,
             max_age_ms=self.max_age_nanos / 1_000_000.0,
@@ -688,6 +915,40 @@ class QueueTelemetry:
             host_recoveries=self.host_recoveries,
             warning_reports_from_first_stroke_s=warning_offsets,
             incidents=incident_snapshots,
+            max_input_dispatch_ms=max_timing_ms(
+                "timing_input_dispatch_nanos"
+            ),
+            max_app_processing_ms=max_timing_ms(
+                "timing_app_processing_nanos"
+            ),
+            max_queue_residence_ms=max_timing_ms(
+                "timing_queue_residence_nanos"
+            ),
+            max_usb_write_ms=max_timing_ms(
+                "timing_usb_write_nanos"
+            ),
+            incidents_with_history=len(history_incidents),
+            max_history_size=(
+                max(
+                    incident.history_size
+                    for incident in motion_incidents
+                )
+                if motion_incidents else None
+            ),
+            max_history_span_ms=(
+                max(
+                    incident.history_span_ms
+                    for incident in motion_incidents
+                )
+                if motion_incidents else None
+            ),
+            max_crossed_lane_count=(
+                max(
+                    incident.crossed_lane_count
+                    for incident in motion_incidents
+                )
+                if motion_incidents else None
+            ),
         )
 
 
@@ -1872,7 +2133,8 @@ class AoaReceiver:
                         parsed_events = list(parser.feed(chunk))
                         if parsed_events and not attach_requested:
                             connection.write(
-                                HOST_ATTACH_REQUEST, timeout_ms=500
+                                make_host_attach_request(self.lane_count),
+                                timeout_ms=500,
                             )
                             attach_requested = True
                         received_epoch_packet = False
@@ -1938,7 +2200,10 @@ class AoaReceiver:
                                         and not event.session_reset
                                     ),
                                 )
-                                if event.is_queue_incident:
+                                if (
+                                    event.is_queue_incident
+                                    or event.is_queue_timing_breakdown
+                                ):
                                     delivery_excess_ms = (
                                         self._latency.estimate_excess_ms(
                                             event.phone_event_nanos,

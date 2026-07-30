@@ -16,6 +16,8 @@ from aoa_transport import (
     AoaReceiver,
     ClockNormalizedLatency,
     FLAG_INCIDENT_ACTIVE_TOUCH,
+    FLAG_INCIDENT_MOTION_BATCH,
+    FLAG_INCIDENT_TIMING_BREAKDOWN,
     FLAG_INCIDENT_WRITER_BLOCKED,
     FLAG_INSIDE,
     FLAG_HOST_RECOVERY,
@@ -26,14 +28,27 @@ from aoa_transport import (
     FLAG_QUEUE_RESYNC,
     FLAG_QUEUE_WARNING,
     FLAG_SESSION_RESET,
+    HOST_CAP_MOTION_BATCH_DIAGNOSTICS,
+    HOST_CAP_TIMING_BREAKDOWN,
+    HOST_CONTROL_ATTACH,
+    HOST_CONTROL_MAGIC,
+    HOST_CONTROL_PACKET,
+    HOST_LANE_COUNT_SHIFT,
     INCIDENT_DETAIL_REASON_SHIFT,
     INCIDENT_REASON_CAPACITY,
     INCIDENT_REASON_WARNING,
+    MOTION_HISTORY_SPAN_UNIT_NANOS,
     QueueTelemetry,
+    TIMING_APP_SHIFT,
+    TIMING_DISPATCH_SHIFT,
+    TIMING_DURATION_UNIT_NANOS,
+    TIMING_QUEUE_SHIFT,
+    TIMING_WRITE_SHIFT,
     TOUCH_MAGIC,
     TOUCH_PACKET,
     TouchEvent,
     TouchPacketParser,
+    make_host_attach_request,
 )
 
 
@@ -60,6 +75,21 @@ def event(
 
 
 class PacketParserTests(unittest.TestCase):
+    def test_host_attach_advertises_diagnostics_and_lane_count(self):
+        magic, version, action, capabilities = (
+            HOST_CONTROL_PACKET.unpack(make_host_attach_request(12))
+        )
+        self.assertEqual(magic, HOST_CONTROL_MAGIC)
+        self.assertEqual(version, doctor_codes.TOUCH_PROTOCOL_VERSION)
+        self.assertEqual(action, HOST_CONTROL_ATTACH)
+        self.assertTrue(capabilities & HOST_CAP_TIMING_BREAKDOWN)
+        self.assertTrue(
+            capabilities & HOST_CAP_MOTION_BATCH_DIAGNOSTICS
+        )
+        self.assertEqual(
+            capabilities >> HOST_LANE_COUNT_SHIFT, 12
+        )
+
     def test_fragmented_and_concatenated_packets(self):
         first = TOUCH_PACKET.pack(
             TOUCH_MAGIC,
@@ -214,6 +244,130 @@ class PacketParserTests(unittest.TestCase):
 
         telemetry.begin_epoch(recovered=False)
         self.assertEqual(telemetry.snapshot().incidents, ())
+
+    def test_queue_incident_pairs_exact_stage_timing_by_token(self):
+        token = 7
+        summary_detail = (
+            INCIDENT_REASON_WARNING << INCIDENT_DETAIL_REASON_SHIFT
+        )
+        summary_packet = TOUCH_PACKET.pack(
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_HEARTBEAT,
+            1,
+            FLAG_QUEUE_DIAGNOSTICS
+            | FLAG_QUEUE_INCIDENT
+            | FLAG_INCIDENT_ACTIVE_TOUCH,
+            925,
+            token,
+            41,
+            (5_250_000_000 & ~0xFFFF) | summary_detail,
+        )
+
+        expected_units = {
+            TIMING_DISPATCH_SHIFT: 60,
+            TIMING_APP_SHIFT: 20,
+            TIMING_QUEUE_SHIFT: 290,
+            TIMING_WRITE_SHIFT: 12,
+        }
+        packed = sum(
+            units << shift for shift, units in expected_units.items()
+        )
+
+        def signed_short(value):
+            value &= 0xFFFF
+            return value - 0x10000 if value & 0x8000 else value
+
+        timing_packet = TOUCH_PACKET.pack(
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_HEARTBEAT,
+            token,
+            FLAG_QUEUE_DIAGNOSTICS
+            | FLAG_QUEUE_INCIDENT
+            | FLAG_INCIDENT_TIMING_BREAKDOWN,
+            signed_short(packed),
+            signed_short(packed >> 16),
+            43,
+            (5_260_000_000 & ~0xFFFF) | ((packed >> 32) & 0xFFFF),
+        )
+        history_size = 2
+        crossed_lanes = 3
+        history_span_units = 320
+        motion_packet = TOUCH_PACKET.pack(
+            TOUCH_MAGIC,
+            doctor_codes.TOUCH_PROTOCOL_VERSION,
+            ACTION_HEARTBEAT,
+            token,
+            FLAG_QUEUE_DIAGNOSTICS
+            | FLAG_QUEUE_INCIDENT
+            | FLAG_INCIDENT_MOTION_BATCH,
+            history_size,
+            crossed_lanes,
+            44,
+            (5_261_000_000 & ~0xFFFF) | history_span_units,
+        )
+        parser = TouchPacketParser()
+        summary = list(parser.feed(summary_packet))[0]
+        timing = list(parser.feed(timing_packet))[0]
+        motion = list(parser.feed(motion_packet))[0]
+        self.assertTrue(summary.is_queue_incident)
+        self.assertFalse(summary.is_queue_timing_breakdown)
+        self.assertEqual(summary.incident_token, token)
+        self.assertFalse(timing.is_queue_incident)
+        self.assertTrue(timing.is_queue_timing_breakdown)
+        self.assertEqual(timing.timing_token, token)
+        self.assertFalse(motion.is_queue_incident)
+        self.assertFalse(motion.is_queue_timing_breakdown)
+        self.assertTrue(motion.is_queue_motion_batch)
+        self.assertEqual(motion.motion_token, token)
+        self.assertEqual(motion.motion_history_size, history_size)
+        self.assertEqual(
+            motion.motion_crossed_lane_count, crossed_lanes
+        )
+        self.assertEqual(
+            motion.motion_history_span_nanos,
+            history_span_units * MOTION_HISTORY_SPAN_UNIT_NANOS,
+        )
+
+        telemetry = QueueTelemetry()
+        telemetry.observe(
+            event(
+                ACTION_DOWN,
+                1,
+                0.25,
+                0.5,
+                phone_event_nanos=2_000_000_000,
+            )
+        )
+        telemetry.observe(summary, delivery_excess_ms=8.2)
+        telemetry.observe(timing, delivery_excess_ms=0.4)
+        telemetry.observe(motion)
+        snapshot = telemetry.snapshot()
+        self.assertEqual(len(snapshot.incidents), 1)
+        diagnosed = snapshot.incidents[0]
+        self.assertAlmostEqual(diagnosed.input_dispatch_ms, 1.5)
+        self.assertAlmostEqual(diagnosed.app_processing_ms, 0.5)
+        self.assertAlmostEqual(diagnosed.queue_residence_ms, 7.25)
+        self.assertAlmostEqual(diagnosed.usb_write_ms, 0.3)
+        self.assertAlmostEqual(
+            diagnosed.post_write_delivery_excess_ms, 0.4
+        )
+        self.assertEqual(diagnosed.history_size, 2)
+        self.assertAlmostEqual(diagnosed.history_span_ms, 8.0)
+        self.assertEqual(diagnosed.crossed_lane_count, 3)
+        self.assertAlmostEqual(snapshot.max_input_dispatch_ms, 1.5)
+        self.assertAlmostEqual(snapshot.max_app_processing_ms, 0.5)
+        self.assertAlmostEqual(snapshot.max_queue_residence_ms, 7.25)
+        self.assertAlmostEqual(snapshot.max_usb_write_ms, 0.3)
+        self.assertEqual(snapshot.incidents_with_history, 1)
+        self.assertEqual(snapshot.max_history_size, 2)
+        self.assertAlmostEqual(snapshot.max_history_span_ms, 8.0)
+        self.assertEqual(snapshot.max_crossed_lane_count, 3)
+        self.assertEqual(
+            timing.timing_input_dispatch_nanos,
+            60 * TIMING_DURATION_UNIT_NANOS,
+        )
 
     def test_queue_incident_decodes_capacity_and_saturated_write(self):
         detail = (
