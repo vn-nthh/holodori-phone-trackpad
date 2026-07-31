@@ -620,7 +620,7 @@ class ConnectionDoctor:
         self,
         capacity: int = DEFAULT_HISTORY_CAPACITY,
         dedup_window_s: float = DEFAULT_DEDUP_WINDOW_SECONDS,
-        now: Callable[[], float] = time.monotonic,
+        now: Callable[[], float] = time.perf_counter,
         notification_capacity: int = DEFAULT_NOTIFICATION_CAPACITY,
     ) -> None:
         self._now = now
@@ -968,7 +968,7 @@ class ConnectionDoctor:
         observed_at: Optional[float] = None,
     ) -> None:
         # Hot path: bounded lock-free bookkeeping only. The receiver passes
-        # its existing monotonic sample to avoid an extra clock syscall.
+        # its existing performance-counter sample to avoid another clock call.
         # Plain int/float stores are atomic under the GIL; diagnostics
         # tolerate a raced read and never block the touch pipeline.
         if heartbeat:

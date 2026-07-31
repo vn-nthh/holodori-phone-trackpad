@@ -1,4 +1,5 @@
 import contextlib
+import ctypes
 import io
 import subprocess
 import unittest
@@ -27,6 +28,64 @@ def completed(stdout="", stderr="", returncode=0):
     return subprocess.CompletedProcess(
         args=[], returncode=returncode, stdout=stdout, stderr=stderr,
     )
+
+
+class SendInputTests(unittest.TestCase):
+    def capture_event(self, key_name, *, key_up=False, accepted=1):
+        captured = {}
+
+        def fake_send_input(count, pointer, structure_size):
+            event = ctypes.cast(
+                pointer, ctypes.POINTER(phone_trackpad.INPUT),
+            ).contents
+            captured.update({
+                "count": count,
+                "structure_size": structure_size,
+                "type": event.type,
+                "vk": event.data.ki.wVk,
+                "scan": event.data.ki.wScan,
+                "flags": event.data.ki.dwFlags,
+            })
+            return accepted
+
+        with mock.patch.object(
+            phone_trackpad, "MapVirtualKeyW", return_value=0x1F,
+        ), mock.patch.object(
+            phone_trackpad, "SendInput", side_effect=fake_send_input,
+        ):
+            result = phone_trackpad.send_key_event(key_name, key_up=key_up)
+        return result, captured
+
+    def test_key_down_uses_win32_input_structure(self):
+        result, event = self.capture_event("s")
+
+        self.assertTrue(result)
+        self.assertEqual(event["count"], 1)
+        self.assertEqual(
+            event["structure_size"], ctypes.sizeof(phone_trackpad.INPUT),
+        )
+        self.assertEqual(event["type"], phone_trackpad.INPUT_KEYBOARD)
+        self.assertEqual(event["vk"], ord("S"))
+        self.assertEqual(event["scan"], 0x1F)
+        self.assertEqual(event["flags"], 0)
+
+    def test_key_up_and_extended_key_flags_are_preserved(self):
+        result, event = self.capture_event("left", key_up=True)
+
+        self.assertTrue(result)
+        self.assertEqual(
+            event["flags"],
+            phone_trackpad.KEYEVENTF_KEYUP
+            | phone_trackpad.KEYEVENTF_EXTENDEDKEY,
+        )
+
+    def test_reports_rejected_and_unknown_events(self):
+        result, _ = self.capture_event("s", accepted=0)
+        self.assertFalse(result)
+
+        with mock.patch.object(phone_trackpad, "SendInput") as send_input:
+            self.assertFalse(phone_trackpad.send_key_event("not-a-key"))
+        send_input.assert_not_called()
 
 
 class CheckedAdbTests(unittest.TestCase):

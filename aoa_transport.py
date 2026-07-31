@@ -2120,7 +2120,7 @@ class AoaReceiver:
                     parser = TouchPacketParser(on_bad_version=bad_version)
                     self._latency.reset()
                     self._queue_telemetry.reset()
-                    last_packet_at = time.monotonic()
+                    last_packet_at = time.perf_counter()
                     epoch_wait_started_at = last_packet_at
                     while not self._stop.is_set():
                         if self._control_event.is_set():
@@ -2129,7 +2129,7 @@ class AoaReceiver:
                         if self._control_event.is_set():
                             raise _AoaOperationCancelled()
                         arrival_nanos = time.perf_counter_ns()
-                        now = time.monotonic()
+                        now = arrival_nanos / 1_000_000_000.0
                         parsed_events = list(parser.feed(chunk))
                         if parsed_events and not attach_requested:
                             connection.write(

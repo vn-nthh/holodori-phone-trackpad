@@ -94,17 +94,70 @@ def resolve_adb_path(explicit: Optional[str] = None) -> str:
 ADB_PATH = resolve_adb_path()
 
 # ============================================================================
-# Windows keybd_event API
+# Windows SendInput API
 # ============================================================================
 
+INPUT_KEYBOARD = 1
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 MAPVK_VK_TO_VSC = 0
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.c_int32),
+        ("dy", ctypes.c_int32),
+        ("mouseData", ctypes.c_uint32),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_uint16),
+        ("wScan", ctypes.c_uint16),
+        ("dwFlags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", ctypes.c_uint32),
+        ("wParamL", ctypes.c_uint16),
+        ("wParamH", ctypes.c_uint16),
+    ]
+
+
+class INPUTUNION(ctypes.Union):
+    _fields_ = [
+        ("mi", MOUSEINPUT),
+        ("ki", KEYBDINPUT),
+        ("hi", HARDWAREINPUT),
+    ]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_uint32),
+        ("data", INPUTUNION),
+    ]
+
 
 user32 = ctypes.windll.user32
 MapVirtualKeyW = user32.MapVirtualKeyW
 MapVirtualKeyW.argtypes = [ctypes.c_uint, ctypes.c_uint]
 MapVirtualKeyW.restype = ctypes.c_uint
+SendInput = user32.SendInput
+SendInput.argtypes = [
+    ctypes.c_uint,
+    ctypes.POINTER(INPUT),
+    ctypes.c_int,
+]
+SendInput.restype = ctypes.c_uint
 
 # Virtual key code map
 VK_MAP = {}
@@ -131,7 +184,7 @@ EXTENDED_VKS = {0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x21, 0x22, 0x23, 0x24}
 
 
 def send_key_event(key_name: str, key_up: bool = False) -> bool:
-    """Send a keyboard event via keybd_event."""
+    """Send a keyboard event through the Windows SendInput API."""
     vk = VK_MAP.get(key_name.lower())
     if vk is None:
         return False
@@ -141,8 +194,17 @@ def send_key_event(key_name: str, key_up: bool = False) -> bool:
         flags |= KEYEVENTF_KEYUP
     if vk in EXTENDED_VKS:
         flags |= KEYEVENTF_EXTENDEDKEY
-    user32.keybd_event(vk, scan, flags, 0)
-    return True
+    event = INPUT(
+        type=INPUT_KEYBOARD,
+        data=INPUTUNION(
+            ki=KEYBDINPUT(
+                wVk=vk,
+                wScan=scan,
+                dwFlags=flags,
+            ),
+        ),
+    )
+    return SendInput(1, ctypes.byref(event), ctypes.sizeof(INPUT)) == 1
 
 
 def press_key(key_name: str) -> bool:
@@ -1226,7 +1288,7 @@ def stream_events(
     print(f"[PLAY] Streaming touch events ({mode})... (Ctrl+C to stop)\n")
 
     event_count = 0
-    start_time = time.time()
+    start_time = time.perf_counter()
     # Read raw bytes and split lines ourselves — avoids Python text-IO
     # buffering, and parse hex straight from bytes (no per-line decode).
     leftover = b""
@@ -1259,14 +1321,14 @@ def stream_events(
 
         event_count += len(lines)
         if event_count >= 3000:
-            elapsed = time.time() - start_time
+            elapsed = time.perf_counter() - start_time
             rate = event_count / elapsed if elapsed > 0 else 0
             s = processor.stats
             state_str = "PLAYING" if processor._cfg_locked else "CONFIGURING"
             print(f"  [STATS] {s['presses']} presses | {s['releases']} releases | "
                   f"{s['drags']} drags | {rate:.0f} ev/s | {state_str}")
             event_count = 0
-            start_time = time.time()
+            start_time = time.perf_counter()
 
 
 class AdbCleanupSession:

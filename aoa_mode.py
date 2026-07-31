@@ -159,7 +159,7 @@ class RateLimitedStatusPrinter:
     def __call__(self, text: str, connected: bool) -> None:
         if self.overlay:
             self.overlay.publish_status(text, connected)
-        now = time.monotonic()
+        now = time.perf_counter()
         if (
             text == self._last_text
             and not connected
