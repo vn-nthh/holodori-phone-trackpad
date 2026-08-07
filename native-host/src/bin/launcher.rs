@@ -4,6 +4,8 @@
 //! process only presents a small native settings window and starts the host
 //! with the equivalent command-line options for the user.
 
+#![windows_subsystem = "windows"]
+
 use std::io::{self, Write};
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
