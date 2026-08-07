@@ -92,7 +92,8 @@ Copy-Item (Join-Path $ProjectRoot "LICENSE") $DocsDir
 
 $Branch = git -C $ProjectRoot branch --show-current
 $Commit = git -C $ProjectRoot rev-parse HEAD
-$Dirty = if (git -C $ProjectRoot status --porcelain) { "yes" } else { "no" }
+$TrackedChanges = git -C $ProjectRoot status --porcelain --untracked-files=no
+$Dirty = if ($TrackedChanges) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
     "android_version_name=0.4.0-alpha12",
