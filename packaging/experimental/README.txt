@@ -6,7 +6,7 @@ does not use ADB, root, Android USB accessory mode, WinUSB, UsbDk, or a custom
 Windows driver. Windows supplies its inbox RNDIS network driver.
 
 Install:
-  1. Copy Android\HolodoriUsbTetheredUdp-v4-alpha10.apk to the phone.
+  1. Copy Android\HolodoriUsbTetheredUdp-v4-alpha11.apk to the phone.
   2. Open the APK on the phone and approve installation from that source.
      If Android reports a signature conflict, uninstall the existing Holodori
      Controller first; this experimental APK is debug-signed.
