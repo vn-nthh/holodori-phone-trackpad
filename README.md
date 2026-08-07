@@ -55,7 +55,7 @@ Create a distributable experimental bundle with:
 ```
 
 The current experimental bundle is published on the
-[v0.4.0-alpha9 GitHub release](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.0-alpha9).
+[v0.4.0-alpha12 GitHub release](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.0-alpha12).
 
 ## Download v0.2.1
 
@@ -71,9 +71,9 @@ Version 0.2.1 fixes fast slides occasionally skipping a lane and makes diagnosti
 1. Install the Windows app and Android APK.
 2. Enable USB tethering on the phone.
 3. Connect the phone with a data-capable USB cable.
-4. Start the native host and open the Android app.
-5. Move and resize the phone's play zone, then lock it.
-6. Start the game and play.
+4. Open `HolodoriUsbController.exe` and press **Start**.
+5. Open the Android app, move and resize the phone's play zone, then lock it.
+6. Start the game and play. Press **Stop** in the Windows app when finished.
 
 The PC touch overlay is off by default. Use the **with Touch Overlay** shortcut or run with `--overlay` to enable it.
 
@@ -96,11 +96,15 @@ skip lane crossings. Disconnecting or reconnecting releases every held key.
 
 ## Diagnostics
 
-Use the native host's `--metrics` option for queue, stage, percentile, and
-jitter numbers. The experimental bundle writes a report only after Q + Enter,
-Ctrl+C, or console close.
+The Windows app saves queue, stage, percentile, and jitter numbers by default.
+Press **Stop** to write one report under `Windows\Logs`. No command prompt is
+needed. The native host's `--metrics` option remains available for advanced
+users.
 
-Queue warnings start at 8 ms, stale input resets at 25 ms, and the final failsafe is 100 ms. Benchmark latency is relative jitter against the fastest recent sample, not absolute one-way latency.
+Queue warnings use the 8.333 ms 120 Hz budget by default. The Windows app lets
+advanced users change the warning budget and UDP port without typing flags.
+Benchmark latency is relative jitter against the fastest recent sample, not
+absolute one-way latency.
 
 ## Build
 

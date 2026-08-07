@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Name = "HolodoriUsbTetheredUdp-v0.4.0-alpha11",
+    [string]$Name = "HolodoriUsbTetheredUdp-v0.4.0-alpha12",
     [string]$CargoHome = "F:\.cargo",
     [string]$JavaHome = "",
     [string]$AndroidSdk = ""
@@ -51,8 +51,8 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
 & (Join-Path $AndroidDir "gradlew.bat") `
     --project-dir $AndroidDir `
     --no-daemon `
-    "-PholodoriVersionName=0.4.0-alpha11" `
-    "-PholodoriVersionCode=18" `
+    "-PholodoriVersionName=0.4.0-alpha12" `
+    "-PholodoriVersionCode=19" `
     clean assembleRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
@@ -81,7 +81,8 @@ $NativeRelease = Join-Path $ProjectRoot "native-host\target\release"
 Copy-Item (Join-Path $NativeRelease "holodori-native-host.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-probe.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-smoke.exe") $WindowsDir
-Copy-Item $Apk (Join-Path $AndroidOutputDir "HolodoriUsbTetheredUdp-v4-alpha11.apk")
+Copy-Item (Join-Path $NativeRelease "holodori-launcher.exe") (Join-Path $BundleDir "HolodoriUsbController.exe")
+Copy-Item $Apk (Join-Path $AndroidOutputDir "HolodoriUsbTetheredUdp-v4-alpha12.apk")
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\README.txt") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-touch.cmd") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-keys.cmd") $BundleDir
@@ -94,8 +95,8 @@ $Commit = git -C $ProjectRoot rev-parse HEAD
 $Dirty = if (git -C $ProjectRoot status --porcelain) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
-    "android_version_name=0.4.0-alpha11",
-    "android_version_code=18",
+    "android_version_name=0.4.0-alpha12",
+    "android_version_code=19",
     "built_utc=$([DateTime]::UtcNow.ToString('o'))",
     "branch=$Branch",
     "base_commit=$Commit",

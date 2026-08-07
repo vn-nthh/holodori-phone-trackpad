@@ -6,7 +6,7 @@ does not use ADB, root, Android USB accessory mode, WinUSB, UsbDk, or a custom
 Windows driver. Windows supplies its inbox RNDIS network driver.
 
 Install:
-  1. Copy Android\HolodoriUsbTetheredUdp-v4-alpha11.apk to the phone.
+  1. Copy Android\HolodoriUsbTetheredUdp-v4-alpha12.apk to the phone.
   2. Open the APK on the phone and approve installation from that source.
      If Android reports a signature conflict, uninstall the existing Holodori
      Controller first; this experimental APK is debug-signed.
@@ -15,23 +15,25 @@ Install:
   4. Connect the phone to Windows with one USB data cable and wait for Windows
      to finish creating the RNDIS/Ethernet adapter.
 
-Test Windows Touch:
-  1. Run run-touch.cmd.
-  2. Unlock the phone and open the APK.
-  3. Arrange and lock the play zone.
-  4. Tap, hold, chord, and slide.
-  5. The independent probe must count WM_POINTER messages.
+Start the Windows app:
+  1. Double-click HolodoriUsbController.exe.
+  2. Choose Touch input or Keyboard lanes.
+  3. Leave "Save latency report when stopped" checked unless you do not want
+     a report. The default warning budget is the 120 Hz frame budget.
+  4. Press Start.
+  5. Unlock the phone and open the APK.
+  6. Arrange and lock the play zone, then tap, hold, chord, and slide.
+  7. Press Stop in the app when finished. Held input is released safely.
 
 Test the Windows API without a phone:
   1. Run Windows\holodori-touch-probe.exe.
   2. Run Windows\holodori-touch-smoke.exe.
   3. Expected: "Windows accepted DOWN + 48 UPDATE + UP touch frames".
 
-Test Holodori keyboard mode:
-  1. Release every finger and close the touch host.
-  2. Run run-keys.cmd.
-  3. Test in Notepad before testing in Holodori.
-  4. If Holodori is elevated, run the host elevated too.
+Keyboard mode:
+  - Select Keyboard lanes in HolodoriUsbController.exe and edit the lane keys
+    if needed. Test in Notepad before testing in Holodori.
+  - If Holodori is elevated, run the launcher elevated too.
 
 Connection diagnostics:
   - "waiting for USB-tethered phone on UDP port 42825" means discovery is
@@ -42,12 +44,12 @@ Connection diagnostics:
     and 4 ms replay preserve ordering across lost datagrams.
   - The host can join a phone session after a host restart; a cable replug is
     not required if USB tethering remains enabled.
-  - run-keys.cmd and run-touch.cmd collect metrics silently in memory.
-  - Press Q then Enter (or Ctrl+C) to stop gracefully. One report is written
-    under Windows\Logs. Nothing is formatted, sorted, printed, or written
-    mid-play.
-  - Use --udp-port PORT for a different port, --metrics-file PATH to choose
-    the output file, or --warn-ms 4.0 for a stricter final warning threshold.
+  - HolodoriUsbController.exe collects metrics silently in memory when the
+    report option is checked. One report is written under Windows\Logs after
+    Stop. Nothing is formatted, sorted, or written mid-play.
+  - The launcher exposes the UDP port and warning budget. Advanced users can
+    still run Windows\holodori-native-host.exe directly with command-line
+    options, but normal users do not need a terminal.
 
 Metrics include:
   - mean, max, p50, p90, p99, and p99.9;

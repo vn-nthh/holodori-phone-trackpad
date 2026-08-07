@@ -96,9 +96,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let lane_count = sink.lane_count(&options);
     let udp = UdpHost::bind(options.udp_port)?;
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms);
-    if options.metrics {
-        install_exit_command_thread()?;
-    }
+    // The launcher owns the host's stdin and sends `q` for a graceful stop.
+    // Keep this available even when the user turns report writing off so the
+    // UI never has to terminate the process and risk held input.
+    install_exit_command_thread()?;
 
     println!("Holodori native host - USB tethering/RNDIS + UDP protocol v4");
     println!(
@@ -110,9 +111,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!(
         "Enable USB tethering on the unlocked Android phone, then connect one USB data cable."
     );
-    if options.metrics {
-        println!("Press Q then Enter to stop and write the metrics file.");
-    }
+    println!("Press Q then Enter to stop gracefully.");
     io::stdout().flush()?;
 
     let mut ordered = OrderedFrames::new();
