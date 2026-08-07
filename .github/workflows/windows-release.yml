@@ -30,9 +30,19 @@ jobs:
 
       - name: Build distributable packages
         shell: pwsh
-        run: .\packaging\build.ps1 -Target All -AndroidSdk $env:ANDROID_HOME
+        run: |
+          if ($env:GITHUB_REF_NAME -like "*-alpha*") {
+            .\packaging\build-experimental.ps1 `
+              -Name "HolodoriLosslessTouch-$env:GITHUB_REF_NAME" `
+              -CargoHome "$env:USERPROFILE\.cargo" `
+              -JavaHome $env:JAVA_HOME `
+              -AndroidSdk $env:ANDROID_HOME
+          } else {
+            .\packaging\build.ps1 -Target All -AndroidSdk $env:ANDROID_HOME
+          }
 
       - name: Run PC tests
+        if: ${{ !contains(github.ref_name, '-alpha') }}
         shell: pwsh
         run: .\.venv-package\Scripts\python.exe -m unittest discover -s tests -v
 
@@ -49,4 +59,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $notesFile = Join-Path "packaging\release-notes" "$env:GITHUB_REF_NAME.md"
-          gh release create $env:GITHUB_REF_NAME release/* --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file $notesFile
+          if ($env:GITHUB_REF_NAME -like "*-alpha*") {
+            $assets = Get-ChildItem "release" -Filter "*.zip" -File | ForEach-Object FullName
+            gh release create $env:GITHUB_REF_NAME $assets --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file $notesFile --prerelease
+          } else {
+            $assets = Get-ChildItem "release" -File | ForEach-Object FullName
+            gh release create $env:GITHUB_REF_NAME $assets --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file $notesFile
+          }

@@ -4,6 +4,54 @@ Use an Android phone as a multi-touch controller for [hololive Dreams (holodori)
 
 > Unofficial community tool. Not affiliated with COVER Corp., hololive production, or QualiArts.
 
+## Experimental lossless-touch branch
+
+The `codex/experimental-lossless-touch` branch replaces the latency-path PC
+runtime with a native Rust host and introduces duplex AOA protocol v4.
+
+- Android retains every frame until Windows acknowledges OS acceptance.
+- CRC, sequence ordering, cumulative ACKs, and 4 ms replay cover corruption,
+  duplicates, queue delay, and a lost host-to-phone ACK.
+- Complete multi-contact snapshots preserve taps, holds, chords, and every
+  historical slide sample.
+- An 8 ms keepalive sustains stationary Windows contacts above 120 Hz.
+- `touch` mode uses the sanctioned Windows Touch API. A separate process sees
+  only `WM_POINTER` messages, proving that Windows received touch rather than
+  reading the USB stream.
+- `keys` mode retains the Holodori lane bridge and emits every crossed lane,
+  pressing the next lane before releasing the prior lane.
+- The hardware remains exactly phone + one USB data cable + PC.
+- Exit-only benchmarking separates Android dispatch, phone queue, duplex USB,
+  and Windows sink latency without writing or sorting during play.
+
+Protocol v4 is intentionally incompatible with the stable v0.2.1 Python host.
+See [the experimental architecture](EXPERIMENTAL_ARCHITECTURE.md) and
+[protocol specification](PROTOCOL_V4.md).
+
+Build and run the experiment:
+
+```text
+cd native-host
+cargo build --release
+target\release\holodori-native-host.exe --mode touch
+```
+
+The touch host opens the independent probe automatically. To retain the
+current Holodori keyboard behavior, use:
+
+```text
+target\release\holodori-native-host.exe --mode keys --lanes s,d,f,j,k,l
+```
+
+Create a distributable experimental bundle with:
+
+```text
+.\packaging\build-experimental.ps1
+```
+
+The current experimental bundle is published on the
+[v0.4.0-alpha9 GitHub release](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.0-alpha9).
+
 ## Download v0.2.1
 
 - [Windows installer](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.2.1/HolodoriPhoneTrackpadSetup.exe)

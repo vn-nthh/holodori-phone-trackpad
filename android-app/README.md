@@ -1,6 +1,7 @@
 # Android companion app
 
-This module is the no-debugging phone side of Holodori Phone Trackpad.
+This module is the no-debugging phone side of Holodori Phone Trackpad. On the
+experimental branch it speaks acknowledged AOA protocol v4.
 
 ## Build
 
@@ -12,101 +13,49 @@ This module is the no-debugging phone side of Holodori Phone Trackpad.
    gradlew.bat assembleDebug
    ```
 
-4. Distribute `app/build/outputs/apk/debug/app-debug.apk` through a normal
-   download/install flow. Installing a downloaded APK does not require USB
-   debugging.
+4. Install `app/build/outputs/apk/debug/app-debug.apk` through a normal
+   download/install flow. Installing the APK does not require USB debugging.
 
 The checked-in Gradle wrapper is pinned to Gradle 8.10.2. The app uses only
 Android platform APIs and has no runtime library dependencies.
 
 ## USB identity
 
-The manifest matches this AOA identity:
+The experimental PC host sends this AOA identity:
 
 | Field | Value |
 |---|---|
 | Manufacturer | `Holodori` |
 | Model | `Phone Trackpad` |
-| Version | `1.0` |
+| Version | `4.0` |
 
-The PC sends this identity during the AOA handshake. Android then launches or
-offers this app and grants access to the accessory after user confirmation.
+Android launches or offers this app after the user approves accessory access.
+The only physical connection is the phone's normal USB data cable to the PC.
 
-## Input protocol
+## Protocol v4 behavior
 
-Each phone-to-PC record is 24 bytes, little-endian:
+Phone-to-host frames are variable-size `HPT4` records containing:
 
-| Offset | Type | Meaning |
-|---:|---|---|
-| 0 | 4 bytes | `HPT1` magic |
-| 4 | `u8` | Protocol version, currently `2` |
-| 5 | `u8` | Action: heartbeat `0`, down `1`, move `2`, up `3`, cancel `4` |
-| 6 | `u8` | Android pointer ID |
-| 7 | `u8` | Flags; see below |
-| 8 | `i16` | Zone-local X multiplied by 10,000 |
-| 10 | `i16` | Zone-local Y multiplied by 10,000 |
-| 12 | `u32` | Monotonic sequence |
-| 16 | `u64` | Android input event time in nanoseconds |
+- a transport session and 64-bit sequence;
+- Android event, UI-callback, and USB-write timestamps;
+- the latest duplex host timestamp echo for clock-origin-independent timing;
+- action and action-pointer ID;
+- a complete contact snapshot with pointer ID, in-zone/tip flags, X/Y,
+  pressure, and touch-major size;
+- an IEEE CRC-32.
 
-Coordinates are intentionally not clamped to `0..1`, allowing the PC overlay
-to show when a finger has crossed outside the configured play zone.
+The PC returns fixed-size `HPA4` HELLO and cumulative ACK records. Android keeps
+each encoded frame in an ordered queue until its sequence is acknowledged.
+There is no stale-age reset or queue-capacity eviction. An unacknowledged frame
+is replayed after 4 ms.
 
-On Android 14 and newer, the timestamp comes from the nanosecond-precision
-motion-event API. Older Android versions retain the millisecond-source fallback.
-Phone and PC timestamps have different origins and must be aligned before
-benchmark comparisons.
+When the live queue is otherwise empty, an 8 ms acknowledged keepalive lets the
+Windows host sustain a stationary contact above the game's 120 Hz maximum.
 
-Protocol v2 adds an explicit transport epoch. The first record after Android
-opens the accessory is `CANCEL` with flag `0x04` (session reset). The PC does
-not accept touch input until that marker arrives. Each PC process sends one
-8-byte `HPTC` attach record on the accessory OUT endpoint. A later attach to
-the same Android transport makes Android drop the stale queue and send another
-session reset with flag `0x08` (host recovery). This prevents records and
-diagnostics from an old PC process from leaking into a new session. The attach
-record's reserved 16-bit field carries capabilities and configuration. Bit
-`0x0001` requests exact timing-breakdown companions, bit `0x0002` requests
-motion-batch companions, and bits 8-15 carry the PC's configured lane count.
+The locked touch path reuses primitive pointer arrays and precomputed zone
+transforms. It enqueues USB input before changing visual state, while visual
+updates remain outside the transport path. Android `MotionEvent` history is
+serialized chronologically as complete multi-contact snapshots.
 
-The remaining low flag bits are inside zone `0x01`, play locked `0x02`,
-session reset `0x04`, and host recovery `0x08`.
-
-Heartbeat records carry backward-compatible queue diagnostics. Flag `0x80`
-marks the fields as valid, pointer ID contains maximum queue depth, X contains
-maximum age in 10-microsecond units, and Y contains the number of queue
-resynchronizations since the previous heartbeat. Flags `0x10`, `0x20`, and
-`0x40` indicate a warning, resynchronization, and 100 ms failsafe respectively.
-
-Exact queue incidents are additional heartbeat records marked with contextual
-flag `0x04`. Their timestamp is the instant Android detects the incident rather
-than the later aggregate-report time. Pointer ID is queue depth and X is queue
-age in 10-microsecond units. Contextual flag `0x01` means a touch was active;
-`0x02` means the writer was blocked in the USB write. The low 16 timestamp bits
-pack a two-bit reason (warning, 25 ms resync, 100 ms failsafe, or capacity)
-above a 14-bit USB-write age measured in 20-microsecond units; incident time
-therefore retains about 66-microsecond resolution. Y is zero for an older host,
-or contains an 8-bit incident token when the host requested timing breakdowns.
-
-A capable host receives a second heartbeat with flags `0x80 | 0x04 | 0x08`.
-Pointer ID repeats the incident token. Four unsigned 12-bit durations are
-packed across X, Y, and the low 16 timestamp bits in 25-microsecond units:
-hardware-event to callback, callback to enqueue, enqueue to writer dequeue, and
-USB write. Each field saturates at 102.375 ms. The remaining timestamp bits
-identify when the delayed sample's write completed, allowing the benchmark to
-estimate the subsequent timing-report delivery excess. Touch records retain
-priority, so incident diagnostics are transmitted only after the live touch
-queue drains.
-
-A host that requests motion-batch diagnostics receives another companion with
-flags `0x80 | 0x04 | 0x10`. Pointer ID repeats the incident token, X is the
-number of historical samples carried by the original `MotionEvent`, Y is the
-number of lane boundaries crossed by that event, and the low 16 timestamp bits
-contain its historical time span in 25-microsecond units.
-
-The locked touch path reuses primitive pointer storage and precomputed zone
-transforms. It enqueues to USB before updating visual state, and limits only the
-phone visualization to 30 Hz; input sampling and USB output are not throttled.
-All historical `ACTION_MOVE` samples are processed chronologically. Pending
-moves may coalesce only within the same PC-configured lane, so redundant
-coordinates do not consume USB bandwidth while lane transitions remain intact.
-The release APK also carries a Baseline Profile for the startup, touch, and
-writer paths.
+See [`../PROTOCOL_V4.md`](../PROTOCOL_V4.md) for the byte layout and
+acknowledgement semantics.
