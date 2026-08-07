@@ -83,6 +83,7 @@ final class UdpTransport implements TouchTransport {
     private long lastHeartbeatNanos;
     private long lastHostSendNanos;
     private long lastControlReceiveNanos;
+    private long sessionStartedNanos;
 
     private DatagramSocket socket;
     private Thread controlThread;
@@ -107,32 +108,7 @@ final class UdpTransport implements TouchTransport {
 
         CountDownLatch writerReady = new CountDownLatch(1);
         synchronized (queueLock) {
-            sessionId = nextSessionId();
-            discoveryNonce = nextSessionId();
-            nextSequence = 0;
-            highestAcknowledged = -1;
-            hostReady = false;
-            hostAddress = null;
-            hostWindow = DEFAULT_HOST_WINDOW;
-            unacknowledged.clear();
-            resetSessionState();
-            long nowNanos = System.nanoTime();
-            enqueueFrameLocked(
-                    TouchSample.ACTION_CANCEL,
-                    0,
-                    false,
-                    true,
-                    nowNanos,
-                    nowNanos,
-                    false,
-                    0,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null
-            );
+            beginSessionLocked();
         }
 
         synchronized (lifecycleLock) {
@@ -569,16 +545,65 @@ final class UdpTransport implements TouchTransport {
     }
 
     private void checkHostTimeout() {
-        boolean lost = false;
+        boolean reset = false;
+        int staleFrames = 0;
         synchronized (queueLock) {
-            if (hostReady && System.nanoTime() - lastControlReceiveNanos >= HOST_TIMEOUT_NANOS) {
-                hostReady = false;
-                hostAddress = null;
-                lost = true;
+            long nowNanos = System.nanoTime();
+            boolean hostTimedOut = hostReady
+                    && nowNanos - lastControlReceiveNanos >= HOST_TIMEOUT_NANOS;
+            boolean discoveryTimedOut = !hostReady
+                    && nowNanos - sessionStartedNanos >= HOST_TIMEOUT_NANOS
+                    && hasGameplayPendingLocked();
+            if (hostTimedOut || discoveryTimedOut) {
+                staleFrames = unacknowledged.size();
+                beginSessionLocked();
+                reset = true;
                 queueLock.notifyAll();
             }
         }
-        if (lost && running) listener.onConnectionChanged(false, "Host not responding; searching");
+        if (reset && running) {
+            listener.onConnectionChanged(
+                    false,
+                    "Host not responding; dropped "
+                            + staleFrames
+                            + " stale frames; searching"
+            );
+        }
+    }
+
+    private boolean hasGameplayPendingLocked() {
+        // The first packet is the session-start CANCEL. Any additional packet
+        // is gameplay that must not be replayed after a multi-second outage.
+        return unacknowledged.size() > 1;
+    }
+
+    private void beginSessionLocked() {
+        sessionId = nextSessionId();
+        discoveryNonce = nextSessionId();
+        nextSequence = 0;
+        highestAcknowledged = -1;
+        hostReady = false;
+        hostAddress = null;
+        hostWindow = DEFAULT_HOST_WINDOW;
+        unacknowledged.clear();
+        resetSessionState();
+        long nowNanos = System.nanoTime();
+        enqueueFrameLocked(
+                TouchSample.ACTION_CANCEL,
+                0,
+                false,
+                true,
+                nowNanos,
+                nowNanos,
+                false,
+                0,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
     }
 
     private void failSession(int sessionGeneration, String message, IOException error) {
@@ -604,6 +629,7 @@ final class UdpTransport implements TouchTransport {
         lastHeartbeatNanos = 0;
         lastHostSendNanos = 0;
         lastControlReceiveNanos = 0;
+        sessionStartedNanos = System.nanoTime();
     }
 
     private static int clampFixed(float value) {

@@ -63,9 +63,9 @@ Safety and scope:
   - Release every finger before terminating keyboard mode.
   - The host never opens or modifies the Holodori process.
   - Touch mode uses the Windows Touch API and a separate WM_POINTER receiver.
-  - Protocol reliability applies within a connected tethering session. A
-    physical cable removal may create a new session; old gameplay is not
-    replayed late.
+  - Protocol reliability applies within a connected tethering session. After
+    two seconds without host control, the phone drops queued gameplay, starts
+    a new session, and sends CANCEL so old input is not replayed late.
 
 See Docs\EXPERIMENTAL_ARCHITECTURE.md and Docs\PROTOCOL_V4.md for details.
 Verify every packaged file against SHA256SUMS.txt.

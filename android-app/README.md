@@ -49,5 +49,9 @@ sequence is acknowledged; an unacknowledged frame is replayed after 4 ms.
 When the live queue is otherwise empty, an 8 ms acknowledged keepalive lets
 the Windows host sustain a stationary contact above the game's 120 Hz maximum.
 
+If host control is absent for two seconds, the app drops queued gameplay,
+starts a new session, and sends a session-start `CANCEL`. This prevents old
+touches from arriving as late input after a tethering outage.
+
 See [`../PROTOCOL_V4.md`](../PROTOCOL_V4.md) for the byte layout and
 acknowledgement semantics.

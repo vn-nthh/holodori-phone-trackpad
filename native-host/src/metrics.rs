@@ -385,10 +385,24 @@ impl HostMetrics {
                 severe[0], severe_threshold_ms, end_to_end.max_ms
             ));
         }
+        if severe[2] > 0 {
+            warnings.push(format!(
+                "late Android queue sends: {} samples waited over {:.0} ms before network write; worst {:.3} ms",
+                severe[2],
+                severe_threshold_ms,
+                callback_to_write.max_ms
+            ));
+        }
         warn_p99(
             &mut warnings,
             "Android current-event dispatch",
             input_current,
+            self.warning_budget_ms,
+        );
+        warn_p99(
+            &mut warnings,
+            "Android callback-to-network write queue",
+            callback_to_write,
             self.warning_budget_ms,
         );
         warn_p99(

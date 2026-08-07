@@ -54,9 +54,11 @@ each boundary.
 - Stationary touch contacts receive an 8 ms keepalive.
 
 A physical cable removal is a visible session boundary, not packet jitter.
-Protocol v4 does not replay old gameplay after a reconnect because doing so
-would create late notes. A host restart can rejoin a still-active phone
-session and replay only frames that were not yet accepted.
+Protocol v4 does not replay old gameplay after a multi-second reconnect
+because doing so would create late notes. Android starts a fresh session after
+two seconds without host control, drops queued gameplay, and sends a new
+session-start `CANCEL`. A host restart inside that short recovery window can
+still replay frames that were not yet accepted.
 
 ## Windows Touch proof
 

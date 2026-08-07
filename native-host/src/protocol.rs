@@ -580,6 +580,27 @@ mod tests {
     }
 
     #[test]
+    fn session_start_cancel_switches_to_a_fresh_live_session() {
+        let old_start =
+            decode_frame(&packet(10, 7, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0)).unwrap();
+        let fresh_start =
+            decode_frame(&packet(11, 0, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0)).unwrap();
+        let fresh_move =
+            decode_frame(&packet(11, 1, ACTION_MOVE, FRAME_FLAG_LOCKED, 4_000)).unwrap();
+
+        let mut ordered = OrderedFrames::new();
+        ordered.push(old_start);
+        assert!(ordered.commit_ready());
+        ordered.push(fresh_start);
+        assert_eq!(ordered.session_id(), Some(11));
+        assert_eq!(ordered.expected_sequence(), 0);
+        assert_eq!(ordered.next_ready().unwrap().action, ACTION_CANCEL);
+        assert!(ordered.commit_ready());
+        ordered.push(fresh_move);
+        assert_eq!(ordered.next_ready().unwrap().sequence, 1);
+    }
+
+    #[test]
     fn control_record_has_valid_crc_and_sentinel_ack() {
         let control = encode_control(CONTROL_HELLO, 6, 99, None, 64, 123_000);
         assert_eq!(&control[..4], &CONTROL_MAGIC);

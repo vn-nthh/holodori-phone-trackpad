@@ -118,6 +118,8 @@ breakdown needed to locate a rare stall.
 - Android retransmits an unacknowledged frame after 4 ms.
 - The host acknowledges only after the selected Windows sink accepts a frame.
 - A fresh host can bootstrap from the oldest replay in an active phone session.
+- After two seconds without host control, Android drops queued gameplay and
+  starts a fresh session with a `CANCEL` instead of replaying stale input.
 - An 8 ms acknowledged heartbeat sustains stationary contacts.
 - A cable removal is a session boundary; old gameplay is not replayed late.
 
