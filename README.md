@@ -55,7 +55,11 @@ Create a distributable experimental bundle with:
 ```
 
 The current experimental bundle is published on the
-[v0.4.0-alpha12 GitHub release](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.0-alpha12).
+[v0.4.0 GitHub release](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.0).
+The Windows launcher is a small Tauri app; it shows only lane keys, USB port,
+latency-report preference, and Start/Stop. It uses the system WebView2 runtime
+on supported Windows 10/11, while the latency-critical host remains native
+Rust.
 
 ## Download v0.2.1
 
@@ -96,15 +100,13 @@ skip lane crossings. Disconnecting or reconnecting releases every held key.
 
 ## Diagnostics
 
-The Windows app saves queue, stage, percentile, and jitter numbers by default.
-Press **Stop** to write one report under `Windows\Logs`. No command prompt is
-needed. The native host's `--metrics` option remains available for advanced
-users.
+The Windows app can save queue, stage, percentile, and jitter numbers when
+**Save latency report when stopped** is checked. Press **Stop** to write one
+report under `Windows\Logs`. No command prompt is needed.
 
 Queue warnings use the 8.333 ms 120 Hz budget by default. The Windows app lets
-advanced users change the warning budget and UDP port without typing flags.
-Benchmark latency is relative jitter against the fastest recent sample, not
-absolute one-way latency.
+users change the UDP port without typing flags. Benchmark latency is relative
+jitter against the fastest recent sample, not absolute one-way latency.
 
 ## Build
 

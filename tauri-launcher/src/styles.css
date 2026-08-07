@@ -1,0 +1,119 @@
+:root {
+  color: oklch(96% 0 0);
+  background: #000;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-width: 360px;
+  min-height: 100vh;
+  overflow: hidden;
+  background: #000;
+}
+
+button, input { font: inherit; }
+
+.shell {
+  width: min(100%, 430px);
+  margin: 0 auto;
+  padding: 22px 30px 24px;
+}
+
+.header { margin-bottom: 25px; }
+
+h1 {
+  margin: 0;
+  color: #fff;
+  font-size: 27px;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+}
+
+.settings { display: grid; gap: 17px; }
+
+.field { display: grid; gap: 7px; }
+
+.field span {
+  color: #a6a6a6;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+input[type="text"], input:not([type]) {
+  width: 100%;
+}
+
+.field input {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 12px;
+  border: 1px solid #292929;
+  border-radius: 8px;
+  outline: none;
+  background: #090909;
+  color: #f5f5f5;
+  transition: border-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.field input:focus {
+  border-color: #777;
+  box-shadow: 0 0 0 3px rgb(255 255 255 / 10%);
+}
+
+.field input:disabled { opacity: 0.6; }
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #c2c2c2;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check-row input {
+  width: 17px;
+  height: 17px;
+  accent-color: #fff;
+}
+
+.status {
+  min-height: 18px;
+  margin: 2px 0 0;
+  color: #858585;
+  font-size: 13px;
+}
+
+.status[data-tone="error"] { color: #ff8a8a; }
+
+.actions { display: flex; gap: 10px; }
+
+button {
+  flex: 1;
+  min-height: 42px;
+  padding: 9px 18px;
+  border: 1px solid #2d2d2d;
+  border-radius: 8px;
+  background: #0d0d0d;
+  color: #e8e8e8;
+  cursor: pointer;
+  transition: background 150ms ease-out, border-color 150ms ease-out, transform 150ms ease-out;
+}
+
+button:hover:not(:disabled) { background: #1a1a1a; }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:focus-visible { outline: 3px solid #707070; outline-offset: 2px; }
+button:disabled { cursor: default; opacity: 0.48; }
+
+button.primary {
+  border-color: #fff;
+  background: #fff;
+  color: #000;
+}
+
+button.primary:hover:not(:disabled) { background: #d5d5d5; }

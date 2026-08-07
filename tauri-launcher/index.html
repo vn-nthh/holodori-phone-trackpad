@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>doritrack</title>
+  </head>
+  <body>
+    <main class="shell" aria-labelledby="app-title">
+      <header class="header">
+        <h1 id="app-title">doritrack</h1>
+      </header>
+
+      <form id="settings-form" class="settings">
+        <label class="field">
+          <span>Keys</span>
+          <input id="keys" name="keys" value="s,d,f,j,k,l" autocomplete="off" spellcheck="false" />
+        </label>
+
+        <label class="field">
+          <span>USB port</span>
+          <input id="port" name="port" value="42825" inputmode="numeric" maxlength="5" autocomplete="off" />
+        </label>
+
+        <label class="check-row">
+          <input id="metrics" type="checkbox" checked />
+          <span>Save latency report when stopped</span>
+        </label>
+
+        <p id="status" class="status" role="status" aria-live="polite">Ready</p>
+
+        <div class="actions">
+          <button id="start" class="primary" type="submit">Start</button>
+          <button id="stop" type="button" disabled>Stop</button>
+        </div>
+      </form>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

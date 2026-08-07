@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+src-tauri/icons/*
+!src-tauri/icons/source.svg
+!src-tauri/icons/icon.ico

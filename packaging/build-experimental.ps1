@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Name = "HolodoriUsbTetheredUdp-v0.4.0-alpha12",
+    [string]$Name = "HolodoriUsbTetheredUdp-v0.4.0",
     [string]$CargoHome = "F:\.cargo",
     [string]$JavaHome = "",
     [string]$AndroidSdk = ""
@@ -51,11 +51,31 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
 & (Join-Path $AndroidDir "gradlew.bat") `
     --project-dir $AndroidDir `
     --no-daemon `
-    "-PholodoriVersionName=0.4.0-alpha12" `
-    "-PholodoriVersionCode=19" `
+    "-PholodoriVersionName=0.4.0" `
+    "-PholodoriVersionCode=21" `
     clean assembleRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
+}
+
+$TauriDir = Join-Path $ProjectRoot "tauri-launcher"
+Push-Location $TauriDir
+try {
+    npm ci --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri dependency install failed."
+    }
+    npm run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri frontend build failed."
+    }
+    npx tauri build --no-bundle
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri Windows build failed."
+    }
+}
+finally {
+    Pop-Location
 }
 
 $Apk = Join-Path $AndroidDir "app\build\outputs\apk\release\app-release.apk"
@@ -78,11 +98,12 @@ New-Item -ItemType Directory -Path @(
 ) | Out-Null
 
 $NativeRelease = Join-Path $ProjectRoot "native-host\target\release"
+$TauriRelease = Join-Path $TauriDir "src-tauri\target\release"
 Copy-Item (Join-Path $NativeRelease "holodori-native-host.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-probe.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-smoke.exe") $WindowsDir
-Copy-Item (Join-Path $NativeRelease "holodori-launcher.exe") (Join-Path $BundleDir "HolodoriUsbController.exe")
-Copy-Item $Apk (Join-Path $AndroidOutputDir "HolodoriUsbTetheredUdp-v4-alpha12.apk")
+Copy-Item (Join-Path $TauriRelease "holodori-usb-controller.exe") (Join-Path $BundleDir "HolodoriUsbController.exe")
+Copy-Item $Apk (Join-Path $AndroidOutputDir "HolodoriUsbTetheredUdp-v4.apk")
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\README.txt") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-touch.cmd") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-keys.cmd") $BundleDir
@@ -96,8 +117,8 @@ $TrackedChanges = git -C $ProjectRoot status --porcelain --untracked-files=no
 $Dirty = if ($TrackedChanges) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
-    "android_version_name=0.4.0-alpha12",
-    "android_version_code=19",
+    "android_version_name=0.4.0",
+    "android_version_code=21",
     "built_utc=$([DateTime]::UtcNow.ToString('o'))",
     "branch=$Branch",
     "base_commit=$Commit",
@@ -107,6 +128,8 @@ $BuildInfo = @(
     "protocol=4",
     "windows_arch=x86_64",
     "windows_crt=static",
+    "windows_launcher=tauri",
+    "windows_webview2=system-runtime",
     "android_signing=debug-key experimental"
 )
 $BuildInfo | Set-Content -Encoding UTF8 (Join-Path $BundleDir "BUILD-INFO.txt")

@@ -6,7 +6,7 @@ does not use ADB, root, Android USB accessory mode, WinUSB, UsbDk, or a custom
 Windows driver. Windows supplies its inbox RNDIS network driver.
 
 Install:
-  1. Copy Android\HolodoriUsbTetheredUdp-v4-alpha12.apk to the phone.
+  1. Copy Android\HolodoriUsbTetheredUdp-v4.apk to the phone.
   2. Open the APK on the phone and approve installation from that source.
      If Android reports a signature conflict, uninstall the existing Holodori
      Controller first; this experimental APK is debug-signed.
@@ -17,13 +17,20 @@ Install:
 
 Start the Windows app:
   1. Double-click HolodoriUsbController.exe.
-  2. Choose Touch input or Keyboard lanes.
+  2. Set the lane keys and USB port if needed.
   3. Leave "Save latency report when stopped" checked unless you do not want
-     a report. The default warning budget is the 120 Hz frame budget.
+     a report.
   4. Press Start.
   5. Unlock the phone and open the APK.
   6. Arrange and lock the play zone, then tap, hold, chord, and slide.
   7. Press Stop in the app when finished. Held input is released safely.
+
+Portable Windows app:
+  - The folder is self-contained for Holodori: no installer, ADB, root,
+    UsbDk, WinUSB, or custom driver is included or used.
+  - The Tauri UI uses the Microsoft Edge WebView2 runtime supplied by supported
+    Windows 10/11 installations. If the app does not open, install or update
+    the WebView2 Runtime once from Microsoft.
 
 Test the Windows API without a phone:
   1. Run Windows\holodori-touch-probe.exe.
@@ -31,8 +38,8 @@ Test the Windows API without a phone:
   3. Expected: "Windows accepted DOWN + 48 UPDATE + UP touch frames".
 
 Keyboard mode:
-  - Select Keyboard lanes in HolodoriUsbController.exe and edit the lane keys
-    if needed. Test in Notepad before testing in Holodori.
+  - Edit the lane keys in HolodoriUsbController.exe. Test in Notepad before
+    testing in Holodori.
   - If Holodori is elevated, run the launcher elevated too.
 
 Connection diagnostics:
@@ -47,9 +54,8 @@ Connection diagnostics:
   - HolodoriUsbController.exe collects metrics silently in memory when the
     report option is checked. One report is written under Windows\Logs after
     Stop. Nothing is formatted, sorted, or written mid-play.
-  - The launcher exposes the UDP port and warning budget. Advanced users can
-    still run Windows\holodori-native-host.exe directly with command-line
-    options, but normal users do not need a terminal.
+  - The launcher exposes the UDP port. The 8.333 ms 120 Hz warning budget is
+    applied automatically; normal users do not need a terminal.
 
 Metrics include:
   - mean, max, p50, p90, p99, and p99.9;
@@ -64,7 +70,9 @@ Metrics include:
 Safety and scope:
   - Release every finger before terminating keyboard mode.
   - The host never opens or modifies the Holodori process.
-  - Touch mode uses the Windows Touch API and a separate WM_POINTER receiver.
+  - The separately shipped touch probe uses the Windows Touch API and a
+    separate WM_POINTER receiver for diagnostics only; the GUI launches keys
+    mode.
   - Protocol reliability applies within a connected tethering session. After
     two seconds without host control, the phone drops queued gameplay, starts
     a new session, and sends CANCEL so old input is not replayed late.

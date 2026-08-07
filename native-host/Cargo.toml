@@ -34,7 +34,3 @@ path = "src/bin/probe.rs"
 [[bin]]
 name = "holodori-touch-smoke"
 path = "src/bin/smoke.rs"
-
-[[bin]]
-name = "holodori-launcher"
-path = "src/bin/launcher.rs"
