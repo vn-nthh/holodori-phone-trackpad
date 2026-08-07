@@ -393,7 +393,7 @@ impl HostMetrics {
         );
         warn_p99(
             &mut warnings,
-            "estimated USB one-way transit",
+            "estimated USB-tethered network one-way transit",
             transport,
             self.warning_budget_ms,
         );
@@ -405,7 +405,7 @@ impl HostMetrics {
         );
         if interarrival.max_ms > self.warning_budget_ms * 2.0 {
             warnings.push(format!(
-                "maximum USB receive gap {:.3} ms exceeded two 120 Hz frames",
+                "maximum USB-tethered network receive gap {:.3} ms exceeded two 120 Hz frames",
                 interarrival.max_ms
             ));
         }
@@ -478,10 +478,14 @@ impl HostMetrics {
         )?;
         write_snapshot(
             &mut writer,
-            "android_callback_to_usb_write_ms",
+            "android_callback_to_network_write_ms",
             callback_to_write,
         )?;
-        write_snapshot(&mut writer, "usb_one_way_symmetric_estimate_ms", transport)?;
+        write_snapshot(
+            &mut writer,
+            "usb_tethered_network_one_way_symmetric_estimate_ms",
+            transport,
+        )?;
         write_snapshot(&mut writer, "windows_receive_to_sink_ms", service)?;
         write_snapshot(&mut writer, "ack_write_ms", ack)?;
         writeln!(
@@ -515,12 +519,12 @@ impl HostMetrics {
         }
         writeln!(
             writer,
-            "usb_receive_cadence: mean_interval_ms={:.3} max_gap_ms={:.3}",
+            "usb_tethered_network_receive_cadence: mean_interval_ms={:.3} max_gap_ms={:.3}",
             interarrival.mean_ms, interarrival.max_ms
         )?;
         writeln!(
             writer,
-            "note=USB one-way is half duplex round-trip after subtracting measured phone turnaround; it assumes symmetric directions"
+            "note=USB-tethered network one-way is half duplex round-trip after subtracting measured phone turnaround; it assumes symmetric directions"
         )?;
         writeln!(
             writer,
@@ -605,7 +609,7 @@ mod tests {
 
     #[test]
     fn duplex_estimate_subtracts_phone_turnaround() {
-        // 400 ns total USB round trip and 500 ns spent on the phone.
+        // 400 ns total USB-tethered network round trip and 500 ns spent on the phone.
         let estimate = estimate_one_way_nanos(1_000, 11_100, 11_600, 1_900).unwrap();
         assert_eq!(estimate, 200.0);
     }

@@ -1,15 +1,10 @@
 # Experimental lossless touch architecture
 
-This branch is a clean experiment, not a wire-compatible update to the current
-Python release. It has two outputs from one lossless phone stream:
-
-1. a keyboard-lane sink for the heuristics Holodori supports today;
-2. a Windows Touch sink plus an independent receiver that demonstrates
-   real-time `WM_POINTER` delivery outside Holodori.
-
-No external controller, USB adapter, microcontroller, or second cable is
-required. The PC is the USB host and the Android phone enters Android Open
-Accessory (AOA) mode over a normal data cable.
+This branch is a USB-tethering/RNDIS + UDP experiment. It is deliberately
+not wire-compatible with the stable Python release and does not use ADB,
+root, Android USB accessory mode, WinUSB, UsbDk, or a custom Windows driver.
+The only physical link is the phone's normal USB cable; Windows' inbox RNDIS
+network driver carries the UDP traffic.
 
 ## Data path
 
@@ -17,15 +12,32 @@ Accessory (AOA) mode over a normal data cable.
 Android MotionEvent
   -> complete chronological contact frame
   -> retained v4 queue with benchmark timestamps
-  -> AOA bulk OUT over USB
-  -> Rust parser + CRC + sequence reorder/dedup
+  -> HPT4 one-datagram UDP send over USB tethering/RNDIS
+  -> Rust UDP receiver + CRC + sequence reorder/dedup
   -> selected Windows OS sink
-  -> cumulative ACK over AOA bulk IN
+  -> HPA4 cumulative ACK datagram
   -> Android retires acknowledged frames
 ```
 
 The ACK is deliberately after the sink. A valid packet that Windows has not
 accepted remains unacknowledged and is retried; parsing alone is not success.
+UDP is used as a low-overhead datagram framing layer, not as an invitation to
+drop input: the retained queue and cumulative ACK make the live path
+loss-aware.
+
+## Discovery and packet boundaries
+
+The Android app binds one ephemeral UDP socket and broadcasts a 32-byte,
+CRC-protected `HPTD` discovery hello to port 42825 on the RNDIS interface.
+The host listens on `0.0.0.0:42825`, replies to the phone's source address,
+and the phone then sends HPT4 frames to that host address. No fixed phone IP
+is assumed. Discovery repeats while the link is not acknowledged, allowing a
+host restart without toggling USB tethering.
+
+Every HPT4 frame is one datagram and is smaller than the Ethernet MTU. HPA4
+HELLO and ACK records are also one datagram each. A malformed datagram cannot
+be concatenated with a later frame; the host resets the datagram parser at
+each boundary.
 
 ## Why this does not lose a slide to packet loss or jitter
 
@@ -43,16 +55,16 @@ accepted remains unacknowledged and is retried; parsing alone is not success.
 
 A physical cable removal is a visible session boundary, not packet jitter.
 Protocol v4 does not replay old gameplay after a reconnect because doing so
-would create late notes. Persisting disconnected input and playing it later is
-lossless archival, but it is not a valid live controller.
+would create late notes. A host restart can rejoin a still-active phone
+session and replay only frames that were not yet accepted.
 
 ## Windows Touch proof
 
 `holodori-native-host.exe --mode touch` starts two independent processes:
 
-- the host consumes USB frames and calls `InitializeTouchInjection` /
+- the host consumes UDP frames and calls `InitializeTouchInjection` /
   `InjectTouchInput` with complete `POINTER_TOUCH_INFO` frames;
-- `holodori-touch-probe.exe` knows nothing about USB and handles only
+- `holodori-touch-probe.exe` knows nothing about UDP and handles only
   `WM_POINTERDOWN`, `WM_POINTERUPDATE`, and `WM_POINTERUP`.
 
 If the probe displays the contact, Windows' pointer stack received it. This is
@@ -82,15 +94,14 @@ patches memory, hooks rendering/input code, or constructs game/network packets.
 
 ## Latency contract
 
-The native hot path has no Python interpreter, JSON, sockets, polling bridge,
-or UI work. It uses synchronous USB bulk reads, fixed binary frames, stack
-buffers, and direct User32 calls. It accepts and sustains at least 120 updates
-per second; the keepalive period is 8 ms.
+The native hot path has no Python interpreter, JSON, polling bridge, or UI
+work. It uses fixed binary datagrams, stack buffers, direct User32 calls, and a
+4 ms retransmission threshold. It accepts and sustains at least 120 updates per
+second; the keepalive period is 8 ms.
 
 An absolute promise that every phone is faster than every physical keyboard is
 not physically testable or universally true: phone touch scan rate and USB
-controller scheduling vary, while gaming keyboards range from sub-millisecond
-to multi-frame latency. The enforceable target for this branch is:
+controller scheduling vary. The enforceable target for this branch is:
 
 - no intentional buffering or frame-age reset;
 - no loss caused by transport jitter, CRC failure, duplicate delivery, or a
@@ -99,32 +110,26 @@ to multi-frame latency. The enforceable target for this branch is:
   normal operation;
 - performance must be measured on each target phone/PC pair before release.
 
-Protocol v4 preserves the original event, UI callback, and USB-write times. The
-phone also echoes the host's previous control-send time and its local receipt
-time. This four-timestamp exchange subtracts measured phone turnaround from a
-duplex round trip, avoiding direct subtraction of unrelated clock origins.
+Protocol v4 preserves the original event, UI callback, and network-write
+times. The phone also echoes the host's previous control-send time and its
+local receipt time. This four-timestamp exchange subtracts measured phone
+turnaround from a duplex round trip, avoiding direct subtraction of unrelated
+clock origins.
 
 ### Instrumented metrics
 
 Pass `--metrics` to collect bounded in-memory samples. No metrics are formatted,
 sorted, printed, or written while input is active. Press Q then Enter, Ctrl+C,
-or close the console to request graceful shutdown; the host then writes one timestamped file
-under `Windows\Logs`. `--metrics-file PATH` selects an explicit destination and
-`--warn-ms MS` changes the default 8.333 ms final warning budget.
+or close the console to request graceful shutdown; the host then writes one
+timestamped file under `Windows\Logs`. `--metrics-file PATH` selects an explicit
+destination and `--warn-ms MS` changes the default 8.333 ms final warning budget.
 
-The report contains one set of mean, max, p50, p90, p99, and p99.9 values for
-current-event-to-Windows estimated latency, Android current input dispatch,
-Android historical batch age, Android callback-to-write, symmetric one-way USB,
-Windows receive-to-sink, and ACK write. Current and historical MotionEvent
-samples are separate populations. Recovery incidents, out-of-order frames,
+The report contains mean, max, p50, p90, p99, and p99.9 values for current-event
+to-Windows estimated latency, Android current input dispatch, Android historical
+batch age, Android callback-to-write, symmetric one-way network, Windows
+receive-to-sink, and ACK write. Recovery incidents, out-of-order frames,
 replays, unresolved frames, parser discards, and sink retries are counted once
 at exit. No cross-device clocks are directly subtracted.
-
-Percentiles use fixed 4 microsecond histograms that cover the complete session;
-long runs are not truncated to a recent sample window. The report also gives
-tail counts and one correlated worst-current-event record with every stage of
-that same frame. Parser bytes skipped while attaching to an already-active USB
-stream are kept separate from bytes discarded after valid framing begins.
 
 ## Build and operation
 
@@ -133,7 +138,7 @@ Requirements:
 - Windows 10 or 11;
 - Rust stable MSVC toolchain;
 - JDK 17 and Android SDK Platform 35 for the APK;
-- UsbDk installed, or a compatible WinUSB binding for the AOA interface.
+- a phone and PC that support ordinary USB tethering/RNDIS.
 
 Build:
 
@@ -143,8 +148,8 @@ cargo test --all-targets
 cargo build --release
 
 cd ..\android-app
-gradlew.bat assembleDebug
+gradlew.bat assembleRelease
 ```
 
-The native host requests AOA identity `Holodori / Phone Trackpad / 4.0`; the
-experimental APK filter matches that exact identity.
+On the phone, enable USB tethering before launching the host. The app uses
+normal `INTERNET` and `ACCESS_NETWORK_STATE` permissions only.

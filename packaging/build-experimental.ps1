@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Name = "HolodoriLosslessTouch-v0.4.0-alpha9",
+    [string]$Name = "HolodoriUsbTetheredUdp-v0.4.0-alpha10",
     [string]$CargoHome = "F:\.cargo",
     [string]$JavaHome = "",
     [string]$AndroidSdk = ""
@@ -51,8 +51,8 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
 & (Join-Path $AndroidDir "gradlew.bat") `
     --project-dir $AndroidDir `
     --no-daemon `
-    "-PholodoriVersionName=0.4.0-alpha9" `
-    "-PholodoriVersionCode=16" `
+    "-PholodoriVersionName=0.4.0-alpha10" `
+    "-PholodoriVersionCode=17" `
     clean assembleRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
@@ -70,12 +70,10 @@ if ($LASTEXITCODE -ne 0) {
 
 $WindowsDir = Join-Path $BundleDir "Windows"
 $AndroidOutputDir = Join-Path $BundleDir "Android"
-$DriversDir = Join-Path $BundleDir "Drivers"
 $DocsDir = Join-Path $BundleDir "Docs"
 New-Item -ItemType Directory -Path @(
     $WindowsDir,
     $AndroidOutputDir,
-    $DriversDir,
     $DocsDir
 ) | Out-Null
 
@@ -83,9 +81,7 @@ $NativeRelease = Join-Path $ProjectRoot "native-host\target\release"
 Copy-Item (Join-Path $NativeRelease "holodori-native-host.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-probe.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-smoke.exe") $WindowsDir
-Copy-Item $Apk (Join-Path $AndroidOutputDir "HolodoriLosslessTouch-v4-experimental.apk")
-Copy-Item (Join-Path $ProjectRoot "packaging\third_party\usbdk\UsbDk_1.0.22_x64.msi") $DriversDir
-Copy-Item (Join-Path $ProjectRoot "packaging\third_party\usbdk\LICENSE") $DriversDir
+Copy-Item $Apk (Join-Path $AndroidOutputDir "HolodoriUsbTetheredUdp-v4-alpha10.apk")
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\README.txt") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-touch.cmd") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-keys.cmd") $BundleDir
@@ -98,12 +94,14 @@ $Commit = git -C $ProjectRoot rev-parse HEAD
 $Dirty = if (git -C $ProjectRoot status --porcelain) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
-    "android_version_name=0.4.0-alpha9",
-    "android_version_code=16",
+    "android_version_name=0.4.0-alpha10",
+    "android_version_code=17",
     "built_utc=$([DateTime]::UtcNow.ToString('o'))",
     "branch=$Branch",
     "base_commit=$Commit",
     "working_tree_dirty=$Dirty",
+    "transport=usb-tethering-rndis-udp",
+    "udp_port=42825",
     "protocol=4",
     "windows_arch=x86_64",
     "windows_crt=static",

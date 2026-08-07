@@ -1,27 +1,26 @@
-HOLODORI LOSSLESS TOUCH - EXPERIMENTAL PROTOCOL V4
-==================================================
+HOLODORI LOSSLESS TOUCH - USB TETHERING / RNDIS / UDP
+========================================================
 
-This bundle is not compatible with the stable v0.2.1 Python host.
-
-Hardware:
-  - Android phone
-  - One USB data cable
-  - Windows 10/11 PC
+This experimental bundle uses the phone's normal USB tethering network. It
+does not use ADB, root, Android USB accessory mode, WinUSB, UsbDk, or a custom
+Windows driver. Windows supplies its inbox RNDIS network driver.
 
 Install:
-  1. Install Drivers\UsbDk_1.0.22_x64.msi if UsbDk is not already installed.
-  2. Copy Android\HolodoriLosslessTouch-v4-experimental.apk to the phone.
-  3. Open the APK on the phone and approve installation from that source.
+  1. Copy Android\HolodoriUsbTetheredUdp-v4-alpha10.apk to the phone.
+  2. Open the APK on the phone and approve installation from that source.
      If Android reports a signature conflict, uninstall the existing Holodori
      Controller first; this experimental APK is debug-signed.
+  3. On the phone, enable Settings > Network & internet > Hotspot & tethering
+     > USB tethering. The exact labels vary by Android vendor.
+  4. Connect the phone to Windows with one USB data cable and wait for Windows
+     to finish creating the RNDIS/Ethernet adapter.
 
 Test Windows Touch:
   1. Run run-touch.cmd.
-  2. Connect and unlock the phone.
-  3. Accept Android's USB accessory prompt.
-  4. Arrange and lock the play zone.
-  5. Tap, hold, chord, and slide.
-  6. The independent probe must count WM_POINTER messages.
+  2. Unlock the phone and open the APK.
+  3. Arrange and lock the play zone.
+  4. Tap, hold, chord, and slide.
+  5. The independent probe must count WM_POINTER messages.
 
 Test the Windows API without a phone:
   1. Run Windows\holodori-touch-probe.exe.
@@ -35,37 +34,38 @@ Test Holodori keyboard mode:
   4. If Holodori is elevated, run the host elevated too.
 
 Connection diagnostics:
-  - "AOA bulk link ready" means Windows opened the phone.
-  - "Lossless stream ready" means the phone sent its session frame and the
-    host returned the first acknowledgement.
-  - This build uses an existing WinUSB-compatible Android Accessory driver
-    before falling back to UsbDk.
-  - This build can join the phone's active session after a Windows host restart;
-    a cable replug is not required.
+  - "waiting for USB-tethered phone on UDP port 42825" means discovery is
+    listening on the RNDIS adapter.
+  - "UDP link ready" means the host received the phone's discovery hello.
+  - "Lossless UDP over USB tethering connected" means HPA4 control is active.
+  - HPT4 frames are one UDP datagram each; HPA4 cumulative acknowledgements
+    and 4 ms replay preserve ordering across lost datagrams.
+  - The host can join a phone session after a host restart; a cable replug is
+    not required if USB tethering remains enabled.
   - run-keys.cmd and run-touch.cmd collect metrics silently in memory.
-  - Press Q then Enter (or Ctrl+C) to stop gracefully. One report is written under
-    Windows\Logs. Nothing is formatted, sorted, printed, or written mid-play.
-  - Use --metrics-file PATH to choose the output file, or --warn-ms 4.0 for a
-    stricter final warning threshold.
+  - Press Q then Enter (or Ctrl+C) to stop gracefully. One report is written
+    under Windows\Logs. Nothing is formatted, sorted, printed, or written
+    mid-play.
+  - Use --udp-port PORT for a different port, --metrics-file PATH to choose
+    the output file, or --warn-ms 4.0 for a stricter final warning threshold.
 
 Metrics include:
   - mean, max, p50, p90, p99, and p99.9;
   - estimated current touch event-to-Windows latency;
   - separate Android current dispatch and historical batch age;
-  - Android callback-to-write, symmetric one-way USB, Windows sink, and ACK time;
+  - Android callback-to-write, symmetric one-way network, Windows sink, and
+    ACK time;
   - replay, recovery incident, parser discard, and sink retry counters;
   - all-session tail counts and one correlated worst-event stage breakdown;
   - warnings at the 8.333 ms 120 Hz frame budget by default.
-
-The USB value is half a measured duplex round trip after subtracting the
-phone's measured turnaround. It assumes similar delay in both USB directions.
 
 Safety and scope:
   - Release every finger before terminating keyboard mode.
   - The host never opens or modifies the Holodori process.
   - Touch mode uses the Windows Touch API and a separate WM_POINTER receiver.
-  - Protocol reliability applies within a connected USB session. A physical
-    cable removal creates a new session and old gameplay is not replayed late.
+  - Protocol reliability applies within a connected tethering session. A
+    physical cable removal may create a new session; old gameplay is not
+    replayed late.
 
 See Docs\EXPERIMENTAL_ARCHITECTURE.md and Docs\PROTOCOL_V4.md for details.
 Verify every packaged file against SHA256SUMS.txt.

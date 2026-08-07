@@ -4,6 +4,10 @@ use std::fmt;
 pub const PROTOCOL_VERSION: u8 = 4;
 pub const FRAME_MAGIC: [u8; 4] = *b"HPT4";
 pub const CONTROL_MAGIC: [u8; 4] = *b"HPA4";
+pub const DISCOVERY_MAGIC: [u8; 4] = *b"HPTD";
+pub const DISCOVERY_VERSION: u8 = 1;
+pub const DISCOVERY_HELLO: u8 = 1;
+pub const DISCOVERY_ACK: u8 = 2;
 pub const MESSAGE_TOUCH_FRAME: u8 = 1;
 pub const CONTROL_HELLO: u8 = 1;
 pub const CONTROL_ACK: u8 = 2;
@@ -24,6 +28,7 @@ pub const FRAME_HEADER_SIZE: usize = 68;
 pub const CONTACT_SIZE: usize = 10;
 pub const CRC_SIZE: usize = 4;
 pub const CONTROL_SIZE: usize = 40;
+pub const DISCOVERY_SIZE: usize = 32;
 pub const MAX_CONTACTS: usize = 16;
 pub const MAX_FRAME_SIZE: usize = FRAME_HEADER_SIZE + MAX_CONTACTS * CONTACT_SIZE + CRC_SIZE;
 
@@ -83,6 +88,13 @@ pub enum ProtocolError {
     BadLength(usize),
     BadContactCount(usize),
     BadCrc { expected: u32, actual: u32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiscoveryMessage {
+    pub kind: u8,
+    pub nonce: u64,
+    pub session_id: u64,
 }
 
 impl fmt::Display for ProtocolError {
@@ -188,6 +200,14 @@ impl FrameParser {
         frames
     }
 
+    /// Parse one complete UDP datagram without allowing a malformed packet to
+    /// contaminate the next datagram. Stream-oriented callers continue to use
+    /// the `feed` method above.
+    pub fn feed_datagram(&mut self, bytes: &[u8]) -> Vec<Result<TouchFrame, ProtocolError>> {
+        self.buffer.clear();
+        self.feed(bytes)
+    }
+
     pub fn take_incompatible_version(&mut self) -> Option<u8> {
         self.incompatible_version.take()
     }
@@ -282,6 +302,34 @@ pub fn encode_control(
     let checksum = crc32(&bytes[..36]);
     bytes[36..40].copy_from_slice(&checksum.to_le_bytes());
     bytes
+}
+
+pub fn encode_discovery(kind: u8, nonce: u64, session_id: u64) -> [u8; DISCOVERY_SIZE] {
+    let mut bytes = [0_u8; DISCOVERY_SIZE];
+    bytes[..4].copy_from_slice(&DISCOVERY_MAGIC);
+    bytes[4] = DISCOVERY_VERSION;
+    bytes[5] = kind;
+    bytes[8..16].copy_from_slice(&nonce.to_le_bytes());
+    bytes[16..24].copy_from_slice(&session_id.to_le_bytes());
+    let checksum = crc32(&bytes[..28]);
+    bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
+    bytes
+}
+
+pub fn decode_discovery(bytes: &[u8]) -> Option<DiscoveryMessage> {
+    if bytes.len() != DISCOVERY_SIZE
+        || bytes[..4] != DISCOVERY_MAGIC
+        || bytes[4] != DISCOVERY_VERSION
+        || !matches!(bytes[5], DISCOVERY_HELLO | DISCOVERY_ACK)
+        || read_u32(bytes, 28) != crc32(&bytes[..28])
+    {
+        return None;
+    }
+    Some(DiscoveryMessage {
+        kind: bytes[5],
+        nonce: read_u64(bytes, 8),
+        session_id: read_u64(bytes, 16),
+    })
 }
 
 pub struct OrderedFrames {
@@ -539,5 +587,22 @@ mod tests {
         assert_eq!(read_u64(&control, 16), u64::MAX);
         assert_eq!(read_u64(&control, 28), 123_000);
         assert_eq!(read_u32(&control, 36), crc32(&control[..36]));
+    }
+
+    #[test]
+    fn discovery_record_round_trips_with_crc() {
+        let bytes = encode_discovery(DISCOVERY_HELLO, 123, 456);
+        assert_eq!(
+            decode_discovery(&bytes),
+            Some(DiscoveryMessage {
+                kind: DISCOVERY_HELLO,
+                nonce: 123,
+                session_id: 456,
+            })
+        );
+
+        let mut corrupted = bytes;
+        corrupted[16] ^= 1;
+        assert_eq!(decode_discovery(&corrupted), None);
     }
 }

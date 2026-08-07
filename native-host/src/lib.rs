@@ -1,6 +1,6 @@
 pub mod metrics;
+pub mod network;
 pub mod protocol;
-pub mod usb;
 
 #[cfg(windows)]
 pub mod keyboard;

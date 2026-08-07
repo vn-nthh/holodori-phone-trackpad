@@ -215,7 +215,7 @@ fn paint(hwnd: HWND) {
         24,
         70,
         rgb(130, 153, 168),
-        "This window observes Windows messages; it does not read the USB stream.",
+        "This window observes Windows messages; it does not read the UDP stream.",
     );
 
     let lane_width = (client.right.max(LANE_COUNT) / LANE_COUNT).max(1);

@@ -9,11 +9,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use holodori_native_host::keyboard::KeyboardSink;
 use holodori_native_host::metrics::HostMetrics;
+use holodori_native_host::network::{DEFAULT_UDP_PORT, UdpConnection, UdpHost};
 use holodori_native_host::protocol::{
     CONTROL_ACK, CONTROL_HELLO, FrameParser, OrderedFrames, TouchFrame, encode_control,
 };
 use holodori_native_host::touch::{PROBE_WINDOW_TITLE, TouchInjector, TouchTarget};
-use holodori_native_host::usb::{AccessoryConnection, UsbContext};
 use windows_sys::Win32::System::Console::{
     CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     SetConsoleCtrlHandler,
@@ -39,8 +39,7 @@ struct Options {
     lane_keys: Vec<String>,
     spawn_probe: bool,
     target_title: String,
-    use_usbdk: bool,
-    extra_vendor_id: Option<u16>,
+    udp_port: u16,
     metrics: bool,
     metrics_file: Option<PathBuf>,
     warning_budget_ms: f64,
@@ -95,18 +94,22 @@ fn run() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
     let mut sink = build_sink(&options)?;
     let lane_count = sink.lane_count(&options);
-    let usb = UsbContext::new(options.use_usbdk, options.extra_vendor_id)?;
+    let udp = UdpHost::bind(options.udp_port)?;
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms);
     if options.metrics {
         install_exit_command_thread()?;
     }
 
-    println!("Holodori native host - AOA protocol v4");
+    println!("Holodori native host - USB tethering/RNDIS + UDP protocol v4");
     println!(
-        "mode={:?}, lanes={}, UsbDk={}",
-        options.mode, lane_count, usb.using_usbdk
+        "mode={:?}, lanes={}, udp_port={}",
+        options.mode,
+        lane_count,
+        udp.port()
     );
-    println!("Connect the unlocked Android phone with one USB data cable.");
+    println!(
+        "Enable USB tethering on the unlocked Android phone, then connect one USB data cable."
+    );
     if options.metrics {
         println!("Press Q then Enter to stop and write the metrics file.");
     }
@@ -115,11 +118,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut ordered = OrderedFrames::new();
     let mut parser = FrameParser::default();
     while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-        println!("waiting for Android Open Accessory...");
+        println!(
+            "waiting for USB-tethered phone on UDP port {}...",
+            udp.port()
+        );
         // Keep graceful Q/Ctrl+C shutdown bounded even while no phone is
         // present. The outer loop retries, so a one-second discovery slice is
         // sufficient without making exit wait for the old 15-second timeout.
-        let connection = match usb.connect(Duration::from_secs(1)) {
+        let connection = match udp.connect(Duration::from_secs(1)) {
             Ok(connection) => connection,
             Err(error) => {
                 eprintln!("{error}; retrying");
@@ -127,10 +133,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 continue;
             }
         };
-        println!(
-            "AOA bulk link ready (IN 0x{:02x}, OUT 0x{:02x})",
-            connection.endpoint_in, connection.endpoint_out
-        );
+        println!("UDP link ready from {}", connection.peer());
         io::stdout().flush()?;
         parser.begin_connection();
         metrics.begin_connection();
@@ -145,7 +148,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
                 break;
             }
-            eprintln!("USB link interrupted: {error}; preserving host ordering state");
+            eprintln!("UDP link interrupted: {error}; preserving host ordering state");
             thread::sleep(Duration::from_millis(100));
         }
     }
@@ -233,8 +236,30 @@ fn raise_input_priority() {
     }
 }
 
-fn serve_connection(
-    mut connection: AccessoryConnection<'_>,
+trait HostConnection {
+    fn read(&mut self, buffer: &mut [u8], timeout_ms: u32) -> io::Result<usize>;
+    fn write(&mut self, bytes: &[u8], timeout_ms: u32) -> io::Result<()>;
+    fn is_datagram(&self) -> bool {
+        false
+    }
+}
+
+impl HostConnection for UdpConnection<'_> {
+    fn read(&mut self, buffer: &mut [u8], timeout_ms: u32) -> io::Result<usize> {
+        UdpConnection::read(self, buffer, timeout_ms)
+    }
+
+    fn write(&mut self, bytes: &[u8], timeout_ms: u32) -> io::Result<()> {
+        UdpConnection::write(self, bytes, timeout_ms)
+    }
+
+    fn is_datagram(&self) -> bool {
+        true
+    }
+}
+
+fn serve_connection<C: HostConnection>(
+    mut connection: C,
     parser: &mut FrameParser,
     ordered: &mut OrderedFrames,
     sink: &mut Sink,
@@ -251,7 +276,11 @@ fn serve_connection(
             continue;
         }
         let arrival = Instant::now();
-        let decoded_frames = parser.feed(&read_buffer[..count]);
+        let decoded_frames = if connection.is_datagram() {
+            parser.feed_datagram(&read_buffer[..count])
+        } else {
+            parser.feed(&read_buffer[..count])
+        };
         if let Some(version) = parser.take_incompatible_version() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -407,8 +436,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             .collect(),
         spawn_probe: true,
         target_title: PROBE_WINDOW_TITLE.to_owned(),
-        use_usbdk: true,
-        extra_vendor_id: None,
+        udp_port: DEFAULT_UDP_PORT,
         metrics: false,
         metrics_file: None,
         warning_budget_ms: 1_000.0 / 120.0,
@@ -442,7 +470,15 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 options.spawn_probe = false;
             }
             "--no-probe" => options.spawn_probe = false,
-            "--no-usbdk" => options.use_usbdk = false,
+            "--udp-port" => {
+                options.udp_port = arguments
+                    .next()
+                    .ok_or("--udp-port needs a value")?
+                    .parse()?;
+                if options.udp_port == 0 {
+                    return Err("--udp-port must be between 1 and 65535".into());
+                }
+            }
             "--metrics" => options.metrics = true,
             "--metrics-file" => {
                 options.metrics = true;
@@ -460,15 +496,11 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 }
                 options.warning_budget_ms = milliseconds;
             }
-            "--usb-vid" => {
-                let value = arguments.next().ok_or("--usb-vid needs a value")?;
-                options.extra_vendor_id = Some(parse_u16(&value)?);
-            }
             "--help" | "-h" => {
                 println!(
                     "holodori-native-host [--mode touch|keys|record] \\\n\
                      [--lanes s,d,f,j,k,l] [--target-title TITLE] [--no-probe] \\\n\
-                     [--no-usbdk] [--usb-vid 0x1234] [--metrics] \
+                     [--udp-port 42825] [--metrics] \
                      [--metrics-file PATH] [--warn-ms 8.333]"
                 );
                 std::process::exit(0);
@@ -477,12 +509,4 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         }
     }
     Ok(options)
-}
-
-fn parse_u16(value: &str) -> Result<u16, Box<dyn Error>> {
-    Ok(if let Some(hex) = value.strip_prefix("0x") {
-        u16::from_str_radix(hex, 16)?
-    } else {
-        value.parse()?
-    })
 }

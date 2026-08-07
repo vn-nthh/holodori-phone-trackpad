@@ -1,7 +1,12 @@
 # Android companion app
 
-This module is the no-debugging phone side of Holodori Phone Trackpad. On the
-experimental branch it speaks acknowledged AOA protocol v4.
+This module is the no-debugging phone side of Holodori Phone Trackpad. The
+experimental branch uses acknowledged protocol v4 over the phone's USB
+tethering/RNDIS network.
+
+The APK does not use ADB, root, the Android USB host/accessory API, WinUSB, or
+UsbDk. Android's normal USB tethering feature provides the physical USB path;
+the app only needs ordinary network access.
 
 ## Build
 
@@ -16,46 +21,33 @@ experimental branch it speaks acknowledged AOA protocol v4.
 4. Install `app/build/outputs/apk/debug/app-debug.apk` through a normal
    download/install flow. Installing the APK does not require USB debugging.
 
-The checked-in Gradle wrapper is pinned to Gradle 8.10.2. The app uses only
-Android platform APIs and has no runtime library dependencies.
+## Connect
 
-## USB identity
-
-The experimental PC host sends this AOA identity:
-
-| Field | Value |
-|---|---|
-| Manufacturer | `Holodori` |
-| Model | `Phone Trackpad` |
-| Version | `4.0` |
-
-Android launches or offers this app after the user approves accessory access.
-The only physical connection is the phone's normal USB data cable to the PC.
+1. Open the app on the phone.
+2. Enable Settings > Network & internet > Hotspot & tethering > USB tethering.
+3. Connect one USB data cable to the Windows PC.
+4. Start the native host. The app discovers it on UDP port 42825 and begins
+   sending as soon as the Windows RNDIS adapter is ready.
 
 ## Protocol v4 behavior
 
 Phone-to-host frames are variable-size `HPT4` records containing:
 
 - a transport session and 64-bit sequence;
-- Android event, UI-callback, and USB-write timestamps;
+- Android event, UI-callback, and network-write timestamps;
 - the latest duplex host timestamp echo for clock-origin-independent timing;
 - action and action-pointer ID;
 - a complete contact snapshot with pointer ID, in-zone/tip flags, X/Y,
   pressure, and touch-major size;
 - an IEEE CRC-32.
 
-The PC returns fixed-size `HPA4` HELLO and cumulative ACK records. Android keeps
-each encoded frame in an ordered queue until its sequence is acknowledged.
-There is no stale-age reset or queue-capacity eviction. An unacknowledged frame
-is replayed after 4 ms.
+Each HPT4 frame is one UDP datagram, so it is well below the USB-tethered
+Ethernet MTU. The PC returns fixed-size `HPA4` HELLO and cumulative ACK
+datagrams. Android keeps each encoded frame in an ordered queue until its
+sequence is acknowledged; an unacknowledged frame is replayed after 4 ms.
 
-When the live queue is otherwise empty, an 8 ms acknowledged keepalive lets the
-Windows host sustain a stationary contact above the game's 120 Hz maximum.
-
-The locked touch path reuses primitive pointer arrays and precomputed zone
-transforms. It enqueues USB input before changing visual state, while visual
-updates remain outside the transport path. Android `MotionEvent` history is
-serialized chronologically as complete multi-contact snapshots.
+When the live queue is otherwise empty, an 8 ms acknowledged keepalive lets
+the Windows host sustain a stationary contact above the game's 120 Hz maximum.
 
 See [`../PROTOCOL_V4.md`](../PROTOCOL_V4.md) for the byte layout and
 acknowledgement semantics.

@@ -37,7 +37,7 @@ final class TrackpadView extends View {
     private static final int MAX_POINTERS = 256;
     private static final long PLAY_VISUAL_FRAME_NANOS = 33_333_333L;
 
-    private final UsbAccessoryTransport transport;
+    private final TouchTransport transport;
     private final SharedPreferences preferences;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF lockButton = new RectF();
@@ -99,7 +99,7 @@ final class TrackpadView extends View {
     private final PointF lastCornerB = new PointF();
     private final PointF startMidpoint = new PointF();
 
-    TrackpadView(Context context, UsbAccessoryTransport transport) {
+    TrackpadView(Context context, TouchTransport transport) {
         super(context);
         this.transport = transport;
         preferences = context.getSharedPreferences("trackpad", Context.MODE_PRIVATE);

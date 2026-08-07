@@ -4,10 +4,12 @@ Use an Android phone as a multi-touch controller for [hololive Dreams (holodori)
 
 > Unofficial community tool. Not affiliated with COVER Corp., hololive production, or QualiArts.
 
-## Experimental lossless-touch branch
+## Experimental USB-tethered UDP branch
 
-The `codex/experimental-lossless-touch` branch replaces the latency-path PC
-runtime with a native Rust host and introduces duplex AOA protocol v4.
+The `codex/usb-rndis-udp` branch replaces the latency-path PC runtime with a
+native Rust host and carries duplex protocol v4 over USB tethering/RNDIS + UDP.
+It is intentionally driver-free: no ADB, root, Android USB accessory mode,
+WinUSB, or UsbDk is installed or opened.
 
 - Android retains every frame until Windows acknowledges OS acceptance.
 - CRC, sequence ordering, cumulative ACKs, and 4 ms replay cover corruption,
@@ -17,12 +19,15 @@ runtime with a native Rust host and introduces duplex AOA protocol v4.
 - An 8 ms keepalive sustains stationary Windows contacts above 120 Hz.
 - `touch` mode uses the sanctioned Windows Touch API. A separate process sees
   only `WM_POINTER` messages, proving that Windows received touch rather than
-  reading the USB stream.
+  reading the transport stream.
 - `keys` mode retains the Holodori lane bridge and emits every crossed lane,
   pressing the next lane before releasing the prior lane.
 - The hardware remains exactly phone + one USB data cable + PC.
-- Exit-only benchmarking separates Android dispatch, phone queue, duplex USB,
+- Exit-only benchmarking separates Android dispatch, phone queue, duplex
+  USB-tethered network,
   and Windows sink latency without writing or sorting during play.
+- A 32-byte discovery hello finds the host on the RNDIS adapter without a
+  fixed phone IP.
 
 Protocol v4 is intentionally incompatible with the stable v0.2.1 Python host.
 See [the experimental architecture](EXPERIMENTAL_ARCHITECTURE.md) and
@@ -64,9 +69,9 @@ Version 0.2.1 fixes fast slides occasionally skipping a lane and makes diagnosti
 ## Quick start
 
 1. Install the Windows app and Android APK.
-2. Keep the WinUSB and UsbDk options selected during Windows setup.
+2. Enable USB tethering on the phone.
 3. Connect the phone with a data-capable USB cable.
-4. Approve Android's accessory prompt.
+4. Start the native host and open the Android app.
 5. Move and resize the phone's play zone, then lock it.
 6. Start the game and play.
 
@@ -74,49 +79,39 @@ The PC touch overlay is off by default. Use the **with Touch Overlay** shortcut 
 
 ## Features
 
-- Low-latency Android Open Accessory input; no USB debugging required
+- Low-latency USB-tethered UDP input; no USB debugging required
 - Reliable fast slides, multi-touch chords, and configurable keys
-- WinUSB data transport with automatic UsbDk fallback
+- Windows inbox RNDIS data transport; no custom driver installation
 - Movable, resizable, and rotatable phone play zone
 - Optional click-through PC touch overlay
 - Safe reconnects that release held keys
 - Queue and latency diagnostics
-- Legacy ADB mode
-
-## Useful commands
-
-```text
-python phone_trackpad.py
-python phone_trackpad.py --keys a s d f j k l
-python phone_trackpad.py --overlay
-python phone_trackpad.py --aoa-benchmark
-python phone_trackpad.py --diagnose
-python phone_trackpad.py --test
-python phone_trackpad.py --transport adb
-```
-
-Run `python phone_trackpad.py --help` for every option.
 
 ## How it works
 
-The Android app sends touch positions over AOA USB, and the PC maps them to keyboard presses. Android's bundled movement history is replayed in order so fast slides cannot skip lane crossings. WinUSB handles the live stream when available; UsbDk performs the accessory handshake and acts as a fallback. Disconnecting or reconnecting releases every held key.
+The Android app sends touch positions as acknowledged binary UDP datagrams over
+the USB-tethered RNDIS adapter, and the PC maps them to keyboard presses.
+Android's bundled movement history is replayed in order so fast slides cannot
+skip lane crossings. Disconnecting or reconnecting releases every held key.
 
 ## Diagnostics
 
-Use `--aoa-benchmark` for queue, stage, percentile, and jitter numbers. Use `--diagnose` for connection status, safe retry steps, and a privacy-preserving report.
+Use the native host's `--metrics` option for queue, stage, percentile, and
+jitter numbers. The experimental bundle writes a report only after Q + Enter,
+Ctrl+C, or console close.
 
 Queue warnings start at 8 ms, stale input resets at 25 ms, and the final failsafe is 100 ms. Benchmark latency is relative jitter against the fastest recent sample, not absolute one-way latency.
 
 ## Build
 
-Install Python dependencies, then build all packages:
+Build the driver-free experimental bundle:
 
 ```text
-python -m pip install -r requirements.txt
-.\packaging\build.ps1 -Target All
+.\packaging\build-experimental.ps1
 ```
 
-The Windows installer build requires Inno Setup 6. The Android build requires JDK 17 and Android SDK Platform 35. Outputs are written to `release\`.
+The build requires Rust, JDK 17, and Android SDK Platform 35. Outputs are
+written to `release\`.
 
 Run the tests with:
 
@@ -127,11 +122,10 @@ python -m unittest discover -s tests
 ## Troubleshooting
 
 - Use a data-capable USB cable, not a charge-only cable.
-- Restart Windows once if the installer asks after installing UsbDk.
-- Do not replace the phone's normal MTP driver with WinUSB.
+- If the host cannot discover the phone, confirm USB tethering is enabled and
+  that Windows created an RNDIS/Ethernet adapter.
 - Run as Administrator if an elevated game ignores key presses.
-- Use `--test` before sending keys into the game.
-- ADB mode requires Android Platform Tools and USB debugging.
+- Start the host after Windows creates the RNDIS/Ethernet adapter.
 - If the APK will not update from 0.2.0, uninstall the old phone app once and reinstall.
 
 ## License

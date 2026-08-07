@@ -10,53 +10,9 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $ReleaseDir = Join-Path $ProjectRoot "release"
-$UsbDkInstaller = Join-Path $ProjectRoot "packaging\third_party\usbdk\UsbDk_1.0.22_x64.msi"
-$UsbDkSha256 = "91F6F695E1E13C656024E6D3B55620BF08D8835EF05EE0496935BA6BB62466A5"
-$LibwdiDir = Join-Path $ProjectRoot "packaging\third_party\libwdi"
-$BundledWinUsbFiles = @(
-    @{
-        Path = Join-Path $LibwdiDir "wdi-simple.exe"
-        Sha256 = "5EEE1919EF07989BA8B54C199D66DAC93F90811D239FC49CBB8BF9C43A07BCC8"
-    },
-    @{
-        Path = Join-Path $LibwdiDir "libwdi-v1.5.1-source.zip"
-        Sha256 = "746547AAF927CAE44C75512D763941805928427F4BA4DF3DBB40C3F7F561821E"
-    },
-    @{
-        Path = Join-Path $LibwdiDir "COPYING-LGPL"
-        Sha256 = "EA7D049C7705DC13AFC202DD18E1827F3484F8212FD3FA7B82FC4A0C363432C9"
-    },
-    @{
-        Path = Join-Path $LibwdiDir "Microsoft-WDK-License.rtf"
-        Sha256 = "68421CBF5AFF522E2660D812220458B475DFEE6D2E66363CF66C7144E956529E"
-    },
-    @{
-        Path = Join-Path $LibwdiDir "Microsoft-WDK-redist.txt"
-        Sha256 = "8D567A02B1EEC44FCE2C0FC492C8C1234CD29FADA9FB7C578BD03BF3F97885A2"
-    }
-)
-
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 
 if ($Target -in @("All", "Windows")) {
-    if (-not (Test-Path $UsbDkInstaller)) {
-        throw "Missing bundled UsbDk installer: $UsbDkInstaller"
-    }
-    if ((Get-FileHash -Algorithm SHA256 $UsbDkInstaller).Hash -ne $UsbDkSha256) {
-        throw "Bundled UsbDk installer checksum does not match the verified upstream asset."
-    }
-    foreach ($BundledFile in $BundledWinUsbFiles) {
-        if (-not (Test-Path $BundledFile.Path)) {
-            throw "Missing bundled WinUSB support file: $($BundledFile.Path)"
-        }
-        if (
-            (Get-FileHash -Algorithm SHA256 $BundledFile.Path).Hash -ne
-            $BundledFile.Sha256
-        ) {
-            throw "Bundled WinUSB support file checksum does not match: $($BundledFile.Path)"
-        }
-    }
-
     $VenvDir = Join-Path $ProjectRoot ".venv-package"
     $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 
