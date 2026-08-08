@@ -300,12 +300,21 @@ final class UdpTransport implements TouchTransport {
                                     incoming.getAddress(),
                                     incoming.getPort()
                             );
-                            // Discovery ACKs are a valid host liveness signal
-                            // while the live queue is idle.
-                            lastControlReceiveNanos = System.nanoTime();
+                            // Discovery ACKs keep an idle session alive without
+                            // synthetic touch traffic. During active input they
+                            // must not mask a stalled data/ACK path: otherwise
+                            // old touch frames remain queued and can be
+                            // delivered seconds late when UDP recovers.
+                            if (activeContactCount == 0 && unacknowledged.isEmpty()) {
+                                lastControlReceiveNanos = System.nanoTime();
+                            }
                             queueLock.notifyAll();
                         }
                     }
+                    // Discovery traffic can arrive continuously, so do not
+                    // rely only on the socket timeout path to detect a stale
+                    // active data/ACK connection.
+                    checkHostTimeout();
                     continue;
                 }
                 if (!isHostPacket(incoming.getAddress(), incoming.getPort())) {
