@@ -11,12 +11,16 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $ReleaseRoot = Join-Path $ProjectRoot "release"
 $BundleDir = Join-Path $ReleaseRoot $Name
 $ArchivePath = Join-Path $ReleaseRoot "$Name-windows-x64.zip"
+$StandaloneApkPath = Join-Path $ReleaseRoot "$Name-android.apk"
 
 if (Test-Path $BundleDir) {
     throw "Experimental bundle already exists: $BundleDir"
 }
 if (Test-Path $ArchivePath) {
     throw "Experimental archive already exists: $ArchivePath"
+}
+if (Test-Path $StandaloneApkPath) {
+    throw "Experimental Android package already exists: $StandaloneApkPath"
 }
 
 if (-not $JavaHome) {
@@ -104,6 +108,7 @@ Copy-Item (Join-Path $NativeRelease "holodori-touch-probe.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-smoke.exe") $WindowsDir
 Copy-Item (Join-Path $TauriRelease "holodori-usb-controller.exe") (Join-Path $BundleDir "HolodoriUsbController.exe")
 Copy-Item $Apk (Join-Path $AndroidOutputDir "HolodoriUsbTetheredUdp-v4.apk")
+Copy-Item $Apk $StandaloneApkPath
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\README.txt") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-touch.cmd") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-keys.cmd") $BundleDir
@@ -150,3 +155,4 @@ Compress-Archive -Path $BundleDir -DestinationPath $ArchivePath -CompressionLeve
 
 Write-Host "Bundle: $BundleDir"
 Write-Host "Archive: $ArchivePath"
+Write-Host "Android package: $StandaloneApkPath"

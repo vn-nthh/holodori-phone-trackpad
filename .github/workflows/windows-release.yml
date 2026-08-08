@@ -60,7 +60,9 @@ jobs:
         run: |
           $notesFile = Join-Path "packaging\release-notes" "$env:GITHUB_REF_NAME.md"
           if ($env:GITHUB_REF_NAME -like "*-alpha*") {
-            $assets = Get-ChildItem "release" -Filter "*.zip" -File | ForEach-Object FullName
+            $assets = Get-ChildItem "release" -File |
+              Where-Object { $_.Extension -in @(".zip", ".apk") } |
+              ForEach-Object FullName
             gh release create $env:GITHUB_REF_NAME $assets --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file $notesFile --prerelease
           } else {
             $assets = Get-ChildItem "release" -File | ForEach-Object FullName
