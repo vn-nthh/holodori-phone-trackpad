@@ -4,13 +4,14 @@ import android.app.Activity;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
 import android.view.View;
 import android.view.WindowManager;
 
 /** The USB-tethering/RNDIS front end. No Android USB host/accessory API is used. */
 public final class MainActivity extends Activity implements TouchTransport.Listener {
-    private static final long RECONNECT_MIN_MILLIS = 500;
-    private static final long RECONNECT_MAX_MILLIS = 4_000;
+    private static final long RECONNECT_MIN_MILLIS = 4;
+    private static final long RECONNECT_MAX_MILLIS = 64;
 
     private TouchTransport transport;
     private TrackpadView trackpadView;
@@ -29,6 +30,7 @@ public final class MainActivity extends Activity implements TouchTransport.Liste
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemUi();
 
@@ -67,11 +69,13 @@ public final class MainActivity extends Activity implements TouchTransport.Liste
     @Override
     public void onConnectionChanged(boolean connected, String message) {
         runOnUiThread(() -> {
-            trackpadView.setConnectionStatus(connected, message);
-            if (connected) {
+            boolean transportRunning = transport.isRunning();
+            boolean liveConnection = connected && transportRunning;
+            trackpadView.setConnectionStatus(liveConnection, message);
+            if (liveConnection) {
                 cancelReconnect();
                 reconnectDelayMillis = RECONNECT_MIN_MILLIS;
-            } else if (!destroyed) {
+            } else if (!destroyed && !transportRunning) {
                 scheduleReconnect();
             }
         });

@@ -31,6 +31,7 @@ pub const CONTROL_SIZE: usize = 40;
 pub const DISCOVERY_SIZE: usize = 32;
 pub const MAX_CONTACTS: usize = 16;
 pub const MAX_FRAME_SIZE: usize = FRAME_HEADER_SIZE + MAX_CONTACTS * CONTACT_SIZE + CRC_SIZE;
+const MAX_REORDERED_FRAMES: u64 = 256;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Contact {
@@ -83,10 +84,13 @@ impl TouchFrame {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProtocolError {
+    BadMagic,
     BadVersion(u8),
     BadMessageType(u8),
+    BadAction(u8),
     BadLength(usize),
     BadContactCount(usize),
+    DuplicatePointerId(u8),
     BadCrc { expected: u32, actual: u32 },
 }
 
@@ -100,17 +104,24 @@ pub struct DiscoveryMessage {
 impl fmt::Display for ProtocolError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BadMagic => formatter.write_str("invalid touch frame magic"),
             Self::BadVersion(version) => {
                 write!(formatter, "unsupported touch protocol v{version}")
             }
             Self::BadMessageType(message_type) => {
                 write!(formatter, "unsupported message type {message_type}")
             }
+            Self::BadAction(action) => {
+                write!(formatter, "unsupported touch action {action}")
+            }
             Self::BadLength(length) => {
                 write!(formatter, "invalid touch frame length {length}")
             }
             Self::BadContactCount(count) => {
                 write!(formatter, "invalid contact count {count}")
+            }
+            Self::DuplicatePointerId(pointer_id) => {
+                write!(formatter, "duplicate pointer ID {pointer_id}")
             }
             Self::BadCrc { expected, actual } => write!(
                 formatter,
@@ -210,7 +221,7 @@ impl FrameParser {
     /// Decode one UDP datagram without allocating a stream-parser result
     /// vector or copying the datagram into the stream buffer.
     pub fn decode_datagram(&mut self, bytes: &[u8]) -> Result<TouchFrame, ProtocolError> {
-        if bytes.len() >= FRAME_MAGIC.len() + 1
+        if bytes.len() > FRAME_MAGIC.len()
             && bytes[..FRAME_MAGIC.len()] == FRAME_MAGIC
             && bytes[FRAME_MAGIC.len()] != PROTOCOL_VERSION
         {
@@ -242,6 +253,9 @@ pub fn decode_frame(bytes: &[u8]) -> Result<TouchFrame, ProtocolError> {
     if bytes.len() < FRAME_HEADER_SIZE + CRC_SIZE {
         return Err(ProtocolError::BadLength(bytes.len()));
     }
+    if bytes[..FRAME_MAGIC.len()] != FRAME_MAGIC {
+        return Err(ProtocolError::BadMagic);
+    }
     let declared_length = read_u16(bytes, 6) as usize;
     if declared_length != bytes.len() || bytes.len() > MAX_FRAME_SIZE {
         return Err(ProtocolError::BadLength(declared_length));
@@ -251,6 +265,12 @@ pub fn decode_frame(bytes: &[u8]) -> Result<TouchFrame, ProtocolError> {
     }
     if bytes[5] != MESSAGE_TOUCH_FRAME {
         return Err(ProtocolError::BadMessageType(bytes[5]));
+    }
+    if !matches!(
+        bytes[64],
+        ACTION_HEARTBEAT | ACTION_DOWN | ACTION_MOVE | ACTION_UP | ACTION_CANCEL
+    ) {
+        return Err(ProtocolError::BadAction(bytes[64]));
     }
 
     let expected_crc = read_u32(bytes, bytes.len() - CRC_SIZE);
@@ -272,10 +292,16 @@ pub fn decode_frame(bytes: &[u8]) -> Result<TouchFrame, ProtocolError> {
     }
 
     let mut contacts = Vec::with_capacity(contact_count);
+    let mut pointer_ids = [false; u8::MAX as usize + 1];
     for index in 0..contact_count {
         let offset = FRAME_HEADER_SIZE + index * CONTACT_SIZE;
+        let pointer_id = bytes[offset];
+        if pointer_ids[pointer_id as usize] {
+            return Err(ProtocolError::DuplicatePointerId(pointer_id));
+        }
+        pointer_ids[pointer_id as usize] = true;
         contacts.push(Contact {
-            pointer_id: bytes[offset],
+            pointer_id,
             flags: bytes[offset + 1],
             x: read_i16(bytes, offset + 2) as f32 / 10_000.0,
             y: read_i16(bytes, offset + 4) as f32 / 10_000.0,
@@ -353,6 +379,7 @@ pub struct OrderedFrames {
     session_id: Option<u64>,
     next_sequence: u64,
     buffered: BTreeMap<u64, TouchFrame>,
+    requires_session_start: bool,
 }
 
 impl OrderedFrames {
@@ -361,6 +388,7 @@ impl OrderedFrames {
             session_id: None,
             next_sequence: 0,
             buffered: BTreeMap::new(),
+            requires_session_start: false,
         }
     }
 
@@ -368,6 +396,17 @@ impl OrderedFrames {
         self.session_id = Some(frame.session_id);
         self.next_sequence = frame.sequence;
         self.buffered.clear();
+        self.requires_session_start = false;
+    }
+
+    /// Abandon all input from the current phone session after its heartbeat
+    /// disappears. Until Android sends a new session-start CANCEL, delayed
+    /// gameplay from the dead session must not be injected or acknowledged.
+    pub fn require_fresh_session(&mut self) {
+        self.session_id = None;
+        self.next_sequence = 0;
+        self.buffered.clear();
+        self.requires_session_start = true;
     }
 
     pub fn session_id(&self) -> Option<u64> {
@@ -387,6 +426,9 @@ impl OrderedFrames {
     }
 
     pub fn push(&mut self, frame: TouchFrame) {
+        if self.requires_session_start && !frame.session_start() {
+            return;
+        }
         if self.session_id.is_none() {
             // A restarted host may join an Android session whose original
             // session-start frame was already acknowledged by the previous
@@ -400,6 +442,9 @@ impl OrderedFrames {
             }
         }
         if frame.sequence < self.next_sequence {
+            return;
+        }
+        if frame.sequence - self.next_sequence >= MAX_REORDERED_FRAMES {
             return;
         }
         self.buffered.entry(frame.sequence).or_insert(frame);
@@ -557,6 +602,35 @@ mod tests {
     }
 
     #[test]
+    fn datagram_decoder_rejects_bad_magic_and_unknown_actions() {
+        let mut bad_magic = packet(1, 0, ACTION_DOWN, 0, 5_000);
+        bad_magic[..4].copy_from_slice(b"NOPE");
+        assert_eq!(decode_frame(&bad_magic), Err(ProtocolError::BadMagic));
+
+        let mut bad_action = packet(1, 0, 99, 0, 5_000);
+        let checksum = crc32(&bad_action[..bad_action.len() - CRC_SIZE]);
+        let crc_offset = bad_action.len() - CRC_SIZE;
+        bad_action[crc_offset..].copy_from_slice(&checksum.to_le_bytes());
+        assert_eq!(decode_frame(&bad_action), Err(ProtocolError::BadAction(99)));
+    }
+
+    #[test]
+    fn datagram_decoder_rejects_duplicate_pointer_ids() {
+        let mut bytes = packet(1, 0, ACTION_DOWN, 0, 5_000);
+        let length = FRAME_HEADER_SIZE + 2 * CONTACT_SIZE + CRC_SIZE;
+        bytes.resize(length, 0);
+        bytes[6..8].copy_from_slice(&(length as u16).to_le_bytes());
+        bytes[66] = 2;
+        bytes.copy_within(FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + CONTACT_SIZE, 78);
+        let checksum = crc32(&bytes[..length - CRC_SIZE]);
+        bytes[length - CRC_SIZE..].copy_from_slice(&checksum.to_le_bytes());
+        assert_eq!(
+            decode_frame(&bytes),
+            Err(ProtocolError::DuplicatePointerId(7))
+        );
+    }
+
+    #[test]
     fn crc_matches_ieee_reference_vector() {
         assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
     }
@@ -582,6 +656,26 @@ mod tests {
         ordered.push(one);
         assert!(ordered.next_ready().is_none());
         assert_eq!(ordered.acknowledged_sequence(), Some(2));
+    }
+
+    #[test]
+    fn ordered_frames_bounds_far_future_datagrams() {
+        let start =
+            decode_frame(&packet(5, 0, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0)).unwrap();
+        let too_far = decode_frame(&packet(
+            5,
+            MAX_REORDERED_FRAMES + 1,
+            ACTION_MOVE,
+            FRAME_FLAG_LOCKED,
+            4_000,
+        ))
+        .unwrap();
+        let mut ordered = OrderedFrames::new();
+        ordered.push(start);
+        assert!(ordered.commit_ready());
+        ordered.push(too_far);
+        assert!(ordered.buffered.is_empty());
+        assert_eq!(ordered.expected_sequence(), 1);
     }
 
     #[test]
@@ -615,6 +709,27 @@ mod tests {
         assert!(ordered.commit_ready());
         ordered.push(fresh_move);
         assert_eq!(ordered.next_ready().unwrap().sequence, 1);
+    }
+
+    #[test]
+    fn liveness_failure_rejects_delayed_gameplay_until_a_fresh_session() {
+        let start =
+            decode_frame(&packet(10, 0, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0)).unwrap();
+        let delayed = decode_frame(&packet(10, 1, ACTION_MOVE, FRAME_FLAG_LOCKED, 4_000)).unwrap();
+        let fresh_start =
+            decode_frame(&packet(11, 0, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0)).unwrap();
+
+        let mut ordered = OrderedFrames::new();
+        ordered.push(start);
+        assert!(ordered.commit_ready());
+        ordered.require_fresh_session();
+        ordered.push(delayed);
+        assert!(ordered.session_id().is_none());
+        assert!(ordered.next_ready().is_none());
+
+        ordered.push(fresh_start);
+        assert_eq!(ordered.session_id(), Some(11));
+        assert_eq!(ordered.next_ready().unwrap().sequence, 0);
     }
 
     #[test]

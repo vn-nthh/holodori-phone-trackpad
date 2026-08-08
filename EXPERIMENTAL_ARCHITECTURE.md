@@ -47,18 +47,25 @@ each boundary.
 - Every frame has a 64-bit session ID, 64-bit sequence, length, and CRC.
 - Windows buffers a future sequence until the missing sequence arrives.
 - Duplicate replays are acknowledged without being applied twice.
+- Every frame, discovery record, and acknowledgement has an immediate
+  redundant copy; a second replay round starts after 2 ms.
 - Android retires only the highest contiguous sequence acknowledged by Windows.
 - The lane sink interpolates every lane between old and new positions, even if
   a phone or OS reports a large coordinate jump.
 - A lane transition presses the new lane before releasing the old one.
-- Stationary touch contacts receive an 8 ms keepalive.
+- Stationary touch contacts receive an 8 ms keepalive containing the latest
+  complete contact snapshot, so a restarted host can reconstruct a hold.
 
 A physical cable removal is a visible session boundary, not packet jitter.
+Windows releases active injected input after 32 ms without valid frame
+heartbeats and refuses delayed gameplay until a fresh session-start `CANCEL`.
 Protocol v4 does not replay old gameplay after a multi-second reconnect
-because doing so would create late notes. Android starts a fresh session after
-two seconds without host control, drops queued gameplay, and sends a new
-session-start `CANCEL`. A host restart inside that short recovery window can
-still replay frames that were not yet accepted.
+because doing so would create late notes. During gameplay Android starts a
+fresh session after 64 ms without host control, drops queued gameplay, and
+sends a new session-start `CANCEL`; idle discovery retains the two-second
+timeout. Socket restart begins with a 4 ms backoff. The latest complete contact
+snapshot survives that restart, so a still-held finger is reconstructed after
+the fresh `CANCEL` without replaying stale actions.
 
 ## Windows Touch proof
 
@@ -97,9 +104,9 @@ patches memory, hooks rendering/input code, or constructs game/network packets.
 ## Latency contract
 
 The native hot path has no Python interpreter, JSON, polling bridge, or UI
-work. It uses fixed binary datagrams, stack buffers, direct User32 calls, and a
-4 ms retransmission threshold. It accepts and sustains at least 120 updates per
-second; the keepalive period is 8 ms.
+work. It uses fixed binary datagrams, stack buffers, direct User32 calls,
+immediate redundant sends, and a 2 ms replay threshold. It accepts and sustains
+at least 120 updates per second; the keepalive period is 8 ms.
 
 An absolute promise that every phone is faster than every physical keyboard is
 not physically testable or universally true: phone touch scan rate and USB

@@ -13,9 +13,9 @@
       {
         "title": "",
         "width": 430,
-        "height": 390,
+        "height": 320,
         "minWidth": 360,
-        "minHeight": 350,
+        "minHeight": 300,
         "resizable": false,
         "decorations": true,
         "center": true

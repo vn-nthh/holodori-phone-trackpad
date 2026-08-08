@@ -115,16 +115,30 @@ breakdown needed to locate a rare stall.
 - Android has an ordered queue with no age or capacity eviction.
 - Frames carry session, sequence, length, and CRC protection.
 - The host buffers future sequences and applies every sequence exactly once.
-- Android retransmits an unacknowledged frame after 4 ms.
+- Android sends every frame twice immediately and begins replay after 2 ms if
+  neither copy produces a cumulative acknowledgement. Windows likewise sends
+  every discovery and control record twice. One lost or corrupt datagram is
+  therefore covered without waiting for the replay timer.
 - The host acknowledges only after the selected Windows sink accepts a frame.
 - A fresh host can bootstrap from the oldest replay in an active phone session.
-- After two seconds without host control, Android drops queued gameplay and
-  starts a fresh session with a `CANCEL` instead of replaying stale input.
-- An 8 ms acknowledged heartbeat sustains active stationary contacts. Idle
-  sessions send no synthetic touch frames; discovery acknowledgements keep the
-  host liveness check alive.
+- During gameplay, 64 ms without host control makes Android drop queued
+  gameplay and start a fresh session with a `CANCEL`; an idle search may wait
+  two seconds. The initial socket-restart backoff is 4 ms.
+- An 8 ms acknowledged heartbeat carries the latest complete contact snapshot,
+  sustains active stationary contacts, and lets a restarted host reconstruct a
+  held contact. Hosts still accept the empty heartbeat emitted by earlier v4
+  APKs. Idle sessions send no synthetic touch frames; discovery
+  acknowledgements keep the host liveness check alive.
 - A cable removal is a session boundary; old gameplay is not replayed late.
+- If active frame heartbeats disappear for 32 ms, Windows releases injected
+  input, rejects delayed gameplay from that session, and waits for a fresh
+  session-start `CANCEL`.
+- Any host read or acknowledgement-write failure also releases injected input
+  before discovery resumes. Android retains the latest contact snapshot across
+  its socket restart, including updates received while offline, so a stationary
+  hold is reconstructed in the fresh session without replaying stale actions.
 
-UDP datagrams are atomic at the application boundary. If a datagram is lost,
-the phone's 4 ms replay timer sends the same sequence again; if it is corrupt,
-the CRC rejects it and the missing sequence remains unacknowledged.
+UDP datagrams are atomic at the application boundary. If one datagram is lost
+or corrupt, its immediate redundant copy carries the same sequence. If both
+copies disappear, the 2 ms replay sends the sequence again; a corrupt copy is
+rejected and remains unacknowledged.

@@ -12,11 +12,15 @@ It is intentionally driver-free: no ADB, root, Android USB accessory mode,
 WinUSB, or UsbDk is installed or opened.
 
 - Android retains every frame until Windows acknowledges OS acceptance.
-- CRC, sequence ordering, cumulative ACKs, and 4 ms replay cover corruption,
-  duplicates, queue delay, and a lost host-to-phone ACK.
+- CRC, sequence ordering, cumulative ACKs, immediate redundant datagrams, and
+  2 ms replay cover corruption, duplicates, queue delay, and a lost
+  host-to-phone ACK inside the 120 Hz frame window.
 - Complete multi-contact snapshots preserve taps, holds, chords, and every
   historical slide sample.
 - An 8 ms keepalive sustains stationary Windows contacts above 120 Hz.
+- Link/ACK failure releases Windows input, restarts Android after a 4 ms
+  initial backoff, and restores any still-held contacts from the retained
+  snapshot instead of waiting for the finger to move.
 - `touch` mode uses the sanctioned Windows Touch API. A separate process sees
   only `WM_POINTER` messages, proving that Windows received touch rather than
   reading the transport stream.
@@ -56,10 +60,10 @@ Create a distributable experimental bundle with:
 
 The current experimental bundle is published on the
 [v0.4.0 GitHub release](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.0).
-The Windows launcher is a small Tauri app; it shows only lane keys, USB port,
-latency-report preference, and Start/Stop. It uses the system WebView2 runtime
-on supported Windows 10/11, while the latency-critical host remains native
-Rust.
+The Windows launcher is a small Tauri app; it shows only lane keys, the
+latency-report preference, and Start/Stop. Protocol-v4 discovery uses its fixed
+UDP port `42825`. The launcher uses the system WebView2 runtime on supported
+Windows 10/11, while the latency-critical host remains native Rust.
 
 ## Download v0.2.1
 
@@ -104,9 +108,9 @@ The Windows app can save queue, stage, percentile, and jitter numbers when
 **Save latency report when stopped** is checked. Press **Stop** to write one
 report under `Windows\Logs`. No command prompt is needed.
 
-Queue warnings use the 8.333 ms 120 Hz budget by default. The Windows app lets
-users change the UDP port without typing flags. Benchmark latency is relative
-jitter against the fastest recent sample, not absolute one-way latency.
+Queue warnings use the 8.333 ms 120 Hz budget by default. Benchmark latency is
+relative jitter against the fastest recent sample, not absolute one-way
+latency.
 
 ## Build
 
@@ -130,6 +134,8 @@ python -m unittest discover -s tests
 - Use a data-capable USB cable, not a charge-only cable.
 - If the host cannot discover the phone, confirm USB tethering is enabled and
   that Windows created an RNDIS/Ethernet adapter.
+- If Windows Firewall blocks discovery, permit inbound UDP `42825` for
+  `holodori-native-host.exe` on the USB-tethered network only.
 - Run as Administrator if an elevated game ignores key presses.
 - Start the host after Windows creates the RNDIS/Ethernet adapter.
 - If the APK will not update from 0.2.0, uninstall the old phone app once and reinstall.

@@ -44,16 +44,21 @@ Phone-to-host frames are variable-size `HPT4` records containing:
 Each HPT4 frame is one UDP datagram, so it is well below the USB-tethered
 Ethernet MTU. The PC returns fixed-size `HPA4` HELLO and cumulative ACK
 datagrams. Android keeps each encoded frame in an ordered queue until its
-sequence is acknowledged; an unacknowledged frame is replayed after 4 ms.
+sequence is acknowledged. Each frame and control record is sent twice
+immediately; if both copies disappear, Android begins replay after 2 ms.
 
 When a contact is active and the live queue is otherwise empty, an 8 ms
-acknowledged keepalive lets the Windows host sustain a stationary contact above
-the game's 120 Hz maximum. Idle sessions send no synthetic touch frames;
-discovery acknowledgements keep the connection alive.
+acknowledged keepalive carries the latest complete contact snapshot. This lets
+the Windows host sustain a stationary contact above the game's 120 Hz maximum
+and reconstruct a hold after a quick host restart. Idle sessions send no
+synthetic touch frames; discovery acknowledgements keep the connection alive.
 
-If host control is absent for two seconds, the app drops queued gameplay,
-starts a new session, and sends a session-start `CANCEL`. This prevents old
-touches from arriving as late input after a tethering outage.
+If host control is absent for 64 ms during gameplay, the app drops queued
+gameplay, starts a new session after an initial 4 ms backoff, and sends a
+session-start `CANCEL`. Idle discovery keeps the two-second timeout. The latest
+contact snapshot continues to update during the socket restart, so a
+stationary finger is restored in the fresh session without replaying stale
+transitions.
 
 See [`../PROTOCOL_V4.md`](../PROTOCOL_V4.md) for the byte layout and
 acknowledgement semantics.

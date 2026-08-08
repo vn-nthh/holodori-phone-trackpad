@@ -70,11 +70,17 @@ impl KeyboardSink {
         self.scan_codes.len().min(u8::MAX as usize) as u8
     }
 
+    pub fn has_active_input(&self) -> bool {
+        self.pressed.iter().any(|pressed| *pressed)
+    }
+
     pub fn accept(&mut self, frame: &TouchFrame) -> io::Result<()> {
         if frame.session_start() || frame.action == ACTION_CANCEL || !frame.locked() {
             return self.release_all();
         }
-        if frame.action == ACTION_HEARTBEAT {
+        if frame.action == ACTION_HEARTBEAT && frame.contacts.is_empty() {
+            // Older protocol-v4 APKs sent empty heartbeats. Newer APKs include
+            // the latest snapshot so a restarted host can restore held keys.
             return Ok(());
         }
         if let Some(pending) = &self.pending
@@ -114,11 +120,18 @@ impl KeyboardSink {
 
     pub fn release_all(&mut self) -> io::Result<()> {
         self.pending = None;
+        let mut first_error = None;
         for lane in 0..self.pressed.len() {
             if self.pressed[lane] {
-                send_one(key_input(self.scan_codes[lane], false))?;
-                self.pressed[lane] = false;
+                match send_one(key_input(self.scan_codes[lane], false)) {
+                    Ok(()) => self.pressed[lane] = false,
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Err(_) => {}
+                }
             }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         self.state.pointer_lanes.clear();
         self.state.lane_holds.fill(0);
@@ -166,7 +179,13 @@ impl KeyboardSink {
 
 impl Drop for KeyboardSink {
     fn drop(&mut self) {
-        let _ = self.release_all();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(8);
+        while self.has_active_input() && std::time::Instant::now() < deadline {
+            if self.release_all().is_ok() {
+                break;
+            }
+            std::thread::yield_now();
+        }
     }
 }
 

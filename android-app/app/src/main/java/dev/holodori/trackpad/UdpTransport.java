@@ -40,36 +40,49 @@ final class UdpTransport implements TouchTransport {
     private static final int DISCOVERY_SIZE = 32;
     private static final long DISCOVERY_INTERVAL_NANOS = 500_000_000L;
     private static final long HOST_TIMEOUT_NANOS = 2_000_000_000L;
+    private static final long ACTIVE_HOST_TIMEOUT_NANOS = 64_000_000L;
+    private static final long WATCHDOG_INTERVAL_MILLIS = 4L;
     // Windows touch injection needs a high-rate refresh while a contact is
     // stationary. Idle sessions do not need synthetic touch frames; discovery
     // acknowledgements keep the host liveness check alive without creating a
     // 125 Hz allocation and network workload for the whole session.
     private static final long ACTIVE_HEARTBEAT_NANOS = 8_000_000L;
-    private static final long RETRANSMIT_NANOS = 4_000_000L;
+    // Every frame is sent twice immediately. If both copies disappear, the
+    // first timed replay still starts early enough to fit inside one 120 Hz
+    // frame on a healthy USB-tethered path.
+    private static final int INITIAL_SEND_COPIES = 2;
+    private static final long RETRANSMIT_NANOS = 2_000_000L;
     private static final long WRITER_READY_TIMEOUT_MILLIS = 1_000;
     private static final int DEFAULT_HOST_WINDOW = 64;
     private static final int MAX_HOST_WINDOW = 256;
+    private static final int PACKET_POOL_CAPACITY = MAX_HOST_WINDOW;
     private static final int PHONE_SEND_NANOS_OFFSET = 40;
     private static final int ECHO_HOST_SEND_NANOS_OFFSET = 48;
     private static final int PHONE_CONTROL_RECEIVE_NANOS_OFFSET = 56;
 
     private static final class PendingPacket {
-        final long sessionId;
-        final long sequence;
-        final byte[] bytes;
+        long sessionId;
+        long sequence;
+        final byte[] bytes = new byte[TouchSample.MAX_FRAME_SIZE];
+        final ByteBuffer packet = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+        int length;
         long lastSentNanos;
         int sendCount;
 
-        PendingPacket(long sessionId, long sequence, byte[] bytes) {
+        void reset(long sessionId, long sequence, int length) {
             this.sessionId = sessionId;
             this.sequence = sequence;
-            this.bytes = bytes;
+            this.length = length;
+            lastSentNanos = 0;
+            sendCount = 0;
+            packet.clear();
         }
     }
 
     private final Object queueLock = new Object();
     private final Object lifecycleLock = new Object();
     private final ArrayDeque<PendingPacket> unacknowledged = new ArrayDeque<>();
+    private final ArrayDeque<PendingPacket> packetPool = new ArrayDeque<>();
     private final TouchTransport.Listener listener;
     private final SecureRandom random = new SecureRandom();
     private final CRC32 writerCrc = new CRC32();
@@ -79,6 +92,20 @@ final class UdpTransport implements TouchTransport {
     private final byte[] controlBuffer = new byte[2_048];
     private final ByteBuffer controlPacket =
             ByteBuffer.wrap(controlBuffer).order(ByteOrder.LITTLE_ENDIAN);
+    private final byte[] discoveryBuffer = new byte[DISCOVERY_SIZE];
+    private final ByteBuffer discoveryPacket =
+            ByteBuffer.wrap(discoveryBuffer).order(ByteOrder.LITTLE_ENDIAN);
+    private final Set<InetAddress> discoveryDestinations = new HashSet<>();
+    private final DatagramPacket discoveryDatagram =
+            new DatagramPacket(discoveryBuffer, discoveryBuffer.length);
+    // Retain the latest complete contact snapshot so a restarted host can
+    // reconstruct a stationary hold from the next heartbeat.
+    private final int[] retainedPointerIds = new int[TouchSample.MAX_CONTACTS];
+    private final float[] retainedX = new float[TouchSample.MAX_CONTACTS];
+    private final float[] retainedY = new float[TouchSample.MAX_CONTACTS];
+    private final float[] retainedPressure = new float[TouchSample.MAX_CONTACTS];
+    private final float[] retainedTouchMajor = new float[TouchSample.MAX_CONTACTS];
+    private final boolean[] retainedTouching = new boolean[TouchSample.MAX_CONTACTS];
 
     private volatile int generation;
     private volatile boolean running;
@@ -95,13 +122,18 @@ final class UdpTransport implements TouchTransport {
     private long lastControlReceiveNanos;
     private long sessionStartedNanos;
     private int activeContactCount;
+    private int retainedContactCount;
 
     private DatagramSocket socket;
     private Thread controlThread;
     private Thread writerThread;
+    private Thread watchdogThread;
 
     UdpTransport(TouchTransport.Listener listener) {
         this.listener = listener;
+        for (int index = 0; index < PACKET_POOL_CAPACITY; index++) {
+            packetPool.addLast(new PendingPacket());
+        }
     }
 
     @Override
@@ -134,8 +166,13 @@ final class UdpTransport implements TouchTransport {
                     () -> writerLoop(sessionGeneration, nextSocket, writerReady),
                     "UDP4 touch writer"
             );
+            watchdogThread = new Thread(
+                    () -> watchdogLoop(sessionGeneration),
+                    "UDP4 liveness watchdog"
+            );
             controlThread.start();
             writerThread.start();
+            watchdogThread.start();
         }
 
         try {
@@ -154,10 +191,14 @@ final class UdpTransport implements TouchTransport {
             return false;
         }
 
-        listener.onConnectionChanged(
-                false,
-                "USB tethering active, searching for host"
-        );
+        synchronized (queueLock) {
+            if (!hostReady) {
+                listener.onConnectionChanged(
+                        false,
+                        "USB tethering active, searching for host"
+                );
+            }
+        }
         return true;
     }
 
@@ -182,13 +223,24 @@ final class UdpTransport implements TouchTransport {
             float[] touchMajor,
             boolean[] touching
     ) {
-        if (!running) return;
         if (contactCount < 0 || contactCount > TouchSample.MAX_CONTACTS) {
             throw new IllegalArgumentException("Unsupported contact count: " + contactCount);
         }
         synchronized (queueLock) {
-            if (!running) return;
             activeContactCount = countActiveContacts(touching, contactCount);
+            retainContactsLocked(
+                    contactCount,
+                    pointerIds,
+                    x,
+                    y,
+                    pressure,
+                    touchMajor,
+                    touching
+            );
+            // During a short socket restart, keep the latest full snapshot but
+            // do not queue stale transitions. A still-held finger is then
+            // reconstructed by the first heartbeat of the fresh session.
+            if (!running) return;
             enqueueFrameLocked(
                     action,
                     actionPointerId,
@@ -229,8 +281,8 @@ final class UdpTransport implements TouchTransport {
         int length = TouchSample.FRAME_HEADER_SIZE
                 + contactCount * TouchSample.CONTACT_SIZE
                 + TouchSample.CRC_SIZE;
-        byte[] bytes = new byte[length];
-        ByteBuffer packet = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+        PendingPacket pending = obtainPacketLocked(sessionId, sequence, length);
+        ByteBuffer packet = pending.packet;
         packet.put((byte) 'H');
         packet.put((byte) 'P');
         packet.put((byte) 'T');
@@ -268,7 +320,7 @@ final class UdpTransport implements TouchTransport {
             packet.putShort((short) normalizeUnsigned(touchMajor[index]));
         }
         packet.putInt(0);
-        unacknowledged.addLast(new PendingPacket(sessionId, sequence, bytes));
+        unacknowledged.addLast(pending);
     }
 
     private void controlLoop(int sessionGeneration, DatagramSocket sessionSocket) {
@@ -286,7 +338,7 @@ final class UdpTransport implements TouchTransport {
                 try {
                     sessionSocket.receive(incoming);
                 } catch (java.net.SocketTimeoutException ignored) {
-                    checkHostTimeout();
+                    checkHostTimeout(sessionGeneration);
                     continue;
                 }
                 int count = incoming.getLength();
@@ -314,7 +366,7 @@ final class UdpTransport implements TouchTransport {
                     // Discovery traffic can arrive continuously, so do not
                     // rely only on the socket timeout path to detect a stale
                     // active data/ACK connection.
-                    checkHostTimeout();
+                    checkHostTimeout(sessionGeneration);
                     continue;
                 }
                 if (!isHostPacket(incoming.getAddress(), incoming.getPort())) {
@@ -330,8 +382,8 @@ final class UdpTransport implements TouchTransport {
     }
 
     private void sendDiscovery(DatagramSocket sessionSocket) throws IOException {
-        byte[] bytes = new byte[DISCOVERY_SIZE];
-        ByteBuffer packet = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer packet = discoveryPacket;
+        packet.clear();
         packet.put((byte) 'H');
         packet.put((byte) 'P');
         packet.put((byte) 'T');
@@ -344,10 +396,10 @@ final class UdpTransport implements TouchTransport {
         packet.putShort((short) DISCOVERY_PORT);
         packet.putShort((short) 0);
         controlCrc.reset();
-        controlCrc.update(bytes, 0, DISCOVERY_SIZE - 4);
+        controlCrc.update(discoveryBuffer, 0, DISCOVERY_SIZE - 4);
         packet.putInt((int) controlCrc.getValue());
 
-        Set<InetAddress> destinations = new HashSet<>();
+        discoveryDestinations.clear();
         Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
         while (interfaces != null && interfaces.hasMoreElements()) {
             NetworkInterface network = interfaces.nextElement();
@@ -359,16 +411,19 @@ final class UdpTransport implements TouchTransport {
                 continue;
             }
             for (java.net.InterfaceAddress address : network.getInterfaceAddresses()) {
-                if (address.getBroadcast() != null) destinations.add(address.getBroadcast());
+                if (address.getBroadcast() != null) {
+                    discoveryDestinations.add(address.getBroadcast());
+                }
             }
         }
-        for (InetAddress destination : destinations) {
-            sessionSocket.send(new DatagramPacket(
-                    bytes,
-                    bytes.length,
-                    destination,
-                    DISCOVERY_PORT
-            ));
+        for (InetAddress destination : discoveryDestinations) {
+            discoveryDatagram.setAddress(destination);
+            discoveryDatagram.setPort(DISCOVERY_PORT);
+            discoveryDatagram.setLength(discoveryBuffer.length);
+            // Losing one discovery datagram must not add the old 500 ms
+            // discovery interval to startup or reconnect.
+            sessionSocket.send(discoveryDatagram);
+            sessionSocket.send(discoveryDatagram);
         }
     }
 
@@ -471,11 +526,16 @@ final class UdpTransport implements TouchTransport {
 
     private void acknowledgeLocked(long acknowledgedSequence) {
         if (acknowledgedSequence < 0 || acknowledgedSequence <= highestAcknowledged) return;
+        if (acknowledgedSequence >= nextSequence) {
+            Log.w(TAG, "Ignoring ACK beyond the last queued sequence: "
+                    + acknowledgedSequence);
+            return;
+        }
         highestAcknowledged = acknowledgedSequence;
         while (!unacknowledged.isEmpty()) {
             PendingPacket first = unacknowledged.peekFirst();
             if (first.sessionId != sessionId || first.sequence > acknowledgedSequence) break;
-            unacknowledged.removeFirst();
+            recyclePacketLocked(unacknowledged.removeFirst());
         }
     }
 
@@ -486,16 +546,17 @@ final class UdpTransport implements TouchTransport {
     ) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
         writerReady.countDown();
+        byte[] sendBuffer = new byte[TouchSample.MAX_FRAME_SIZE];
         DatagramPacket outgoing = new DatagramPacket(new byte[0], 0);
         try {
             while (isSessionActive(sessionGeneration)) {
-                PendingPacket pending;
                 InetSocketAddress destination;
+                int sendLength;
                 synchronized (queueLock) {
                     long nowNanos = System.nanoTime();
                     maybeEnqueueHeartbeatLocked(nowNanos);
                     destination = hostAddress;
-                    pending = destination == null
+                    PendingPacket pending = destination == null
                             ? null
                             : nextPacketToWriteLocked(nowNanos);
                     if (pending == null) {
@@ -505,8 +566,10 @@ final class UdpTransport implements TouchTransport {
                     pending.sendCount++;
                     pending.lastSentNanos = nowNanos;
                     preparePacketForWriteLocked(pending, nowNanos);
+                    sendLength = pending.length;
+                    System.arraycopy(pending.bytes, 0, sendBuffer, 0, sendLength);
                 }
-                outgoing.setData(pending.bytes, 0, pending.bytes.length);
+                outgoing.setData(sendBuffer, 0, sendLength);
                 outgoing.setSocketAddress(destination);
                 sessionSocket.send(outgoing);
             }
@@ -521,29 +584,39 @@ final class UdpTransport implements TouchTransport {
         if (unacknowledged.isEmpty()) return null;
         int allowed = hostReady ? hostWindow : 1;
         int index = 0;
-        PendingPacket oldestEligible = null;
         Iterator<PendingPacket> iterator = unacknowledged.iterator();
+
+        // A burst of new MotionEvent history must not postpone repair of an
+        // ordering hole beyond the frame budget. Once a packet's redundant
+        // pair is 2 ms old, repair it before serving newer packets.
         while (iterator.hasNext() && index < allowed) {
             PendingPacket packet = iterator.next();
-            if (packet.sendCount == 0) return packet;
-            if (oldestEligible == null) oldestEligible = packet;
+            if (packet.sendCount >= INITIAL_SEND_COPIES
+                    && nowNanos - packet.lastSentNanos >= RETRANSMIT_NANOS) {
+                return packet;
+            }
             index++;
         }
-        if (oldestEligible != null
-                && nowNanos - oldestEligible.lastSentNanos >= RETRANSMIT_NANOS) {
-            return oldestEligible;
+
+        index = 0;
+        iterator = unacknowledged.iterator();
+        while (iterator.hasNext() && index < allowed) {
+            PendingPacket packet = iterator.next();
+            if (packet.sendCount < INITIAL_SEND_COPIES) return packet;
+            index++;
         }
         return null;
     }
 
     private void preparePacketForWriteLocked(PendingPacket pending, long sendNanos) {
-        ByteBuffer packet = ByteBuffer.wrap(pending.bytes).order(ByteOrder.LITTLE_ENDIAN);
+        ByteBuffer packet = pending.packet;
+        int length = pending.length;
         packet.putLong(PHONE_SEND_NANOS_OFFSET, sendNanos);
         packet.putLong(ECHO_HOST_SEND_NANOS_OFFSET, lastHostSendNanos);
         packet.putLong(PHONE_CONTROL_RECEIVE_NANOS_OFFSET, lastControlReceiveNanos);
         writerCrc.reset();
-        writerCrc.update(pending.bytes, 0, pending.bytes.length - TouchSample.CRC_SIZE);
-        packet.putInt(pending.bytes.length - TouchSample.CRC_SIZE, (int) writerCrc.getValue());
+        writerCrc.update(pending.bytes, 0, length - TouchSample.CRC_SIZE);
+        packet.putInt(length - TouchSample.CRC_SIZE, (int) writerCrc.getValue());
     }
 
     private void maybeEnqueueHeartbeatLocked(long nowNanos) {
@@ -558,47 +631,69 @@ final class UdpTransport implements TouchTransport {
                 nowNanos,
                 nowNanos,
                 false,
-                0,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null
+                retainedContactCount,
+                retainedPointerIds,
+                retainedX,
+                retainedY,
+                retainedPressure,
+                retainedTouchMajor,
+                retainedTouching
         );
     }
 
-    private void checkHostTimeout() {
-        boolean reset = false;
+    private void checkHostTimeout(int sessionGeneration) {
+        boolean timedOut = false;
         int staleFrames = 0;
         synchronized (queueLock) {
+            if (!isSessionActive(sessionGeneration)) return;
             long nowNanos = System.nanoTime();
+            boolean activeDataPath = activeContactCount > 0 || hasGameplayPendingLocked();
+            long hostTimeoutNanos = activeDataPath
+                    ? ACTIVE_HOST_TIMEOUT_NANOS
+                    : HOST_TIMEOUT_NANOS;
             boolean hostTimedOut = hostReady
-                    && nowNanos - lastControlReceiveNanos >= HOST_TIMEOUT_NANOS;
+                    && nowNanos - lastControlReceiveNanos >= hostTimeoutNanos;
             boolean discoveryTimedOut = !hostReady
-                    && nowNanos - sessionStartedNanos >= HOST_TIMEOUT_NANOS
-                    && hasGameplayPendingLocked();
+                    && nowNanos - sessionStartedNanos >= ACTIVE_HOST_TIMEOUT_NANOS
+                    && activeDataPath;
             if (hostTimedOut || discoveryTimedOut) {
                 staleFrames = unacknowledged.size();
-                beginSessionLocked();
-                reset = true;
-                queueLock.notifyAll();
+                timedOut = true;
             }
         }
-        if (reset && running) {
+        if (timedOut && closeSession(sessionGeneration)) {
+            // Close the socket before clearing state. DatagramSocket.close()
+            // interrupts network I/O, so a wedged send cannot hold the
+            // watchdog or prevent MainActivity from opening a fresh session.
             listener.onConnectionChanged(
                     false,
                     "Host not responding; dropped "
                             + staleFrames
-                            + " stale frames; searching"
+                            + " stale frames; restarting"
             );
         }
     }
 
+    private void watchdogLoop(int sessionGeneration) {
+        while (isSessionActive(sessionGeneration)) {
+            synchronized (queueLock) {
+                try {
+                    queueLock.wait(WATCHDOG_INTERVAL_MILLIS);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            checkHostTimeout(sessionGeneration);
+        }
+    }
+
     private boolean hasGameplayPendingLocked() {
-        // The first packet is the session-start CANCEL. Any additional packet
-        // is gameplay that must not be replayed after a multi-second outage.
-        return unacknowledged.size() > 1;
+        // Sequence zero is the session-start CANCEL. It may already have been
+        // acknowledged, so queue size alone cannot distinguish a lone pending
+        // UP/CANCEL from setup traffic.
+        PendingPacket newest = unacknowledged.peekLast();
+        return newest != null && newest.sequence > 0;
     }
 
     private void beginSessionLocked() {
@@ -609,8 +704,8 @@ final class UdpTransport implements TouchTransport {
         hostReady = false;
         hostAddress = null;
         hostWindow = DEFAULT_HOST_WINDOW;
-        unacknowledged.clear();
-        activeContactCount = 0;
+        clearUnacknowledgedLocked();
+        activeContactCount = countActiveContacts(retainedTouching, retainedContactCount);
         resetSessionState();
         long nowNanos = System.nanoTime();
         enqueueFrameLocked(
@@ -632,9 +727,8 @@ final class UdpTransport implements TouchTransport {
     }
 
     private void failSession(int sessionGeneration, String message, IOException error) {
-        if (!isSessionActive(sessionGeneration)) return;
+        if (!closeSession(sessionGeneration)) return;
         Log.e(TAG, message, error);
-        close();
         listener.onConnectionChanged(false, "USB-tethering network lost");
     }
 
@@ -676,30 +770,84 @@ final class UdpTransport implements TouchTransport {
         return active;
     }
 
+    private void retainContactsLocked(
+            int contactCount,
+            int[] pointerIds,
+            float[] x,
+            float[] y,
+            float[] pressure,
+            float[] touchMajor,
+            boolean[] touching
+    ) {
+        retainedContactCount = contactCount;
+        if (contactCount == 0) return;
+        System.arraycopy(pointerIds, 0, retainedPointerIds, 0, contactCount);
+        System.arraycopy(x, 0, retainedX, 0, contactCount);
+        System.arraycopy(y, 0, retainedY, 0, contactCount);
+        System.arraycopy(pressure, 0, retainedPressure, 0, contactCount);
+        System.arraycopy(touchMajor, 0, retainedTouchMajor, 0, contactCount);
+        System.arraycopy(touching, 0, retainedTouching, 0, contactCount);
+    }
+
+    private PendingPacket obtainPacketLocked(long packetSessionId, long sequence, int length) {
+        PendingPacket packet = packetPool.pollFirst();
+        if (packet == null) packet = new PendingPacket();
+        packet.reset(packetSessionId, sequence, length);
+        return packet;
+    }
+
+    private void recyclePacketLocked(PendingPacket packet) {
+        if (packetPool.size() < PACKET_POOL_CAPACITY) packetPool.addLast(packet);
+    }
+
+    private void clearUnacknowledgedLocked() {
+        while (!unacknowledged.isEmpty()) {
+            recyclePacketLocked(unacknowledged.removeFirst());
+        }
+    }
+
     @Override
     public void close() {
+        closeInternal(0, false);
+    }
+
+    private boolean closeSession(int sessionGeneration) {
+        return closeInternal(sessionGeneration, true);
+    }
+
+    private boolean closeInternal(int expectedGeneration, boolean requireGenerationMatch) {
         Thread previousWriter;
         Thread previousControl;
+        Thread previousWatchdog;
         DatagramSocket previousSocket;
         synchronized (lifecycleLock) {
+            if (requireGenerationMatch
+                    && (!running || generation != expectedGeneration)) {
+                return false;
+            }
             running = false;
             generation++;
             previousWriter = writerThread;
             previousControl = controlThread;
+            previousWatchdog = watchdogThread;
             previousSocket = socket;
             writerThread = null;
             controlThread = null;
+            watchdogThread = null;
             socket = null;
-        }
-        synchronized (queueLock) {
-            hostReady = false;
-            hostAddress = null;
-            activeContactCount = 0;
-            unacknowledged.clear();
-            queueLock.notifyAll();
+            if (previousSocket != null) previousSocket.close();
+            synchronized (queueLock) {
+                hostReady = false;
+                hostAddress = null;
+                clearUnacknowledgedLocked();
+                queueLock.notifyAll();
+            }
         }
         if (previousWriter != null && previousWriter != Thread.currentThread()) previousWriter.interrupt();
         if (previousControl != null && previousControl != Thread.currentThread()) previousControl.interrupt();
-        if (previousSocket != null) previousSocket.close();
+        if (previousWatchdog != null && previousWatchdog != Thread.currentThread()) {
+            previousWatchdog.interrupt();
+        }
+        return true;
     }
 }

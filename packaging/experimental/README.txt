@@ -17,7 +17,7 @@ Install:
 
 Start the Windows app:
   1. Double-click HolodoriUsbController.exe.
-  2. Set the lane keys and USB port if needed.
+  2. Set the lane keys if needed. Protocol-v4 discovery uses UDP port 42825.
   3. Leave "Save latency report when stopped" checked unless you do not want
      a report.
   4. Press Start.
@@ -45,17 +45,25 @@ Keyboard mode:
 Connection diagnostics:
   - "waiting for USB-tethered phone on UDP port 42825" means discovery is
     listening on the RNDIS adapter.
+  - If Windows Firewall blocks discovery, permit inbound UDP 42825 for
+    Windows\holodori-native-host.exe on the USB-tethered network only.
   - "UDP link ready" means the host received the phone's discovery hello.
   - "Lossless UDP over USB tethering connected" means HPA4 control is active.
-  - HPT4 frames are one UDP datagram each; HPA4 cumulative acknowledgements
-    and 4 ms replay preserve ordering across lost datagrams.
+  - HPT4 frames are one UDP datagram each. Immediate redundant HPT4/HPA4 sends,
+    cumulative acknowledgements, and 2 ms replay preserve ordering across a
+    lost or corrupt datagram inside one 120 Hz frame.
   - The host can join a phone session after a host restart; a cable replug is
     not required if USB tethering remains enabled.
+  - A host read/ACK failure releases injected input before reconnecting. During
+    active play the phone abandons a silent link after 64 ms, starts socket
+    recovery with a 4 ms backoff, and restores still-held contacts from its
+    latest snapshot.
   - HolodoriUsbController.exe collects metrics silently in memory when the
     report option is checked. One report is written under Windows\Logs after
     Stop. Nothing is formatted, sorted, or written mid-play.
-  - The launcher exposes the UDP port. The 8.333 ms 120 Hz warning budget is
-    applied automatically; normal users do not need a terminal.
+  - Protocol-v4 discovery uses fixed UDP port 42825. The 8.333 ms 120 Hz
+    warning budget is applied automatically; normal users do not need a
+    terminal.
 
 Metrics include:
   - mean, max, p50, p90, p99, and p99.9;
@@ -73,9 +81,9 @@ Safety and scope:
   - The separately shipped touch probe uses the Windows Touch API and a
     separate WM_POINTER receiver for diagnostics only; the GUI launches keys
     mode.
-  - Protocol reliability applies within a connected tethering session. After
-    two seconds without host control, the phone drops queued gameplay, starts
-    a new session, and sends CANCEL so old input is not replayed late.
+  - Protocol reliability applies within a connected tethering session. During
+    gameplay, 64 ms without host control makes the phone drop queued gameplay,
+    start a new session, and send CANCEL so old input is not replayed late.
 
 See Docs\EXPERIMENTAL_ARCHITECTURE.md and Docs\PROTOCOL_V4.md for details.
 Verify every packaged file against SHA256SUMS.txt.

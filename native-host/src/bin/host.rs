@@ -25,6 +25,9 @@ use windows_sys::Win32::System::Threading::{
 };
 
 const RECEIVE_WINDOW: u32 = 128;
+const SINK_STALL_TIMEOUT: Duration = Duration::from_millis(8);
+const ACTIVE_INPUT_SILENCE_TIMEOUT: Duration = Duration::from_millis(32);
+const SINK_CANCEL_TIMEOUT: Duration = Duration::from_millis(8);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_COMPLETE: AtomicBool = AtomicBool::new(false);
 
@@ -44,6 +47,12 @@ struct Options {
     metrics: bool,
     metrics_file: Option<PathBuf>,
     warning_budget_ms: f64,
+}
+
+struct ControlState {
+    hello_session: Option<u64>,
+    last_ack: Option<u64>,
+    lane_count: u8,
 }
 
 enum Sink {
@@ -78,6 +87,22 @@ impl Sink {
                 );
                 Ok(())
             }
+        }
+    }
+
+    fn has_active_input(&self) -> bool {
+        match self {
+            Self::Touch(touch) => touch.has_active_input(),
+            Self::Keys(keys) => keys.has_active_input(),
+            Self::Record => false,
+        }
+    }
+
+    fn cancel_all(&mut self) -> io::Result<()> {
+        match self {
+            Self::Touch(touch) => touch.cancel_all(),
+            Self::Keys(keys) => keys.release_all(),
+            Self::Record => Ok(()),
         }
     }
 }
@@ -118,6 +143,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut ordered = OrderedFrames::new();
     let mut parser = FrameParser::default();
     while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        if sink.has_active_input() {
+            match cancel_sink_with_deadline(&mut sink, &mut metrics) {
+                Ok(()) => {}
+                Err(error) => {
+                    eprintln!("Windows still has active injected input: {error}; retrying release");
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+            }
+        }
         println!(
             "waiting for USB-tethered phone on UDP port {}...",
             udp.port()
@@ -148,10 +183,24 @@ fn run() -> Result<(), Box<dyn Error>> {
             if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
                 break;
             }
-            eprintln!("UDP link interrupted: {error}; preserving host ordering state");
+            // A read or ACK-write failure can happen after the OS accepted a
+            // key/touch. Never wait in discovery with that input held, and do
+            // not allow delayed frames from the failed link to reapply it.
+            ordered.require_fresh_session();
+            if let Err(release_error) = cancel_sink_with_deadline(&mut sink, &mut metrics) {
+                eprintln!(
+                    "UDP link interrupted: {error}; input release is still pending: {release_error}"
+                );
+            } else {
+                eprintln!(
+                    "UDP link interrupted: {error}; released input and require a fresh session"
+                );
+            }
             thread::sleep(Duration::from_millis(100));
         }
     }
+
+    let release_result = cancel_sink_with_deadline(&mut sink, &mut metrics);
 
     metrics.set_parser_counters(
         parser.invalid_frames,
@@ -168,6 +217,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Ok(())
     };
     SHUTDOWN_COMPLETE.store(true, Ordering::Release);
+    release_result?;
     report_result.map_err(Into::into)
 }
 
@@ -193,6 +243,10 @@ fn install_exit_command_thread() -> io::Result<()> {
                     Err(_) => break,
                 }
             }
+            // The GUI owns this pipe. EOF means the launcher exited or
+            // crashed, so the hidden host must not survive as an orphan that
+            // keeps the UDP port or injected keys alive.
+            SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
         })
         .map(|_| ())
 }
@@ -245,16 +299,36 @@ fn serve_connection(
     lane_count: u8,
 ) -> Result<(), Box<dyn Error>> {
     let mut read_buffer = [0_u8; 4096];
-    let mut hello_session = None;
-    let mut last_ack = None;
+    let mut control = ControlState {
+        hello_session: None,
+        last_ack: None,
+        lane_count,
+    };
+    let mut last_valid_frame = Instant::now();
 
     while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
         let count = connection.read(&mut read_buffer, 4)?;
         if count == 0 {
+            if sink.has_active_input() && last_valid_frame.elapsed() >= ACTIVE_INPUT_SILENCE_TIMEOUT
+            {
+                ordered.require_fresh_session();
+                cancel_sink_with_deadline(sink, metrics)?;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "phone input heartbeat absent for {} ms; released held input and require a fresh session",
+                        ACTIVE_INPUT_SILENCE_TIMEOUT.as_millis()
+                    ),
+                )
+                .into());
+            }
             continue;
         }
         let arrival = Instant::now();
         let decoded = parser.decode_datagram(&read_buffer[..count]);
+        if decoded.is_ok() {
+            last_valid_frame = arrival;
+        }
         if let Some(version) = parser.take_incompatible_version() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -270,13 +344,25 @@ fn serve_connection(
             ordered,
             sink,
             metrics,
-            &mut hello_session,
-            &mut last_ack,
-            lane_count,
+            &mut control,
             arrival,
         )?;
     }
     Ok(())
+}
+
+fn cancel_sink_with_deadline(sink: &mut Sink, metrics: &mut HostMetrics) -> io::Result<()> {
+    let deadline = Instant::now() + SINK_CANCEL_TIMEOUT;
+    loop {
+        match sink.cancel_all() {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => {
+                metrics.observe_sink_retry();
+                thread::yield_now();
+            }
+        }
+    }
 }
 
 fn process_decoded_frame(
@@ -285,9 +371,7 @@ fn process_decoded_frame(
     ordered: &mut OrderedFrames,
     sink: &mut Sink,
     metrics: &mut HostMetrics,
-    hello_session: &mut Option<u64>,
-    last_ack: &mut Option<u64>,
-    lane_count: u8,
+    control_state: &mut ControlState,
     arrival: Instant,
 ) -> Result<(), Box<dyn Error>> {
     let frame = match decoded {
@@ -309,6 +393,7 @@ fn process_decoded_frame(
     ordered.push(frame);
 
     while let Some(frame) = ordered.next_ready().cloned() {
+        let retry_started = Instant::now();
         let mut last_error_report = Instant::now() - Duration::from_secs(2);
         loop {
             match sink.accept(&frame) {
@@ -322,7 +407,24 @@ fn process_decoded_frame(
                         );
                         last_error_report = Instant::now();
                     }
-                    thread::sleep(Duration::from_millis(1));
+                    if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    if retry_started.elapsed() >= SINK_STALL_TIMEOUT {
+                        let sink_error = error.to_string();
+                        ordered.require_fresh_session();
+                        let cancellation = cancel_sink_with_deadline(sink, metrics);
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "OS sink stalled for {} ms on sequence {}: {sink_error}; cancellation={cancellation:?}",
+                                SINK_STALL_TIMEOUT.as_millis(),
+                                frame.sequence
+                            ),
+                        )
+                        .into());
+                    }
+                    thread::yield_now();
                 }
             }
         }
@@ -346,16 +448,16 @@ fn process_decoded_frame(
         return Ok(());
     }
     let acknowledged = ordered.acknowledged_sequence();
-    let control_type = if *hello_session != Some(session_id) {
-        *hello_session = Some(session_id);
+    let control_type = if control_state.hello_session != Some(session_id) {
+        control_state.hello_session = Some(session_id);
         CONTROL_HELLO
     } else {
         CONTROL_ACK
     };
     // Re-send an ACK for duplicates too; the previous host-to-phone control
     // record may be the part of the exchange that was lost.
-    let outgoing_type = if control_type == CONTROL_HELLO || acknowledged != *last_ack {
-        *last_ack = acknowledged;
+    let outgoing_type = if control_type == CONTROL_HELLO || acknowledged != control_state.last_ack {
+        control_state.last_ack = acknowledged;
         control_type
     } else {
         CONTROL_ACK
@@ -363,7 +465,7 @@ fn process_decoded_frame(
     let host_send_nanos = metrics.clock_nanos(Instant::now());
     let control = encode_control(
         outgoing_type,
-        lane_count,
+        control_state.lane_count,
         session_id,
         acknowledged,
         RECEIVE_WINDOW,

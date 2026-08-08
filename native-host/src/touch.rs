@@ -17,7 +17,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::protocol::{
-    ACTION_CANCEL, ACTION_DOWN, ACTION_HEARTBEAT, ACTION_UP, Contact, MAX_CONTACTS, TouchFrame,
+    ACTION_CANCEL, ACTION_HEARTBEAT, ACTION_UP, Contact, MAX_CONTACTS, TouchFrame,
 };
 
 pub const PROBE_WINDOW_TITLE: &str = "Holodori Touch Probe";
@@ -99,11 +99,17 @@ impl TouchInjector {
         self.target = target;
     }
 
+    pub fn has_active_input(&self) -> bool {
+        !self.active.is_empty()
+    }
+
     pub fn accept(&mut self, frame: &TouchFrame) -> io::Result<()> {
         if frame.session_start() || frame.action == ACTION_CANCEL || !frame.locked() {
             return self.cancel_all();
         }
-        if frame.action == ACTION_HEARTBEAT {
+        if frame.action == ACTION_HEARTBEAT && frame.contacts.is_empty() {
+            // Protocol-v4 APKs before snapshot heartbeats sent an empty
+            // keepalive. Preserve compatibility with those sessions.
             let contacts = self.make_update_contacts(&self.active);
             if contacts.is_empty() {
                 return Ok(());
@@ -128,47 +134,33 @@ impl TouchInjector {
             let Some(state) = proposed.get(&contact.pointer_id).copied() else {
                 continue;
             };
-            let flags = if frame.action == ACTION_DOWN
-                && contact.pointer_id == frame.action_pointer_id
-            {
-                POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
-            } else if frame.action == ACTION_UP && contact.pointer_id == frame.action_pointer_id {
-                POINTER_FLAG_UP
-            } else {
-                POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT
+            let Some(flags) = transition_flags(
+                self.active.contains_key(&contact.pointer_id),
+                contact.touching(),
+            ) else {
+                // A host can restart after the original UP was accepted by the
+                // old process. Treat that replay as already satisfied.
+                continue;
             };
             contacts.push(to_touch_info(contact.pointer_id, state, flags));
         }
 
         if contacts.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "touch frame has no injectable contacts",
-            ));
+            self.active.clear();
+            return Ok(());
         }
         inject_retry(&contacts)?;
 
-        if frame.action == ACTION_UP {
-            self.active.remove(&frame.action_pointer_id);
-            for contact in &frame.contacts {
-                if contact.touching()
-                    && let Some(state) = proposed.get(&contact.pointer_id)
-                {
-                    self.active.insert(contact.pointer_id, *state);
-                }
-            }
-        } else {
-            self.active = proposed
-                .into_iter()
-                .filter(|(pointer_id, _)| {
-                    frame
-                        .contacts
-                        .iter()
-                        .find(|contact| contact.pointer_id == *pointer_id)
-                        .is_some_and(Contact::touching)
-                })
-                .collect();
-        }
+        self.active = proposed
+            .into_iter()
+            .filter(|(pointer_id, _)| {
+                frame
+                    .contacts
+                    .iter()
+                    .find(|contact| contact.pointer_id == *pointer_id)
+                    .is_some_and(Contact::touching)
+            })
+            .collect();
         Ok(())
     }
 
@@ -230,9 +222,24 @@ impl TouchInjector {
     }
 }
 
+fn transition_flags(was_active: bool, touching: bool) -> Option<u32> {
+    match (was_active, touching) {
+        (false, true) => Some(POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT),
+        (true, true) => Some(POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT),
+        (true, false) => Some(POINTER_FLAG_UP),
+        (false, false) => None,
+    }
+}
+
 impl Drop for TouchInjector {
     fn drop(&mut self) {
-        let _ = self.cancel_all();
+        let deadline = Instant::now() + Duration::from_millis(8);
+        while self.has_active_input() && Instant::now() < deadline {
+            if self.cancel_all().is_ok() {
+                break;
+            }
+            thread::yield_now();
+        }
     }
 }
 
@@ -255,7 +262,7 @@ fn to_touch_info(pointer_id: u8, state: ActiveContact, flags: u32) -> POINTER_TO
 }
 
 fn inject_retry(contacts: &[POINTER_TOUCH_INFO]) -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_millis(4);
+    let deadline = Instant::now() + Duration::from_millis(3);
     loop {
         if unsafe { InjectTouchInput(contacts.len() as u32, contacts.as_ptr()) } != 0 {
             return Ok(());
@@ -270,4 +277,27 @@ fn inject_retry(contacts: &[POINTER_TOUCH_INFO]) -> io::Result<()> {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replayed_move_reestablishes_an_unknown_contact() {
+        assert_eq!(
+            transition_flags(false, true),
+            Some(POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT)
+        );
+        assert_eq!(
+            transition_flags(true, true),
+            Some(POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT)
+        );
+    }
+
+    #[test]
+    fn a_replayed_up_for_an_unknown_contact_is_already_satisfied() {
+        assert_eq!(transition_flags(false, false), None);
+        assert_eq!(transition_flags(true, false), Some(POINTER_FLAG_UP));
+    }
 }

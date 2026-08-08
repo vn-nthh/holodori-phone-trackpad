@@ -2,12 +2,14 @@
 
 use serde::Serialize;
 use std::io::Write;
+use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
 const DEFAULT_WARNING_BUDGET_MS: &str = "8.333";
+const USB_TETHER_UDP_PORT: u16 = 42_825;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Default)]
@@ -27,7 +29,6 @@ struct HostStatus {
 fn start_host(
     state: State<'_, Mutex<HostState>>,
     keys: String,
-    port: u16,
     metrics: bool,
 ) -> Result<HostStatus, String> {
     let mut state = state
@@ -41,6 +42,11 @@ fn start_host(
     let host = find_host().ok_or_else(|| {
         "The Windows controller files are missing. Re-extract the portable bundle.".to_owned()
     })?;
+    UdpSocket::bind(("0.0.0.0", USB_TETHER_UDP_PORT)).map_err(|error| {
+        format!(
+            "UDP port {USB_TETHER_UDP_PORT} is already in use. Close any older Holodori host in Task Manager, then try again: {error}"
+        )
+    })?;
     let mut command = Command::new(&host);
     command
         .current_dir(host.parent().unwrap_or_else(|| std::path::Path::new(".")))
@@ -52,7 +58,7 @@ fn start_host(
         .arg("--lanes")
         .arg(keys)
         .arg("--udp-port")
-        .arg(port.to_string())
+        .arg(USB_TETHER_UDP_PORT.to_string())
         .arg("--warn-ms")
         .arg(DEFAULT_WARNING_BUDGET_MS);
     if metrics {
@@ -185,7 +191,7 @@ fn style_windows_titlebar(window: &tauri::WebviewWindow) {
     let Ok(hwnd) = window.hwnd() else {
         return;
     };
-    let hwnd = hwnd.0 as *mut c_void;
+    let hwnd = hwnd.0;
 
     unsafe {
         // Keep the native minimize/maximize/close buttons while suppressing
