@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Name = "HolodoriUsbTetheredUdp-v0.4.0",
+    [string]$Name = "HolodoriUsbTetheredUdp-v0.4.1-alpha1",
     [string]$CargoHome = "F:\.cargo",
     [string]$JavaHome = "",
     [string]$AndroidSdk = ""
@@ -51,8 +51,8 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
 & (Join-Path $AndroidDir "gradlew.bat") `
     --project-dir $AndroidDir `
     --no-daemon `
-    "-PholodoriVersionName=0.4.0" `
-    "-PholodoriVersionCode=21" `
+    "-PholodoriVersionName=0.4.1" `
+    "-PholodoriVersionCode=22" `
     clean assembleRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
@@ -117,8 +117,8 @@ $TrackedChanges = git -C $ProjectRoot status --porcelain --untracked-files=no
 $Dirty = if ($TrackedChanges) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
-    "android_version_name=0.4.0",
-    "android_version_code=21",
+    "android_version_name=0.4.1",
+    "android_version_code=22",
     "built_utc=$([DateTime]::UtcNow.ToString('o'))",
     "branch=$Branch",
     "base_commit=$Commit",

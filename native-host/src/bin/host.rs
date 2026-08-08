@@ -11,7 +11,8 @@ use holodori_native_host::keyboard::KeyboardSink;
 use holodori_native_host::metrics::HostMetrics;
 use holodori_native_host::network::{DEFAULT_UDP_PORT, UdpConnection, UdpHost};
 use holodori_native_host::protocol::{
-    CONTROL_ACK, CONTROL_HELLO, FrameParser, OrderedFrames, TouchFrame, encode_control,
+    CONTROL_ACK, CONTROL_HELLO, FrameParser, OrderedFrames, ProtocolError, TouchFrame,
+    encode_control,
 };
 use holodori_native_host::touch::{PROBE_WINDOW_TITLE, TouchInjector, TouchTarget};
 use windows_sys::Win32::System::Console::{
@@ -235,30 +236,8 @@ fn raise_input_priority() {
     }
 }
 
-trait HostConnection {
-    fn read(&mut self, buffer: &mut [u8], timeout_ms: u32) -> io::Result<usize>;
-    fn write(&mut self, bytes: &[u8], timeout_ms: u32) -> io::Result<()>;
-    fn is_datagram(&self) -> bool {
-        false
-    }
-}
-
-impl HostConnection for UdpConnection<'_> {
-    fn read(&mut self, buffer: &mut [u8], timeout_ms: u32) -> io::Result<usize> {
-        UdpConnection::read(self, buffer, timeout_ms)
-    }
-
-    fn write(&mut self, bytes: &[u8], timeout_ms: u32) -> io::Result<()> {
-        UdpConnection::write(self, bytes, timeout_ms)
-    }
-
-    fn is_datagram(&self) -> bool {
-        true
-    }
-}
-
-fn serve_connection<C: HostConnection>(
-    mut connection: C,
+fn serve_connection(
+    mut connection: UdpConnection<'_>,
     parser: &mut FrameParser,
     ordered: &mut OrderedFrames,
     sink: &mut Sink,
@@ -275,11 +254,7 @@ fn serve_connection<C: HostConnection>(
             continue;
         }
         let arrival = Instant::now();
-        let decoded_frames = if connection.is_datagram() {
-            parser.feed_datagram(&read_buffer[..count])
-        } else {
-            parser.feed(&read_buffer[..count])
-        };
+        let decoded = parser.decode_datagram(&read_buffer[..count]);
         if let Some(version) = parser.take_incompatible_version() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -289,96 +264,119 @@ fn serve_connection<C: HostConnection>(
             )
             .into());
         }
-        for decoded in decoded_frames {
-            let frame = match decoded {
-                Ok(frame) => frame,
+        process_decoded_frame(
+            decoded,
+            &mut connection,
+            ordered,
+            sink,
+            metrics,
+            &mut hello_session,
+            &mut last_ack,
+            lane_count,
+            arrival,
+        )?;
+    }
+    Ok(())
+}
+
+fn process_decoded_frame(
+    decoded: Result<TouchFrame, ProtocolError>,
+    connection: &mut UdpConnection<'_>,
+    ordered: &mut OrderedFrames,
+    sink: &mut Sink,
+    metrics: &mut HostMetrics,
+    hello_session: &mut Option<u64>,
+    last_ack: &mut Option<u64>,
+    lane_count: u8,
+    arrival: Instant,
+) -> Result<(), Box<dyn Error>> {
+    let frame = match decoded {
+        Ok(frame) => frame,
+        Err(error) => {
+            eprintln!("wire frame rejected: {error}; waiting for replay");
+            return Ok(());
+        }
+    };
+    let incoming_session = frame.session_id;
+    let same_session = ordered.session_id() == Some(frame.session_id);
+    let expected = ordered.expected_sequence();
+    let replay =
+        same_session && (frame.sequence < expected || ordered.contains_sequence(frame.sequence));
+    if same_session && !replay && frame.sequence > expected {
+        metrics.observe_gap(frame.session_id, expected, frame.sequence);
+    }
+    metrics.observe_received(&frame, arrival, replay);
+    ordered.push(frame);
+
+    while let Some(frame) = ordered.next_ready().cloned() {
+        let mut last_error_report = Instant::now() - Duration::from_secs(2);
+        loop {
+            match sink.accept(&frame) {
+                Ok(()) => break,
                 Err(error) => {
-                    eprintln!("wire frame rejected: {error}; waiting for replay");
-                    continue;
-                }
-            };
-            let incoming_session = frame.session_id;
-            let same_session = ordered.session_id() == Some(frame.session_id);
-            let expected = ordered.expected_sequence();
-            let replay = same_session
-                && (frame.sequence < expected || ordered.contains_sequence(frame.sequence));
-            if same_session && !replay && frame.sequence > expected {
-                metrics.observe_gap(frame.session_id, expected, frame.sequence);
-            }
-            metrics.observe_received(&frame, arrival, replay);
-            ordered.push(frame);
-
-            while let Some(frame) = ordered.next_ready().cloned() {
-                let mut last_error_report = Instant::now() - Duration::from_secs(2);
-                loop {
-                    match sink.accept(&frame) {
-                        Ok(()) => break,
-                        Err(error) => {
-                            metrics.observe_sink_retry();
-                            if last_error_report.elapsed() >= Duration::from_secs(1) {
-                                eprintln!(
-                                    "OS sink has not accepted seq {}: {}; withholding ACK and retrying",
-                                    frame.sequence, error
-                                );
-                                last_error_report = Instant::now();
-                            }
-                            thread::sleep(Duration::from_millis(1));
-                        }
+                    metrics.observe_sink_retry();
+                    if last_error_report.elapsed() >= Duration::from_secs(1) {
+                        eprintln!(
+                            "OS sink has not accepted seq {}: {}; withholding ACK and retrying",
+                            frame.sequence, error
+                        );
+                        last_error_report = Instant::now();
                     }
+                    thread::sleep(Duration::from_millis(1));
                 }
-                metrics.observe_accepted(&frame, Instant::now());
-                // This commit is the protocol's durability boundary and must
-                // execute in optimized builds. Never hide side effects inside
-                // debug_assert!, which release compilation removes entirely.
-                if !ordered.commit_ready() {
-                    return Err(io::Error::other(format!(
-                        "could not commit accepted sequence {}",
-                        frame.sequence
-                    ))
-                    .into());
-                }
-            }
-
-            let Some(session_id) = ordered.session_id() else {
-                continue;
-            };
-            if session_id != incoming_session {
-                continue;
-            }
-            let acknowledged = ordered.acknowledged_sequence();
-            let control_type = if hello_session != Some(session_id) {
-                hello_session = Some(session_id);
-                CONTROL_HELLO
-            } else {
-                CONTROL_ACK
-            };
-            // Re-send an ACK for duplicates too; the previous host-to-phone
-            // control record may be the part of the exchange that was lost.
-            let outgoing_type = if control_type == CONTROL_HELLO || acknowledged != last_ack {
-                last_ack = acknowledged;
-                control_type
-            } else {
-                CONTROL_ACK
-            };
-            let host_send_nanos = metrics.clock_nanos(Instant::now());
-            let control = encode_control(
-                outgoing_type,
-                lane_count,
-                session_id,
-                acknowledged,
-                RECEIVE_WINDOW,
-                host_send_nanos,
-            );
-            let ack_started = Instant::now();
-            connection.write(&control, 4)?;
-            metrics.observe_ack_write(ack_started.elapsed());
-            if control_type == CONTROL_HELLO {
-                println!(
-                    "Lossless stream ready (session {session_id:016x}, acknowledged={acknowledged:?})"
-                );
-                io::stdout().flush()?;
             }
         }
+        metrics.observe_accepted(&frame, Instant::now());
+        // This commit is the protocol's durability boundary and must execute
+        // in optimized builds. Never hide side effects inside debug_assert!,
+        // which release compilation removes entirely.
+        if !ordered.commit_ready() {
+            return Err(io::Error::other(format!(
+                "could not commit accepted sequence {}",
+                frame.sequence
+            ))
+            .into());
+        }
+    }
+
+    let Some(session_id) = ordered.session_id() else {
+        return Ok(());
+    };
+    if session_id != incoming_session {
+        return Ok(());
+    }
+    let acknowledged = ordered.acknowledged_sequence();
+    let control_type = if *hello_session != Some(session_id) {
+        *hello_session = Some(session_id);
+        CONTROL_HELLO
+    } else {
+        CONTROL_ACK
+    };
+    // Re-send an ACK for duplicates too; the previous host-to-phone control
+    // record may be the part of the exchange that was lost.
+    let outgoing_type = if control_type == CONTROL_HELLO || acknowledged != *last_ack {
+        *last_ack = acknowledged;
+        control_type
+    } else {
+        CONTROL_ACK
+    };
+    let host_send_nanos = metrics.clock_nanos(Instant::now());
+    let control = encode_control(
+        outgoing_type,
+        lane_count,
+        session_id,
+        acknowledged,
+        RECEIVE_WINDOW,
+        host_send_nanos,
+    );
+    let ack_started = Instant::now();
+    connection.write(&control, 4)?;
+    metrics.observe_ack_write(ack_started.elapsed());
+    if control_type == CONTROL_HELLO {
+        println!(
+            "Lossless stream ready (session {session_id:016x}, acknowledged={acknowledged:?})"
+        );
+        io::stdout().flush()?;
     }
     Ok(())
 }

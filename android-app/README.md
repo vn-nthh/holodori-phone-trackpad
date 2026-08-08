@@ -46,8 +46,10 @@ Ethernet MTU. The PC returns fixed-size `HPA4` HELLO and cumulative ACK
 datagrams. Android keeps each encoded frame in an ordered queue until its
 sequence is acknowledged; an unacknowledged frame is replayed after 4 ms.
 
-When the live queue is otherwise empty, an 8 ms acknowledged keepalive lets
-the Windows host sustain a stationary contact above the game's 120 Hz maximum.
+When a contact is active and the live queue is otherwise empty, an 8 ms
+acknowledged keepalive lets the Windows host sustain a stationary contact above
+the game's 120 Hz maximum. Idle sessions send no synthetic touch frames;
+discovery acknowledgements keep the connection alive.
 
 If host control is absent for two seconds, the app drops queued gameplay,
 starts a new session, and sends a session-start `CANCEL`. This prevents old

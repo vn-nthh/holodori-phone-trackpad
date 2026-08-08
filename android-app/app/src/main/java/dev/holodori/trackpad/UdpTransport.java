@@ -40,7 +40,11 @@ final class UdpTransport implements TouchTransport {
     private static final int DISCOVERY_SIZE = 32;
     private static final long DISCOVERY_INTERVAL_NANOS = 500_000_000L;
     private static final long HOST_TIMEOUT_NANOS = 2_000_000_000L;
-    private static final long HEARTBEAT_NANOS = 8_000_000L;
+    // Windows touch injection needs a high-rate refresh while a contact is
+    // stationary. Idle sessions do not need synthetic touch frames; discovery
+    // acknowledgements keep the host liveness check alive without creating a
+    // 125 Hz allocation and network workload for the whole session.
+    private static final long ACTIVE_HEARTBEAT_NANOS = 8_000_000L;
     private static final long RETRANSMIT_NANOS = 4_000_000L;
     private static final long WRITER_READY_TIMEOUT_MILLIS = 1_000;
     private static final int DEFAULT_HOST_WINDOW = 64;
@@ -69,6 +73,12 @@ final class UdpTransport implements TouchTransport {
     private final TouchTransport.Listener listener;
     private final SecureRandom random = new SecureRandom();
     private final CRC32 writerCrc = new CRC32();
+    // The control loop is single-threaded, so this state can be reused for
+    // discovery and ACK validation instead of allocating per datagram.
+    private final CRC32 controlCrc = new CRC32();
+    private final byte[] controlBuffer = new byte[2_048];
+    private final ByteBuffer controlPacket =
+            ByteBuffer.wrap(controlBuffer).order(ByteOrder.LITTLE_ENDIAN);
 
     private volatile int generation;
     private volatile boolean running;
@@ -84,6 +94,7 @@ final class UdpTransport implements TouchTransport {
     private long lastHostSendNanos;
     private long lastControlReceiveNanos;
     private long sessionStartedNanos;
+    private int activeContactCount;
 
     private DatagramSocket socket;
     private Thread controlThread;
@@ -177,6 +188,7 @@ final class UdpTransport implements TouchTransport {
         }
         synchronized (queueLock) {
             if (!running) return;
+            activeContactCount = countActiveContacts(touching, contactCount);
             enqueueFrameLocked(
                     action,
                     actionPointerId,
@@ -260,7 +272,7 @@ final class UdpTransport implements TouchTransport {
     }
 
     private void controlLoop(int sessionGeneration, DatagramSocket sessionSocket) {
-        byte[] control = new byte[2_048];
+        DatagramPacket incoming = new DatagramPacket(controlBuffer, controlBuffer.length);
         long nextDiscoveryNanos = 0;
         try {
             while (isSessionActive(sessionGeneration)) {
@@ -270,7 +282,7 @@ final class UdpTransport implements TouchTransport {
                     nextDiscoveryNanos = nowNanos + DISCOVERY_INTERVAL_NANOS;
                 }
 
-                DatagramPacket incoming = new DatagramPacket(control, control.length);
+                incoming.setLength(controlBuffer.length);
                 try {
                     sessionSocket.receive(incoming);
                 } catch (java.net.SocketTimeoutException ignored) {
@@ -280,11 +292,17 @@ final class UdpTransport implements TouchTransport {
                 int count = incoming.getLength();
                 if (isDiscovery(incoming.getData(), count)) {
                     if (isValidDiscoveryAck(incoming.getData(), count)) {
-                        hostAddress = new InetSocketAddress(
-                                incoming.getAddress(),
-                                incoming.getPort()
-                        );
                         synchronized (queueLock) {
+                            if (!isSessionActive(sessionGeneration)) {
+                                continue;
+                            }
+                            hostAddress = new InetSocketAddress(
+                                    incoming.getAddress(),
+                                    incoming.getPort()
+                            );
+                            // Discovery ACKs are a valid host liveness signal
+                            // while the live queue is idle.
+                            lastControlReceiveNanos = System.nanoTime();
                             queueLock.notifyAll();
                         }
                     }
@@ -294,9 +312,7 @@ final class UdpTransport implements TouchTransport {
                     continue;
                 }
                 if (count == TouchSample.CONTROL_SIZE) {
-                    byte[] exactControl = new byte[TouchSample.CONTROL_SIZE];
-                    System.arraycopy(incoming.getData(), 0, exactControl, 0, exactControl.length);
-                    handleControl(sessionGeneration, exactControl, System.nanoTime());
+                    handleControl(sessionGeneration, incoming.getData(), System.nanoTime());
                 }
             }
         } catch (IOException error) {
@@ -318,9 +334,9 @@ final class UdpTransport implements TouchTransport {
         packet.putLong(sessionId);
         packet.putShort((short) DISCOVERY_PORT);
         packet.putShort((short) 0);
-        CRC32 crc = new CRC32();
-        crc.update(bytes, 0, DISCOVERY_SIZE - 4);
-        packet.putInt((int) crc.getValue());
+        controlCrc.reset();
+        controlCrc.update(bytes, 0, DISCOVERY_SIZE - 4);
+        packet.putInt((int) controlCrc.getValue());
 
         Set<InetAddress> destinations = new HashSet<>();
         Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
@@ -380,13 +396,13 @@ final class UdpTransport implements TouchTransport {
                 || (bytes[5] & 0xFF) != DISCOVERY_ACK) {
             return false;
         }
-        ByteBuffer packet = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
-        if (packet.getLong(8) != discoveryNonce || packet.getLong(16) != sessionId) {
+        if (controlPacket.getLong(8) != discoveryNonce
+                || controlPacket.getLong(16) != sessionId) {
             return false;
         }
-        CRC32 crc = new CRC32();
-        crc.update(bytes, 0, DISCOVERY_SIZE - 4);
-        return (int) crc.getValue() == packet.getInt(DISCOVERY_SIZE - 4);
+        controlCrc.reset();
+        controlCrc.update(bytes, 0, DISCOVERY_SIZE - 4);
+        return (int) controlCrc.getValue() == controlPacket.getInt(DISCOVERY_SIZE - 4);
     }
 
     private void handleControl(
@@ -401,19 +417,19 @@ final class UdpTransport implements TouchTransport {
                 || (control[4] & 0xFF) != TouchSample.PROTOCOL_VERSION) {
             return;
         }
-        CRC32 crc = new CRC32();
-        crc.update(control, 0, TouchSample.CONTROL_SIZE - 4);
-        ByteBuffer packet = ByteBuffer.wrap(control).order(ByteOrder.LITTLE_ENDIAN);
-        if ((int) crc.getValue() != packet.getInt(TouchSample.CONTROL_SIZE - 4)) {
+        controlCrc.reset();
+        controlCrc.update(control, 0, TouchSample.CONTROL_SIZE - 4);
+        if ((int) controlCrc.getValue()
+                != controlPacket.getInt(TouchSample.CONTROL_SIZE - 4)) {
             Log.w(TAG, "Ignoring host control record with invalid CRC");
             return;
         }
         int type = control[5] & 0xFF;
-        int flags = Short.toUnsignedInt(packet.getShort(6));
-        long acknowledgedSession = packet.getLong(8);
-        long acknowledgedSequence = packet.getLong(16);
-        int requestedWindow = packet.getInt(24);
-        long hostSendNanos = packet.getLong(28);
+        int flags = Short.toUnsignedInt(controlPacket.getShort(6));
+        long acknowledgedSession = controlPacket.getLong(8);
+        long acknowledgedSequence = controlPacket.getLong(16);
+        int requestedWindow = controlPacket.getInt(24);
+        long hostSendNanos = controlPacket.getLong(28);
         int requestedLanes = flags & 0xFF;
         boolean becameReady = false;
         int lanesToReport = hostLaneCount;
@@ -461,6 +477,7 @@ final class UdpTransport implements TouchTransport {
     ) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
         writerReady.countDown();
+        DatagramPacket outgoing = new DatagramPacket(new byte[0], 0);
         try {
             while (isSessionActive(sessionGeneration)) {
                 PendingPacket pending;
@@ -480,11 +497,9 @@ final class UdpTransport implements TouchTransport {
                     pending.lastSentNanos = nowNanos;
                     preparePacketForWriteLocked(pending, nowNanos);
                 }
-                sessionSocket.send(new DatagramPacket(
-                        pending.bytes,
-                        pending.bytes.length,
-                        destination
-                ));
+                outgoing.setData(pending.bytes, 0, pending.bytes.length);
+                outgoing.setSocketAddress(destination);
+                sessionSocket.send(outgoing);
             }
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
@@ -523,8 +538,8 @@ final class UdpTransport implements TouchTransport {
     }
 
     private void maybeEnqueueHeartbeatLocked(long nowNanos) {
-        if (!hostReady || !unacknowledged.isEmpty()
-                || nowNanos - lastHeartbeatNanos < HEARTBEAT_NANOS) return;
+        if (!hostReady || activeContactCount == 0 || !unacknowledged.isEmpty()
+                || nowNanos - lastHeartbeatNanos < ACTIVE_HEARTBEAT_NANOS) return;
         lastHeartbeatNanos = nowNanos;
         enqueueFrameLocked(
                 TouchSample.ACTION_HEARTBEAT,
@@ -586,6 +601,7 @@ final class UdpTransport implements TouchTransport {
         hostAddress = null;
         hostWindow = DEFAULT_HOST_WINDOW;
         unacknowledged.clear();
+        activeContactCount = 0;
         resetSessionState();
         long nowNanos = System.nanoTime();
         enqueueFrameLocked(
@@ -642,6 +658,15 @@ final class UdpTransport implements TouchTransport {
         return Math.round(clamped * 65_535f);
     }
 
+    private static int countActiveContacts(boolean[] touching, int contactCount) {
+        if (touching == null) return 0;
+        int active = 0;
+        for (int index = 0; index < contactCount; index++) {
+            if (touching[index]) active++;
+        }
+        return active;
+    }
+
     @Override
     public void close() {
         Thread previousWriter;
@@ -660,6 +685,7 @@ final class UdpTransport implements TouchTransport {
         synchronized (queueLock) {
             hostReady = false;
             hostAddress = null;
+            activeContactCount = 0;
             unacknowledged.clear();
             queueLock.notifyAll();
         }

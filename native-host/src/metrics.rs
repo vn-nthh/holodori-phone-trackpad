@@ -133,6 +133,7 @@ pub struct HostMetrics {
     unique_frames: u64,
     accepted: u64,
     replay_frames: u64,
+    heartbeat_frames: u64,
     recovery_events: u64,
     out_of_order_frames: u64,
     max_reorder_distance: u64,
@@ -165,6 +166,7 @@ impl HostMetrics {
             unique_frames: 0,
             accepted: 0,
             replay_frames: 0,
+            heartbeat_frames: 0,
             recovery_events: 0,
             out_of_order_frames: 0,
             max_reorder_distance: 0,
@@ -201,6 +203,9 @@ impl HostMetrics {
             return;
         }
         self.frames_received += 1;
+        if frame.action == ACTION_HEARTBEAT {
+            self.heartbeat_frames += 1;
+        }
         if let Some(previous) = self.last_arrival {
             self.interarrival
                 .push_duration(arrival.saturating_duration_since(previous));
@@ -460,8 +465,13 @@ impl HostMetrics {
         )?;
         writeln!(
             writer,
-            "frames_received={} unique={} accepted={} pending={} replay={}",
-            self.frames_received, self.unique_frames, self.accepted, pending, self.replay_frames
+            "frames_received={} unique={} accepted={} pending={} replay={} heartbeats={}",
+            self.frames_received,
+            self.unique_frames,
+            self.accepted,
+            pending,
+            self.replay_frames,
+            self.heartbeat_frames
         )?;
         writeln!(
             writer,

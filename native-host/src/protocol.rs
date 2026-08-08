@@ -204,8 +204,25 @@ impl FrameParser {
     /// contaminate the next datagram. Stream-oriented callers continue to use
     /// the `feed` method above.
     pub fn feed_datagram(&mut self, bytes: &[u8]) -> Vec<Result<TouchFrame, ProtocolError>> {
-        self.buffer.clear();
-        self.feed(bytes)
+        vec![self.decode_datagram(bytes)]
+    }
+
+    /// Decode one UDP datagram without allocating a stream-parser result
+    /// vector or copying the datagram into the stream buffer.
+    pub fn decode_datagram(&mut self, bytes: &[u8]) -> Result<TouchFrame, ProtocolError> {
+        if bytes.len() >= FRAME_MAGIC.len() + 1
+            && bytes[..FRAME_MAGIC.len()] == FRAME_MAGIC
+            && bytes[FRAME_MAGIC.len()] != PROTOCOL_VERSION
+        {
+            self.incompatible_version = Some(bytes[FRAME_MAGIC.len()]);
+        }
+        let result = decode_frame(bytes);
+        if result.is_err() {
+            self.invalid_frames += 1;
+        } else {
+            self.seeking_connection_start = false;
+        }
+        result
     }
 
     pub fn take_incompatible_version(&mut self) -> Option<u8> {

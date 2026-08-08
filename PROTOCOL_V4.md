@@ -120,7 +120,9 @@ breakdown needed to locate a rare stall.
 - A fresh host can bootstrap from the oldest replay in an active phone session.
 - After two seconds without host control, Android drops queued gameplay and
   starts a fresh session with a `CANCEL` instead of replaying stale input.
-- An 8 ms acknowledged heartbeat sustains stationary contacts.
+- An 8 ms acknowledged heartbeat sustains active stationary contacts. Idle
+  sessions send no synthetic touch frames; discovery acknowledgements keep the
+  host liveness check alive.
 - A cable removal is a session boundary; old gameplay is not replayed late.
 
 UDP datagrams are atomic at the application boundary. If a datagram is lost,
