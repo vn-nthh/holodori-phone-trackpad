@@ -33,7 +33,7 @@ jobs:
         run: |
           if ($env:GITHUB_REF_NAME -like "*-alpha*") {
             .\packaging\build-experimental.ps1 `
-              -Name "HolodoriLosslessTouch-$env:GITHUB_REF_NAME" `
+              -Name "HolodoriUsbTetheredUdp-$env:GITHUB_REF_NAME" `
               -CargoHome "$env:USERPROFILE\.cargo" `
               -JavaHome $env:JAVA_HOME `
               -AndroidSdk $env:ANDROID_HOME
