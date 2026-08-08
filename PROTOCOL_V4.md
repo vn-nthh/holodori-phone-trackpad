@@ -121,18 +121,22 @@ breakdown needed to locate a rare stall.
   therefore covered without waiting for the replay timer.
 - The host acknowledges only after the selected Windows sink accepts a frame.
 - A fresh host can bootstrap from the oldest replay in an active phone session.
-- During gameplay, 64 ms without host control makes Android drop queued
-  gameplay and start a fresh session with a `CANCEL`; an idle search may wait
-  two seconds. The initial socket-restart backoff is 4 ms.
+- During gameplay, 64 ms without cumulative ACK advancement makes Android drop
+  queued gameplay and start a fresh session with a `CANCEL`. Duplicate, stale,
+  or out-of-range controls do not count as ordered progress. The first active
+  frame starts a fresh response window rather than inheriting an older idle
+  discovery timestamp. An idle search may wait two seconds. The initial
+  socket-restart backoff is 4 ms.
 - An 8 ms acknowledged heartbeat carries the latest complete contact snapshot,
   sustains active stationary contacts, and lets a restarted host reconstruct a
   held contact. Hosts still accept the empty heartbeat emitted by earlier v4
   APKs. Idle sessions send no synthetic touch frames; discovery
   acknowledgements keep the host liveness check alive.
 - A cable removal is a session boundary; old gameplay is not replayed late.
-- If active frame heartbeats disappear for 32 ms, Windows releases injected
-  input, rejects delayed gameplay from that session, and waits for a fresh
-  session-start `CANCEL`.
+- If no ordered frame reaches the Windows OS sink and commits for 32 ms while
+  input is active, Windows releases injected input, rejects delayed gameplay
+  from that session, and waits for a fresh session-start `CANCEL`. Merely
+  decoding duplicates or future frames behind a gap does not refresh liveness.
 - Any host read or acknowledgement-write failure also releases injected input
   before discovery resumes. Android retains the latest contact snapshot across
   its socket restart, including updates received while offline, so a stationary

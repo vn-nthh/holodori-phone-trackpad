@@ -55,9 +55,9 @@ Connection diagnostics:
   - The host can join a phone session after a host restart; a cable replug is
     not required if USB tethering remains enabled.
   - A host read/ACK failure releases injected input before reconnecting. During
-    active play the phone abandons a silent link after 64 ms, starts socket
-    recovery with a 4 ms backoff, and restores still-held contacts from its
-    latest snapshot.
+    active play the phone abandons a link after 64 ms without cumulative ACK
+    progress, starts socket recovery with a 4 ms backoff, and restores
+    still-held contacts from its latest snapshot.
   - HolodoriUsbController.exe collects metrics silently in memory when the
     report option is checked. One report is written under Windows\Logs after
     Stop. Nothing is formatted, sorted, or written mid-play.
@@ -82,8 +82,9 @@ Safety and scope:
     separate WM_POINTER receiver for diagnostics only; the GUI launches keys
     mode.
   - Protocol reliability applies within a connected tethering session. During
-    gameplay, 64 ms without host control makes the phone drop queued gameplay,
-    start a new session, and send CANCEL so old input is not replayed late.
+    gameplay, 64 ms without cumulative ACK advancement makes the phone drop
+    queued gameplay, start a new session, and send CANCEL so old input is not
+    replayed late. Duplicate controls do not hide an ordering stall.
 
 See Docs\EXPERIMENTAL_ARCHITECTURE.md and Docs\PROTOCOL_V4.md for details.
 Verify every packaged file against SHA256SUMS.txt.

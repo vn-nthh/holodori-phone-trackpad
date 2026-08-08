@@ -53,6 +53,7 @@ struct ControlState {
     hello_session: Option<u64>,
     last_ack: Option<u64>,
     lane_count: u8,
+    last_committed_frame: Instant,
 }
 
 enum Sink {
@@ -303,32 +304,33 @@ fn serve_connection(
         hello_session: None,
         last_ack: None,
         lane_count,
+        last_committed_frame: Instant::now(),
     };
-    let mut last_valid_frame = Instant::now();
 
     while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        // Check before every read, not only after a socket timeout. A stream
+        // of valid-but-uncommittable future frames must not keep stale input
+        // held forever behind one missing or rejected sequence.
+        if sink.has_active_input()
+            && control.last_committed_frame.elapsed() >= ACTIVE_INPUT_SILENCE_TIMEOUT
+        {
+            ordered.require_fresh_session();
+            cancel_sink_with_deadline(sink, metrics)?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "phone input made no committed progress for {} ms; released held input and require a fresh session",
+                    ACTIVE_INPUT_SILENCE_TIMEOUT.as_millis()
+                ),
+            )
+            .into());
+        }
         let count = connection.read(&mut read_buffer, 4)?;
         if count == 0 {
-            if sink.has_active_input() && last_valid_frame.elapsed() >= ACTIVE_INPUT_SILENCE_TIMEOUT
-            {
-                ordered.require_fresh_session();
-                cancel_sink_with_deadline(sink, metrics)?;
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "phone input heartbeat absent for {} ms; released held input and require a fresh session",
-                        ACTIVE_INPUT_SILENCE_TIMEOUT.as_millis()
-                    ),
-                )
-                .into());
-            }
             continue;
         }
         let arrival = Instant::now();
         let decoded = parser.decode_datagram(&read_buffer[..count]);
-        if decoded.is_ok() {
-            last_valid_frame = arrival;
-        }
         if let Some(version) = parser.take_incompatible_version() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -439,6 +441,10 @@ fn process_decoded_frame(
             ))
             .into());
         }
+        // A valid or duplicate datagram only proves that bytes are arriving.
+        // Refresh active-input liveness exclusively after the ordered frame
+        // has reached the OS sink and crossed the cumulative-ACK boundary.
+        control_state.last_committed_frame = Instant::now();
     }
 
     let Some(session_id) = ordered.session_id() else {

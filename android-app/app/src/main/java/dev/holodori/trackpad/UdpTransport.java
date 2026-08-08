@@ -120,7 +120,8 @@ final class UdpTransport implements TouchTransport {
     private long lastHeartbeatNanos;
     private long lastHostSendNanos;
     private long lastControlReceiveNanos;
-    private long sessionStartedNanos;
+    private long lastAcknowledgementProgressNanos;
+    private long activePathStartedNanos;
     private int activeContactCount;
     private int retainedContactCount;
 
@@ -227,6 +228,7 @@ final class UdpTransport implements TouchTransport {
             throw new IllegalArgumentException("Unsupported contact count: " + contactCount);
         }
         synchronized (queueLock) {
+            boolean wasActiveDataPath = hasActiveDataPathLocked();
             activeContactCount = countActiveContacts(touching, contactCount);
             retainContactsLocked(
                     contactCount,
@@ -257,6 +259,7 @@ final class UdpTransport implements TouchTransport {
                     touchMajor,
                     touching
             );
+            updateActivePathStateLocked(wasActiveDataPath, System.nanoTime());
             queueLock.notifyAll();
         }
     }
@@ -514,7 +517,9 @@ final class UdpTransport implements TouchTransport {
             }
             lastHostSendNanos = hostSendNanos;
             lastControlReceiveNanos = receiveNanos;
-            acknowledgeLocked(acknowledgedSequence);
+            if (acknowledgeLocked(acknowledgedSequence)) {
+                lastAcknowledgementProgressNanos = receiveNanos;
+            }
             queueLock.notifyAll();
         }
 
@@ -524,12 +529,12 @@ final class UdpTransport implements TouchTransport {
         }
     }
 
-    private void acknowledgeLocked(long acknowledgedSequence) {
-        if (acknowledgedSequence < 0 || acknowledgedSequence <= highestAcknowledged) return;
+    private boolean acknowledgeLocked(long acknowledgedSequence) {
+        if (acknowledgedSequence < 0 || acknowledgedSequence <= highestAcknowledged) return false;
         if (acknowledgedSequence >= nextSequence) {
             Log.w(TAG, "Ignoring ACK beyond the last queued sequence: "
                     + acknowledgedSequence);
-            return;
+            return false;
         }
         highestAcknowledged = acknowledgedSequence;
         while (!unacknowledged.isEmpty()) {
@@ -537,6 +542,8 @@ final class UdpTransport implements TouchTransport {
             if (first.sessionId != sessionId || first.sequence > acknowledgedSequence) break;
             recyclePacketLocked(unacknowledged.removeFirst());
         }
+        if (!hasActiveDataPathLocked()) activePathStartedNanos = 0;
+        return true;
     }
 
     private void writerLoop(
@@ -647,15 +654,19 @@ final class UdpTransport implements TouchTransport {
         synchronized (queueLock) {
             if (!isSessionActive(sessionGeneration)) return;
             long nowNanos = System.nanoTime();
-            boolean activeDataPath = activeContactCount > 0 || hasGameplayPendingLocked();
+            boolean activeDataPath = hasActiveDataPathLocked();
             long hostTimeoutNanos = activeDataPath
                     ? ACTIVE_HOST_TIMEOUT_NANOS
                     : HOST_TIMEOUT_NANOS;
+            long responseWindowStartedNanos = activeDataPath
+                    ? Math.max(lastAcknowledgementProgressNanos, activePathStartedNanos)
+                    : lastControlReceiveNanos;
             boolean hostTimedOut = hostReady
-                    && nowNanos - lastControlReceiveNanos >= hostTimeoutNanos;
+                    && nowNanos - responseWindowStartedNanos >= hostTimeoutNanos;
             boolean discoveryTimedOut = !hostReady
-                    && nowNanos - sessionStartedNanos >= ACTIVE_HOST_TIMEOUT_NANOS
-                    && activeDataPath;
+                    && activeDataPath
+                    && activePathStartedNanos > 0
+                    && nowNanos - activePathStartedNanos >= ACTIVE_HOST_TIMEOUT_NANOS;
             if (hostTimedOut || discoveryTimedOut) {
                 staleFrames = unacknowledged.size();
                 timedOut = true;
@@ -696,6 +707,25 @@ final class UdpTransport implements TouchTransport {
         return newest != null && newest.sequence > 0;
     }
 
+    private boolean hasActiveDataPathLocked() {
+        return activeContactCount > 0 || hasGameplayPendingLocked();
+    }
+
+    private void updateActivePathStateLocked(boolean wasActiveDataPath, long nowNanos) {
+        boolean activeDataPath = hasActiveDataPathLocked();
+        if (!wasActiveDataPath && activeDataPath) {
+            // Idle discovery ACKs may be hundreds of milliseconds old. Give
+            // the first DOWN/UP/CANCEL its own response window instead of
+            // immediately applying the 64 ms gameplay timeout to that stale
+            // idle timestamp. MOVE frames during a hold/slide do not reset
+            // this window; only cumulative ACK advancement proves that the
+            // host committed the ordered stream through its input sink.
+            activePathStartedNanos = nowNanos;
+        } else if (!activeDataPath) {
+            activePathStartedNanos = 0;
+        }
+    }
+
     private void beginSessionLocked() {
         sessionId = nextSessionId();
         discoveryNonce = nextSessionId();
@@ -707,6 +737,7 @@ final class UdpTransport implements TouchTransport {
         clearUnacknowledgedLocked();
         activeContactCount = countActiveContacts(retainedTouching, retainedContactCount);
         resetSessionState();
+        if (activeContactCount > 0) activePathStartedNanos = System.nanoTime();
         long nowNanos = System.nanoTime();
         enqueueFrameLocked(
                 TouchSample.ACTION_CANCEL,
@@ -748,7 +779,8 @@ final class UdpTransport implements TouchTransport {
         lastHeartbeatNanos = 0;
         lastHostSendNanos = 0;
         lastControlReceiveNanos = 0;
-        sessionStartedNanos = System.nanoTime();
+        lastAcknowledgementProgressNanos = 0;
+        activePathStartedNanos = 0;
     }
 
     private static int clampFixed(float value) {

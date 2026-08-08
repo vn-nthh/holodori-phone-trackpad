@@ -57,15 +57,20 @@ each boundary.
   complete contact snapshot, so a restarted host can reconstruct a hold.
 
 A physical cable removal is a visible session boundary, not packet jitter.
-Windows releases active injected input after 32 ms without valid frame
-heartbeats and refuses delayed gameplay until a fresh session-start `CANCEL`.
+Windows releases active injected input after 32 ms without an ordered frame
+being accepted by the OS sink and committed. Valid duplicates or future frames
+behind an ordering hole do not mask that stall. Windows then refuses delayed
+gameplay until a fresh session-start `CANCEL`.
 Protocol v4 does not replay old gameplay after a multi-second reconnect
 because doing so would create late notes. During gameplay Android starts a
-fresh session after 64 ms without host control, drops queued gameplay, and
-sends a new session-start `CANCEL`; idle discovery retains the two-second
-timeout. Socket restart begins with a 4 ms backoff. The latest complete contact
-snapshot survives that restart, so a still-held finger is reconstructed after
-the fresh `CANCEL` without replaying stale actions.
+fresh session after 64 ms without cumulative ACK advancement, drops queued
+gameplay, and sends a new session-start `CANCEL`; duplicate or invalid ACKs do
+not count as progress. The first gameplay frame receives a fresh response
+window so an older idle-discovery timestamp cannot cause an immediate false
+timeout. Idle discovery retains the two-second timeout. Socket restart begins
+with a 4 ms backoff. The latest complete contact snapshot survives that restart,
+so a still-held finger is reconstructed after the fresh `CANCEL` without
+replaying stale actions.
 
 ## Windows Touch proof
 

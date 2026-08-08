@@ -53,11 +53,13 @@ the Windows host sustain a stationary contact above the game's 120 Hz maximum
 and reconstruct a hold after a quick host restart. Idle sessions send no
 synthetic touch frames; discovery acknowledgements keep the connection alive.
 
-If host control is absent for 64 ms during gameplay, the app drops queued
-gameplay, starts a new session after an initial 4 ms backoff, and sends a
-session-start `CANCEL`. Idle discovery keeps the two-second timeout. The latest
-contact snapshot continues to update during the socket restart, so a
-stationary finger is restored in the fresh session without replaying stale
+If cumulative ACK progress is absent for 64 ms during gameplay, the app drops
+queued gameplay, starts a new session after an initial 4 ms backoff, and sends
+a session-start `CANCEL`. Duplicate or invalid ACKs cannot hide an ordering
+stall, and the first active frame receives a fresh response window instead of
+inheriting an old idle timestamp. Idle discovery keeps the two-second timeout.
+The latest contact snapshot continues to update during the socket restart, so
+a stationary finger is restored in the fresh session without replaying stale
 transitions.
 
 See [`../PROTOCOL_V4.md`](../PROTOCOL_V4.md) for the byte layout and
