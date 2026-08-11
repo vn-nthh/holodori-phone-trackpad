@@ -31,9 +31,15 @@ jobs:
       - name: Build distributable packages
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF_NAME -like "*-alpha*") {
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -like "0.4*") {
+            $releaseName = if ($env:GITHUB_REF_TYPE -eq "tag") {
+              $env:GITHUB_REF_NAME
+            } else {
+              "v$version"
+            }
             .\packaging\build-experimental.ps1 `
-              -Name "HolodoriUsbTetheredUdp-$env:GITHUB_REF_NAME" `
+              -Name "HolodoriUsbTetheredUdp-$releaseName" `
               -CargoHome "$env:USERPROFILE\.cargo" `
               -JavaHome $env:JAVA_HOME `
               -AndroidSdk $env:ANDROID_HOME
@@ -44,7 +50,9 @@ jobs:
       - name: Run PC tests
         if: ${{ !contains(github.ref_name, '-alpha') }}
         shell: pwsh
-        run: .\.venv-package\Scripts\python.exe -m unittest discover -s tests -v
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          python -m unittest discover -s tests -v
 
       - uses: actions/upload-artifact@v4
         with:
@@ -59,7 +67,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $notesFile = Join-Path "packaging\release-notes" "$env:GITHUB_REF_NAME.md"
-          if ($env:GITHUB_REF_NAME -like "*-alpha*") {
+          $isPrerelease = $env:GITHUB_REF_NAME -like "*-alpha*" -or `
+            $env:GITHUB_REF_NAME -like "v0.4*"
+          if ($isPrerelease) {
             $assets = Get-ChildItem "release" -File |
               Where-Object { $_.Extension -in @(".zip", ".apk") } |
               ForEach-Object FullName
