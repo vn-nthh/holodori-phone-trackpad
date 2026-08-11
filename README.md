@@ -24,8 +24,6 @@ You need:
 - an Android phone with USB tethering;
 - one USB data cable.
 
-You do not need USB debugging, root access, ADB, or a custom Windows driver.
-
 ## Quick start
 
 1. Download and unzip the Windows app.
