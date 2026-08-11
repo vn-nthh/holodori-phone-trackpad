@@ -1,4 +1,4 @@
-# Holodori Phone Trackpad
+# Doritrack
 
 Use an Android phone as a six-lane touch controller for
 [hololive Dreams (holodori)](https://store.steampowered.com/app/4282500/hololive_Dreams/)
