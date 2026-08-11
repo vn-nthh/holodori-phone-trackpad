@@ -12,8 +12,7 @@ touches into lane keys. The default keys are `S D F J K L`.
 
 ## Download
 
-The current version is **v0.4.1**. It is a prerelease for testing with real
-phones, cables, and PCs.
+The current version is **v0.4.1**.
 
 - [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-windows-x64.zip)
 - [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-android.apk)

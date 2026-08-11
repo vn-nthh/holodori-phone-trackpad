@@ -67,8 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $notesFile = Join-Path "packaging\release-notes" "$env:GITHUB_REF_NAME.md"
-          $isPrerelease = $env:GITHUB_REF_NAME -like "*-alpha*" -or `
-            $env:GITHUB_REF_NAME -like "v0.4*"
+          $isPrerelease = $env:GITHUB_REF_NAME -like "*-alpha*"
           if ($isPrerelease) {
             $assets = Get-ChildItem "release" -File |
               Where-Object { $_.Extension -in @(".zip", ".apk") } |
