@@ -59,11 +59,12 @@ Create a distributable experimental bundle with:
 ```
 
 The current experimental bundle is published on the
-[v0.4.0 GitHub release](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.0).
-The Windows launcher is a small Tauri app; it shows only lane keys, the
-latency-report preference, and Start/Stop. Protocol-v4 discovery uses its fixed
-UDP port `42825`. The launcher uses the system WebView2 runtime on supported
-Windows 10/11, while the latency-critical host remains native Rust.
+[v0.4.1 GitHub release](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.1).
+The Windows launcher is a small Tauri app; it shows lane keys, a latency-report
+preference, an optional local-only tethering preference, and Start/Stop.
+Protocol-v4 discovery uses its fixed UDP port `42825`. The launcher uses the
+system WebView2 runtime on supported Windows 10/11, while the latency-critical
+host remains native Rust.
 
 ## Download v0.2.1
 
@@ -82,6 +83,13 @@ Version 0.2.1 fixes fast slides occasionally skipping a lane and makes diagnosti
 4. Open `HolodoriUsbController.exe` and press **Start**.
 5. Open the Android app, move and resize the phone's play zone, then lock it.
 6. Start the game and play. Press **Stop** in the Windows app when finished.
+
+If other PC applications must not use the phone as an internet gateway, check
+**Stop the PC from using the phone's internet** before pressing **Start**. This
+temporarily removes the Android/RNDIS adapter's default routes while the native
+host is running and restores them during a normal Stop. If Windows needs
+elevation, use the **Restart as admin** action that appears below the
+checkbox.
 
 The PC touch overlay is off by default. Use the **with Touch Overlay** shortcut or run with `--overlay` to enable it.
 
@@ -137,6 +145,8 @@ python -m unittest discover -s tests
 - If Windows Firewall blocks discovery, permit inbound UDP `42825` for
   `holodori-native-host.exe` on the USB-tethered network only.
 - Run as Administrator if an elevated game ignores key presses.
+- Use **Restart as admin** when Windows requires elevation for the
+  local-only tethering option.
 - Start the host after Windows creates the RNDIS/Ethernet adapter.
 - If the APK will not update from 0.2.0, uninstall the old phone app once and reinstall.
 

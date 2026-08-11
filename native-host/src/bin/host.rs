@@ -14,6 +14,7 @@ use holodori_native_host::protocol::{
     CONTROL_ACK, CONTROL_HELLO, FrameParser, OrderedFrames, ProtocolError, TouchFrame,
     encode_control,
 };
+use holodori_native_host::tether_policy::TetherRoutePolicy;
 use holodori_native_host::touch::{PROBE_WINDOW_TITLE, TouchInjector, TouchTarget};
 use windows_sys::Win32::System::Console::{
     CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
@@ -47,6 +48,7 @@ struct Options {
     metrics: bool,
     metrics_file: Option<PathBuf>,
     warning_budget_ms: f64,
+    local_only_tether: bool,
 }
 
 struct ControlState {
@@ -123,6 +125,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let lane_count = sink.lane_count(&options);
     let udp = UdpHost::bind(options.udp_port)?;
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms);
+    let mut tether_policy = options.local_only_tether.then(TetherRoutePolicy::new);
     // The launcher owns the host's stdin and sends `q` for a graceful stop.
     // Keep this available even when the user turns report writing off so the
     // UI never has to terminate the process and risk held input.
@@ -144,6 +147,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut ordered = OrderedFrames::new();
     let mut parser = FrameParser::default();
     while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        if let Some(policy) = tether_policy.as_mut() {
+            policy.refresh().map_err(|error| {
+                let hint = if error.kind() == io::ErrorKind::PermissionDenied {
+                    "; run the launcher as administrator"
+                } else {
+                    ""
+                };
+                format!("could not enable local-only USB tethering: {error}{hint}")
+            })?;
+        }
         if sink.has_active_input() {
             match cancel_sink_with_deadline(&mut sink, &mut metrics) {
                 Ok(()) => {}
@@ -169,6 +182,19 @@ fn run() -> Result<(), Box<dyn Error>> {
                 continue;
             }
         };
+        if let Some(policy) = tether_policy.as_mut() {
+            policy.protect_peer(connection.peer()).map_err(|error| {
+                let hint = if error.kind() == io::ErrorKind::PermissionDenied {
+                    "; run the launcher as administrator"
+                } else {
+                    ""
+                };
+                format!(
+                    "could not protect the USB tether route for {}: {error}{hint}",
+                    connection.peer(),
+                )
+            })?;
+        }
         println!("UDP link ready from {}", connection.peer());
         io::stdout().flush()?;
         parser.begin_connection();
@@ -217,8 +243,11 @@ fn run() -> Result<(), Box<dyn Error>> {
     } else {
         Ok(())
     };
-    SHUTDOWN_COMPLETE.store(true, Ordering::Release);
     release_result?;
+    if let Some(policy) = tether_policy.as_mut() {
+        policy.restore()?;
+    }
+    SHUTDOWN_COMPLETE.store(true, Ordering::Release);
     report_result.map_err(Into::into)
 }
 
@@ -545,6 +574,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         metrics: false,
         metrics_file: None,
         warning_budget_ms: 1_000.0 / 120.0,
+        local_only_tether: false,
     };
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -591,6 +621,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                     arguments.next().ok_or("--metrics-file needs a path")?,
                 ));
             }
+            "--local-only-tether" => options.local_only_tether = true,
             "--warn-ms" => {
                 let milliseconds: f64 = arguments
                     .next()
@@ -605,7 +636,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 println!(
                     "holodori-native-host [--mode touch|keys|record] \\\n\
                      [--lanes s,d,f,j,k,l] [--target-title TITLE] [--no-probe] \\\n\
-                     [--udp-port 42825] [--metrics] \
+                     [--udp-port 42825] [--metrics] [--local-only-tether] \
                      [--metrics-file PATH] [--warn-ms 8.333]"
                 );
                 std::process::exit(0);

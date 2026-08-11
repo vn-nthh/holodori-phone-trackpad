@@ -1,12 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
-use tauri::{Manager, State};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use tauri::{AppHandle, Manager, State};
 
 const DEFAULT_WARNING_BUDGET_MS: &str = "8.333";
 const USB_TETHER_UDP_PORT: u16 = 42_825;
@@ -16,6 +17,10 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 struct HostState {
     child: Option<Child>,
     stopping: bool,
+    local_only_tether: bool,
+    last_message: Option<String>,
+    native_error: Arc<Mutex<Option<String>>>,
+    stderr_reader: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,6 +35,7 @@ fn start_host(
     state: State<'_, Mutex<HostState>>,
     keys: String,
     metrics: bool,
+    local_only_tether: bool,
 ) -> Result<HostStatus, String> {
     let mut state = state
         .lock()
@@ -40,7 +46,8 @@ fn start_host(
     }
 
     let host = find_host().ok_or_else(|| {
-        "The Windows controller files are missing. Re-extract the portable bundle.".to_owned()
+        "The Windows controller is missing. Build native-host or re-extract the portable bundle."
+            .to_owned()
     })?;
     UdpSocket::bind(("0.0.0.0", USB_TETHER_UDP_PORT)).map_err(|error| {
         format!(
@@ -52,7 +59,7 @@ fn start_host(
         .current_dir(host.parent().unwrap_or_else(|| std::path::Path::new(".")))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .arg("--mode")
         .arg("keys")
         .arg("--lanes")
@@ -64,6 +71,9 @@ fn start_host(
     if metrics {
         command.arg("--metrics");
     }
+    if local_only_tether {
+        command.arg("--local-only-tether");
+    }
 
     #[cfg(windows)]
     {
@@ -71,13 +81,128 @@ fn start_host(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    state.child = Some(
-        command
-            .spawn()
-            .map_err(|error| format!("Could not start the controller: {error}"))?,
-    );
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start the controller: {error}"))?;
+    let native_error = Arc::new(Mutex::new(None));
+    let stderr_reader = child.stderr.take().map(|stderr| {
+        let native_error = Arc::clone(&native_error);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Some(message) = line.strip_prefix("fatal: ") {
+                    if let Ok(mut latest) = native_error.lock() {
+                        *latest = Some(message.to_owned());
+                    }
+                }
+            }
+        })
+    });
+
+    state.child = Some(child);
     state.stopping = false;
+    state.local_only_tether = local_only_tether;
+    state.last_message = None;
+    state.native_error = native_error;
+    state.stderr_reader = stderr_reader;
     Ok(status(&state, "Running"))
+}
+
+#[tauri::command]
+fn restart_as_admin(app: AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Could not find the launcher executable: {error}"))?;
+        let file: Vec<u16> = executable
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb: Vec<u16> = OsStr::new("runas")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if (result as usize) <= 32 {
+            return Err(
+                "Could not restart as admin. Approve the UAC prompt and try again.".to_owned(),
+            );
+        }
+        app.exit(0);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Err("Restart as admin is only available on Windows.".to_owned())
+    }
+}
+
+#[tauri::command]
+fn launcher_is_elevated() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        use std::mem::size_of;
+        use std::ptr::null_mut;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::Security::{
+            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        let mut token: HANDLE = null_mut();
+        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        if opened == 0 {
+            return Err(format!(
+                "Could not inspect launcher elevation: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut returned_length = 0_u32;
+        let queried = unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+                size_of::<TOKEN_ELEVATION>() as u32,
+                &mut returned_length,
+            )
+        };
+        let query_error = if queried == 0 {
+            Some(std::io::Error::last_os_error())
+        } else {
+            None
+        };
+        unsafe { CloseHandle(token) };
+
+        if let Some(error) = query_error {
+            Err(format!("Could not inspect launcher elevation: {error}"))
+        } else {
+            Ok(elevation.TokenIsElevated != 0)
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
 }
 
 #[tauri::command]
@@ -87,7 +212,11 @@ fn stop_host(state: State<'_, Mutex<HostState>>) -> Result<HostStatus, String> {
         .map_err(|_| "controller state is unavailable")?;
     reap_child(&mut state)?;
     let Some(child) = state.child.as_mut() else {
-        return Ok(status(&state, "Ready"));
+        let message = state
+            .last_message
+            .take()
+            .unwrap_or_else(|| "Ready".to_owned());
+        return Ok(status(&state, &message));
     };
     if let Some(stdin) = child.stdin.as_mut() {
         stdin
@@ -113,7 +242,11 @@ fn host_status(state: State<'_, Mutex<HostState>>) -> Result<HostStatus, String>
         };
         Ok(status(&state, message))
     } else {
-        Ok(status(&state, "Ready"))
+        let message = state
+            .last_message
+            .take()
+            .unwrap_or_else(|| "Ready".to_owned());
+        Ok(status(&state, &message))
     }
 }
 
@@ -129,25 +262,70 @@ fn reap_child(state: &mut HostState) -> Result<(), String> {
     let Some(child) = state.child.as_mut() else {
         return Ok(());
     };
-    if child
+    if let Some(exit_status) = child
         .try_wait()
         .map_err(|error| format!("Could not check controller state: {error}"))?
-        .is_some()
     {
         state.child = None;
+        if let Some(reader) = state.stderr_reader.take() {
+            let _ = reader.join();
+        }
+        let native_error = state
+            .native_error
+            .lock()
+            .ok()
+            .and_then(|message| message.clone());
+        if !exit_status.success() {
+            state.last_message = Some(
+                native_error
+                    .map(user_facing_native_error)
+                    .unwrap_or_else(|| {
+                        if state.local_only_tether && state.stopping {
+                            "The controller did not stop cleanly while local-only tethering was enabled."
+                                .to_owned()
+                        } else if state.stopping {
+                            "The controller did not stop cleanly. Try starting it again.".to_owned()
+                        } else {
+                            "The controller stopped unexpectedly. Try starting it again.".to_owned()
+                        }
+                    }),
+            );
+        }
         state.stopping = false;
+        state.local_only_tether = false;
+        state.native_error = Arc::new(Mutex::new(None));
     }
     Ok(())
 }
 
+fn user_facing_native_error(message: String) -> String {
+    if message.contains("recognized Android/RNDIS adapter") {
+        "The phone was discovered outside USB tethering. Enable USB tethering and try again."
+            .to_owned()
+    } else {
+        message
+    }
+}
+
 fn find_host() -> Option<PathBuf> {
     let base = std::env::current_exe().ok()?.parent()?.to_owned();
-    [
+    let mut candidates = vec![
         base.join("Windows").join("holodori-native-host.exe"),
         base.join("holodori-native-host.exe"),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
+    ];
+    if let Some(workspace) = base
+        .ancestors()
+        .find(|path| path.join("native-host").join("Cargo.toml").is_file())
+    {
+        let native_target = workspace.join("native-host").join("target");
+        candidates.push(
+            native_target
+                .join("release")
+                .join("holodori-native-host.exe"),
+        );
+        candidates.push(native_target.join("debug").join("holodori-native-host.exe"));
+    }
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn main() {
@@ -160,7 +338,13 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![start_host, stop_host, host_status])
+        .invoke_handler(tauri::generate_handler![
+            start_host,
+            stop_host,
+            host_status,
+            restart_as_admin,
+            launcher_is_elevated
+        ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let _ = window

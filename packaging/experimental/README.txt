@@ -20,10 +20,14 @@ Start the Windows app:
   2. Set the lane keys if needed. Protocol-v4 discovery uses UDP port 42825.
   3. Leave "Save latency report when stopped" checked unless you do not want
      a report.
-  4. Press Start.
-  5. Unlock the phone and open the APK.
-  6. Arrange and lock the play zone, then tap, hold, chord, and slide.
-  7. Press Stop in the app when finished. Held input is released safely.
+  4. Optional: check "Stop the PC from using the phone's internet" to remove
+     the phone's temporary internet gateway while Holodori is running. Use
+     "Restart as admin" if Windows needs elevation.
+  5. Press Start.
+  6. Unlock the phone and open the APK.
+  7. Arrange and lock the play zone, then tap, hold, chord, and slide.
+  8. Press Stop in the app when finished. Held input is released safely and
+     the original tether routes are restored.
 
 Portable Windows app:
   - The folder is self-contained for Holodori: no installer, ADB, root,

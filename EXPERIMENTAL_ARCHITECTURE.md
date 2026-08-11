@@ -34,6 +34,21 @@ and the phone then sends HPT4 frames to that host address. No fixed phone IP
 is assumed. Discovery repeats while the link is not acknowledged, allowing a
 host restart without toggling USB tethering.
 
+## Optional local-only tethering
+
+The Tauri launcher exposes **Stop the PC from using the phone's internet** as an
+opt-in setting. When enabled, the native host recognizes the Android/RNDIS
+adapter, records its current default routes, disables future default-route
+installation on that adapter, and removes its active default routes. The
+connected phone subnet remains available for the Holodori UDP link, while the
+PC's other applications continue using their normal interfaces.
+
+The policy is scoped to the native host session. A normal **Stop**, launcher
+close, or console shutdown restores the saved interface setting and routes.
+Windows protects route-table and interface-policy changes, so the launcher
+offers **Restart as admin** for this option. With the checkbox cleared,
+the host does not modify Windows routing.
+
 Every HPT4 frame is one datagram and is smaller than the Ethernet MTU. HPA4
 HELLO and ACK records are also one datagram each. A malformed datagram cannot
 be concatenated with a later frame; the host resets the datagram parser at
