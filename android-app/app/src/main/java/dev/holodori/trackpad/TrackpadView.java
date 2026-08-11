@@ -8,6 +8,7 @@ import android.graphics.Paint;
 import android.graphics.PointF;
 import android.graphics.RectF;
 import android.os.Build;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -35,8 +36,6 @@ final class TrackpadView extends View {
     private static final int EDIT_SIDE = 2;
     private static final int EDIT_CORNERS = 3;
     private static final int MAX_POINTERS = 256;
-    private static final long PLAY_VISUAL_FRAME_NANOS = 33_333_333L;
-
     private final TouchTransport transport;
     private final SharedPreferences preferences;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -44,9 +43,6 @@ final class TrackpadView extends View {
     private final RectF drawZone = new RectF();
     private final RectF lockBody = new RectF();
     private final RectF lockShackle = new RectF();
-    private final boolean[] activeTouchVisible = new boolean[MAX_POINTERS];
-    private final float[] activeTouchX = new float[MAX_POINTERS];
-    private final float[] activeTouchY = new float[MAX_POINTERS];
     private final boolean[] sentPointers = new boolean[MAX_POINTERS];
     private final int[] framePointerIds =
             new int[TouchSample.MAX_CONTACTS];
@@ -78,8 +74,6 @@ final class TrackpadView extends View {
     private float transformSin;
     private float inverseZonePixelWidth = 1f;
     private float inverseZonePixelHeight = 1f;
-    private long lastPlayVisualNanos;
-
     private int editType = EDIT_NONE;
     private int editHandle = HANDLE_NONE;
     private int gesturePointerA = -1;
@@ -118,12 +112,30 @@ final class TrackpadView extends View {
     void setConnectionStatus(boolean connected, String status) {
         this.connected = connected;
         this.status = status;
-        invalidate();
+        if (!locked) invalidate();
     }
 
     void setLaneCount(int laneCount) {
         this.laneCount = Math.max(1, Math.min(16, laneCount));
-        invalidate();
+        if (!locked) invalidate();
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Keep touchscreen pointer delivery unbuffered before the first
+            // DOWN. This API accepts source classes rather than full sources.
+            requestUnbufferedDispatch(InputDevice.SOURCE_CLASS_POINTER);
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            requestUnbufferedDispatch(InputDevice.SOURCE_CLASS_NONE);
+        }
+        super.onDetachedFromWindow();
     }
 
     @Override
@@ -141,6 +153,12 @@ final class TrackpadView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
+        if (locked) {
+            // Locked play is deliberately renderless. The only retained
+            // affordance is the control that returns to edit mode.
+            drawLockButton(canvas);
+            return;
+        }
         float width = getWidth();
         float height = getHeight();
         float centerX = zoneX * width;
@@ -193,41 +211,7 @@ final class TrackpadView extends View {
         }
         canvas.restore();
 
-        if (locked) {
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(3));
-            for (int pointerId = 0; pointerId < MAX_POINTERS; pointerId++) {
-                if (!activeTouchVisible[pointerId]) {
-                    continue;
-                }
-                paint.setColor(withAlpha(ACCENT, 205));
-                canvas.drawCircle(
-                        activeTouchX[pointerId],
-                        activeTouchY[pointerId],
-                        dp(18),
-                        paint
-                );
-                paint.setStyle(Paint.Style.FILL);
-                canvas.drawCircle(
-                        activeTouchX[pointerId],
-                        activeTouchY[pointerId],
-                        dp(5),
-                        paint
-                );
-                paint.setStyle(Paint.Style.STROKE);
-            }
-        }
-
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(withAlpha(BACKGROUND, 230));
-        canvas.drawCircle(lockButton.centerX(), lockButton.centerY(),
-                lockButton.width() / 2, paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2));
-        paint.setColor(locked ? CONNECTED : ACCENT);
-        canvas.drawCircle(lockButton.centerX(), lockButton.centerY(),
-                lockButton.width() / 2 - dp(1), paint);
-        drawLockIcon(canvas, lockButton.centerX(), lockButton.centerY(), locked);
+        drawLockButton(canvas);
 
         paint.setStyle(Paint.Style.FILL);
         paint.setTextAlign(Paint.Align.LEFT);
@@ -246,6 +230,19 @@ final class TrackpadView extends View {
                     paint
             );
         }
+    }
+
+    private void drawLockButton(Canvas canvas) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(withAlpha(BACKGROUND, 230));
+        canvas.drawCircle(lockButton.centerX(), lockButton.centerY(),
+                lockButton.width() / 2, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2));
+        paint.setColor(locked ? CONNECTED : ACCENT);
+        canvas.drawCircle(lockButton.centerX(), lockButton.centerY(),
+                lockButton.width() / 2 - dp(1), paint);
+        drawLockIcon(canvas, lockButton.centerX(), lockButton.centerY(), locked);
     }
 
     private void drawEditorHandles(Canvas canvas, RectF zone) {
@@ -321,7 +318,8 @@ final class TrackpadView extends View {
         int action = event.getActionMasked();
         int actionIndex = event.getActionIndex();
         int pointerId = event.getPointerId(actionIndex);
-        if (action == MotionEvent.ACTION_DOWN) {
+        if (action == MotionEvent.ACTION_DOWN
+                && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             // Ask InputDispatcher not to align MOVE delivery to display frames.
             requestUnbufferedDispatch(event);
         }
@@ -338,7 +336,7 @@ final class TrackpadView extends View {
             handleEditorTouch(event, action, actionIndex, pointerId);
             updateZoneTransform();
         }
-        invalidateForTouch(action, callbackNanos);
+        invalidateForTouch();
         return true;
     }
 
@@ -380,9 +378,6 @@ final class TrackpadView extends View {
                     pointerId,
                     callbackNanos
             );
-            int normalizedPointerId = pointerId & 0xFF;
-            activeTouchVisible[normalizedPointerId] = false;
-            sentPointers[normalizedPointerId] = false;
         } else if (action == MotionEvent.ACTION_CANCEL) {
             cancelAll(eventTimeNanos(event));
         }
@@ -403,7 +398,7 @@ final class TrackpadView extends View {
                 callbackNanos,
                 true
         );
-        updateCurrentVisualState(event, action, actionPointerId);
+        updateSentPointerState(event, action, actionPointerId);
     }
 
     private void sendMoveFrames(
@@ -434,7 +429,6 @@ final class TrackpadView extends View {
                 callbackNanos,
                 true
         );
-        updateCurrentVisualState(event, TouchSample.ACTION_MOVE, -1);
     }
 
     private void sendFrame(
@@ -509,7 +503,7 @@ final class TrackpadView extends View {
         );
     }
 
-    private void updateCurrentVisualState(
+    private void updateSentPointerState(
             MotionEvent event,
             int action,
             int actionPointerId
@@ -526,9 +520,6 @@ final class TrackpadView extends View {
                     action == TouchSample.ACTION_UP
                             && rawPointerId == actionPointerId
             );
-            activeTouchX[pointerId] = event.getX(pointerIndex);
-            activeTouchY[pointerId] = event.getY(pointerIndex);
-            activeTouchVisible[pointerId] = touching;
             sentPointers[pointerId] = touching;
         }
     }
@@ -925,20 +916,11 @@ final class TrackpadView extends View {
         inverseZonePixelHeight = 1f / Math.max(1f, zoneHeight * height);
     }
 
-    private void invalidateForTouch(int action, long callbackNanos) {
-        if (!locked || action != MotionEvent.ACTION_MOVE) {
-            lastPlayVisualNanos = callbackNanos;
-            invalidate();
-            return;
-        }
-        if (callbackNanos - lastPlayVisualNanos >= PLAY_VISUAL_FRAME_NANOS) {
-            lastPlayVisualNanos = callbackNanos;
-            invalidate();
-        }
+    private void invalidateForTouch() {
+        if (!locked) invalidate();
     }
 
-    private void clearPlayTouches() {
-        Arrays.fill(activeTouchVisible, false);
+    private void clearSentPointers() {
         Arrays.fill(sentPointers, false);
     }
 
@@ -958,9 +940,10 @@ final class TrackpadView extends View {
         }
         this.locked = locked;
         clearEdit();
-        clearPlayTouches();
+        clearSentPointers();
         updateZoneTransform();
         saveZone();
+        invalidate();
     }
 
     private void cancelAll(long eventNanos) {
@@ -981,7 +964,7 @@ final class TrackpadView extends View {
                     frameTouching
             );
         }
-        clearPlayTouches();
+        clearSentPointers();
     }
 
     private void saveZone() {
