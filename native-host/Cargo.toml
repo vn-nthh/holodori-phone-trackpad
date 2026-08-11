@@ -1,0 +1,39 @@
+[package]
+name = "holodori-native-host"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Console",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[lib]
+name = "holodori_native_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "holodori-native-host"
+path = "src/bin/host.rs"
+
+[[bin]]
+name = "holodori-touch-probe"
+path = "src/bin/probe.rs"
+
+[[bin]]
+name = "holodori-touch-smoke"
+path = "src/bin/smoke.rs"

@@ -16,6 +16,7 @@ android-app/.gradle/
 android-app/app/build/
 android-app/local.properties
 .android-sdk/
+native-host/target/
 
 # Packaging
 .venv-package/

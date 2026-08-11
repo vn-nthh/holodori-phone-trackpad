@@ -1,0 +1,25 @@
+[package]
+name = "holodori-usb-controller"
+version = "0.4.1"
+description = "Holodori USB controller launcher"
+authors = ["Holodori"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.5.0", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2.5.0", features = [] }
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -8,6 +8,7 @@ import android.graphics.Paint;
 import android.graphics.PointF;
 import android.graphics.RectF;
 import android.os.Build;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -35,20 +36,26 @@ final class TrackpadView extends View {
     private static final int EDIT_SIDE = 2;
     private static final int EDIT_CORNERS = 3;
     private static final int MAX_POINTERS = 256;
-    private static final long PLAY_VISUAL_FRAME_NANOS = 33_333_333L;
-
-    private final UsbAccessoryTransport transport;
+    private final TouchTransport transport;
     private final SharedPreferences preferences;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF lockButton = new RectF();
     private final RectF drawZone = new RectF();
     private final RectF lockBody = new RectF();
     private final RectF lockShackle = new RectF();
-    private final boolean[] activeTouchVisible = new boolean[MAX_POINTERS];
-    private final float[] activeTouchX = new float[MAX_POINTERS];
-    private final float[] activeTouchY = new float[MAX_POINTERS];
     private final boolean[] sentPointers = new boolean[MAX_POINTERS];
-    private final int[] lastTouchLane = new int[MAX_POINTERS];
+    private final int[] framePointerIds =
+            new int[TouchSample.MAX_CONTACTS];
+    private final float[] frameX =
+            new float[TouchSample.MAX_CONTACTS];
+    private final float[] frameY =
+            new float[TouchSample.MAX_CONTACTS];
+    private final float[] framePressure =
+            new float[TouchSample.MAX_CONTACTS];
+    private final float[] frameTouchMajor =
+            new float[TouchSample.MAX_CONTACTS];
+    private final boolean[] frameTouching =
+            new boolean[TouchSample.MAX_CONTACTS];
     private final String[] laneLabels = new String[16];
 
     private float zoneX = 0.50f;
@@ -67,8 +74,6 @@ final class TrackpadView extends View {
     private float transformSin;
     private float inverseZonePixelWidth = 1f;
     private float inverseZonePixelHeight = 1f;
-    private long lastPlayVisualNanos;
-
     private int editType = EDIT_NONE;
     private int editHandle = HANDLE_NONE;
     private int gesturePointerA = -1;
@@ -88,7 +93,7 @@ final class TrackpadView extends View {
     private final PointF lastCornerB = new PointF();
     private final PointF startMidpoint = new PointF();
 
-    TrackpadView(Context context, UsbAccessoryTransport transport) {
+    TrackpadView(Context context, TouchTransport transport) {
         super(context);
         this.transport = transport;
         preferences = context.getSharedPreferences("trackpad", Context.MODE_PRIVATE);
@@ -100,7 +105,6 @@ final class TrackpadView extends View {
         for (int lane = 0; lane < laneLabels.length; lane++) {
             laneLabels[lane] = Integer.toString(lane + 1);
         }
-        Arrays.fill(lastTouchLane, -1);
         setBackgroundColor(BACKGROUND);
         setSystemUiVisibility(SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
@@ -108,13 +112,30 @@ final class TrackpadView extends View {
     void setConnectionStatus(boolean connected, String status) {
         this.connected = connected;
         this.status = status;
-        invalidate();
+        if (!locked) invalidate();
     }
 
     void setLaneCount(int laneCount) {
         this.laneCount = Math.max(1, Math.min(16, laneCount));
-        Arrays.fill(lastTouchLane, -1);
-        invalidate();
+        if (!locked) invalidate();
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Keep touchscreen pointer delivery unbuffered before the first
+            // DOWN. This API accepts source classes rather than full sources.
+            requestUnbufferedDispatch(InputDevice.SOURCE_CLASS_POINTER);
+        }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            requestUnbufferedDispatch(InputDevice.SOURCE_CLASS_NONE);
+        }
+        super.onDetachedFromWindow();
     }
 
     @Override
@@ -132,6 +153,12 @@ final class TrackpadView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
+        if (locked) {
+            // Locked play is deliberately renderless. The only retained
+            // affordance is the control that returns to edit mode.
+            drawLockButton(canvas);
+            return;
+        }
         float width = getWidth();
         float height = getHeight();
         float centerX = zoneX * width;
@@ -184,41 +211,7 @@ final class TrackpadView extends View {
         }
         canvas.restore();
 
-        if (locked) {
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(3));
-            for (int pointerId = 0; pointerId < MAX_POINTERS; pointerId++) {
-                if (!activeTouchVisible[pointerId]) {
-                    continue;
-                }
-                paint.setColor(withAlpha(ACCENT, 205));
-                canvas.drawCircle(
-                        activeTouchX[pointerId],
-                        activeTouchY[pointerId],
-                        dp(18),
-                        paint
-                );
-                paint.setStyle(Paint.Style.FILL);
-                canvas.drawCircle(
-                        activeTouchX[pointerId],
-                        activeTouchY[pointerId],
-                        dp(5),
-                        paint
-                );
-                paint.setStyle(Paint.Style.STROKE);
-            }
-        }
-
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(withAlpha(BACKGROUND, 230));
-        canvas.drawCircle(lockButton.centerX(), lockButton.centerY(),
-                lockButton.width() / 2, paint);
-        paint.setStyle(Paint.Style.STROKE);
-        paint.setStrokeWidth(dp(2));
-        paint.setColor(locked ? CONNECTED : ACCENT);
-        canvas.drawCircle(lockButton.centerX(), lockButton.centerY(),
-                lockButton.width() / 2 - dp(1), paint);
-        drawLockIcon(canvas, lockButton.centerX(), lockButton.centerY(), locked);
+        drawLockButton(canvas);
 
         paint.setStyle(Paint.Style.FILL);
         paint.setTextAlign(Paint.Align.LEFT);
@@ -237,6 +230,19 @@ final class TrackpadView extends View {
                     paint
             );
         }
+    }
+
+    private void drawLockButton(Canvas canvas) {
+        paint.setStyle(Paint.Style.FILL);
+        paint.setColor(withAlpha(BACKGROUND, 230));
+        canvas.drawCircle(lockButton.centerX(), lockButton.centerY(),
+                lockButton.width() / 2, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(dp(2));
+        paint.setColor(locked ? CONNECTED : ACCENT);
+        canvas.drawCircle(lockButton.centerX(), lockButton.centerY(),
+                lockButton.width() / 2 - dp(1), paint);
+        drawLockIcon(canvas, lockButton.centerX(), lockButton.centerY(), locked);
     }
 
     private void drawEditorHandles(Canvas canvas, RectF zone) {
@@ -312,7 +318,8 @@ final class TrackpadView extends View {
         int action = event.getActionMasked();
         int actionIndex = event.getActionIndex();
         int pointerId = event.getPointerId(actionIndex);
-        if (action == MotionEvent.ACTION_DOWN) {
+        if (action == MotionEvent.ACTION_DOWN
+                && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             // Ask InputDispatcher not to align MOVE delivery to display frames.
             requestUnbufferedDispatch(event);
         }
@@ -329,7 +336,7 @@ final class TrackpadView extends View {
             handleEditorTouch(event, action, actionIndex, pointerId);
             updateZoneTransform();
         }
-        invalidateForTouch(action, callbackNanos);
+        invalidateForTouch();
         return true;
     }
 
@@ -346,14 +353,14 @@ final class TrackpadView extends View {
                 lockPointerId = pointerId;
                 return;
             }
-            sendPointer(
+            sendCurrentFrame(
                     event,
-                    actionIndex,
                     TouchSample.ACTION_DOWN,
+                    pointerId,
                     callbackNanos
             );
         } else if (action == MotionEvent.ACTION_MOVE) {
-            sendMoveBatch(event, callbackNanos);
+            sendMoveFrames(event, callbackNanos);
         } else if (action == MotionEvent.ACTION_UP
                 || action == MotionEvent.ACTION_POINTER_UP) {
             if (pointerId == lockPointerId) {
@@ -365,54 +372,142 @@ final class TrackpadView extends View {
                 lockPointerId = -1;
                 return;
             }
-            sendPointer(
+            sendCurrentFrame(
                     event,
-                    actionIndex,
                     TouchSample.ACTION_UP,
+                    pointerId,
                     callbackNanos
             );
-            int normalizedPointerId = pointerId & 0xFF;
-            activeTouchVisible[normalizedPointerId] = false;
-            sentPointers[normalizedPointerId] = false;
-            lastTouchLane[normalizedPointerId] = -1;
         } else if (action == MotionEvent.ACTION_CANCEL) {
             cancelAll(eventTimeNanos(event));
         }
     }
 
-    private void sendPointer(
+    private void sendCurrentFrame(
             MotionEvent event,
-            int index,
             int action,
+            int actionPointerId,
             long callbackNanos
     ) {
-        sendPointerCoordinates(
-                event.getPointerId(index) & 0xFF,
-                event.getX(index),
-                event.getY(index),
+        sendFrame(
+                event,
+                -1,
                 action,
+                actionPointerId,
                 eventTimeNanos(event),
                 callbackNanos,
+                true
+        );
+        updateSentPointerState(event, action, actionPointerId);
+    }
+
+    private void sendMoveFrames(
+            MotionEvent event, long callbackNanos
+    ) {
+        int historySize = event.getHistorySize();
+        // MotionEvent history is ordered by sample time. Make time the outer
+        // loop so every wire record is a complete chronological contact frame.
+        for (int historyIndex = 0;
+             historyIndex < historySize;
+             historyIndex++) {
+            sendFrame(
+                    event,
+                    historyIndex,
+                    TouchSample.ACTION_MOVE,
+                    0,
+                    historicalEventTimeNanos(event, historyIndex),
+                    callbackNanos,
+                    false
+            );
+        }
+        sendFrame(
+                event,
+                -1,
+                TouchSample.ACTION_MOVE,
                 0,
-                0,
-                0,
+                eventTimeNanos(event),
+                callbackNanos,
                 true
         );
     }
 
-    private void sendMoveBatch(
-            MotionEvent event, long callbackNanos
+    private void sendFrame(
+            MotionEvent event,
+            int historyIndex,
+            int action,
+            int actionPointerId,
+            long sampleEventNanos,
+            long callbackNanos,
+            boolean current
     ) {
-        int historySize = event.getHistorySize();
-        long currentEventNanos = eventTimeNanos(event);
-        long historySpanNanos = historySize > 0
-                ? Math.max(
-                        0,
-                        currentEventNanos
-                                - historicalEventTimeNanos(event, 0)
-                )
-                : 0;
+        int contactCount = 0;
+        float sizeScale = Math.max(1f, Math.max(getWidth(), getHeight()));
+        for (int pointerIndex = 0;
+             pointerIndex < event.getPointerCount();
+             pointerIndex++) {
+            int rawPointerId = event.getPointerId(pointerIndex);
+            if (rawPointerId == lockPointerId) {
+                continue;
+            }
+            if (contactCount >= TouchSample.MAX_CONTACTS) {
+                throw new IllegalStateException(
+                        "Touch controller exceeded "
+                                + TouchSample.MAX_CONTACTS
+                                + " contacts"
+                );
+            }
+            float screenX = current
+                    ? event.getX(pointerIndex)
+                    : event.getHistoricalX(pointerIndex, historyIndex);
+            float screenY = current
+                    ? event.getY(pointerIndex)
+                    : event.getHistoricalY(pointerIndex, historyIndex);
+            float pressure = current
+                    ? event.getPressure(pointerIndex)
+                    : event.getHistoricalPressure(pointerIndex, historyIndex);
+            float major = current
+                    ? event.getTouchMajor(pointerIndex)
+                    : event.getHistoricalTouchMajor(pointerIndex, historyIndex);
+            float dx = screenX - transformCenterX;
+            float dy = screenY - transformCenterY;
+            framePointerIds[contactCount] = rawPointerId & 0xFF;
+            frameX[contactCount] = (
+                    dx * transformCos - dy * transformSin
+            ) * inverseZonePixelWidth + 0.5f;
+            frameY[contactCount] = (
+                    dx * transformSin + dy * transformCos
+            ) * inverseZonePixelHeight + 0.5f;
+            framePressure[contactCount] = pressure;
+            frameTouchMajor[contactCount] = major / sizeScale;
+            frameTouching[contactCount] = !(
+                    action == TouchSample.ACTION_UP
+                            && rawPointerId == actionPointerId
+            );
+            contactCount++;
+        }
 
+        transport.offerFrame(
+                action,
+                actionPointerId,
+                true,
+                sampleEventNanos,
+                callbackNanos,
+                !current,
+                contactCount,
+                framePointerIds,
+                frameX,
+                frameY,
+                framePressure,
+                frameTouchMajor,
+                frameTouching
+        );
+    }
+
+    private void updateSentPointerState(
+            MotionEvent event,
+            int action,
+            int actionPointerId
+    ) {
         for (int pointerIndex = 0;
              pointerIndex < event.getPointerCount();
              pointerIndex++) {
@@ -421,141 +516,12 @@ final class TrackpadView extends View {
                 continue;
             }
             int pointerId = rawPointerId & 0xFF;
-            int crossedLaneCount = countLaneCrossings(
-                    event,
-                    pointerIndex,
-                    lastTouchLane[pointerId]
+            boolean touching = !(
+                    action == TouchSample.ACTION_UP
+                            && rawPointerId == actionPointerId
             );
-            for (int historyIndex = 0;
-                 historyIndex < historySize;
-                 historyIndex++) {
-                sendPointerCoordinates(
-                        pointerId,
-                        event.getHistoricalX(
-                                pointerIndex, historyIndex
-                        ),
-                        event.getHistoricalY(
-                                pointerIndex, historyIndex
-                        ),
-                        TouchSample.ACTION_MOVE,
-                        historicalEventTimeNanos(
-                                event, historyIndex
-                        ),
-                        callbackNanos,
-                        historySize,
-                        historySpanNanos,
-                        crossedLaneCount,
-                        false
-                );
-            }
-            sendPointerCoordinates(
-                    pointerId,
-                    event.getX(pointerIndex),
-                    event.getY(pointerIndex),
-                    TouchSample.ACTION_MOVE,
-                    currentEventNanos,
-                    callbackNanos,
-                    historySize,
-                    historySpanNanos,
-                    crossedLaneCount,
-                    true
-            );
+            sentPointers[pointerId] = touching;
         }
-    }
-
-    private int countLaneCrossings(
-            MotionEvent event, int pointerIndex, int previousLane
-    ) {
-        int crossings = 0;
-        int historySize = event.getHistorySize();
-        for (int historyIndex = 0;
-             historyIndex < historySize;
-             historyIndex++) {
-            int lane = laneForScreenPoint(
-                    event.getHistoricalX(pointerIndex, historyIndex),
-                    event.getHistoricalY(pointerIndex, historyIndex)
-            );
-            if (previousLane >= 0) {
-                crossings += Math.abs(lane - previousLane);
-            }
-            previousLane = lane;
-        }
-        int lane = laneForScreenPoint(
-                event.getX(pointerIndex), event.getY(pointerIndex)
-        );
-        if (previousLane >= 0) {
-            crossings += Math.abs(lane - previousLane);
-        }
-        return crossings;
-    }
-
-    private int laneForScreenPoint(float screenX, float screenY) {
-        float localX = localXForScreenPoint(screenX, screenY);
-        return Math.max(
-                0,
-                Math.min(laneCount - 1, (int) (localX * laneCount))
-        );
-    }
-
-    private float localXForScreenPoint(float screenX, float screenY) {
-        float dx = screenX - transformCenterX;
-        float dy = screenY - transformCenterY;
-        return (
-                dx * transformCos - dy * transformSin
-        ) * inverseZonePixelWidth + 0.5f;
-    }
-
-    private void sendPointerCoordinates(
-            int pointerId,
-            float screenX,
-            float screenY,
-            int action,
-            long sampleEventNanos,
-            long callbackNanos,
-            int historySize,
-            long historySpanNanos,
-            int crossedLaneCount,
-            boolean updateVisual
-    ) {
-        float dx = screenX - transformCenterX;
-        float dy = screenY - transformCenterY;
-        float localX = (
-                dx * transformCos - dy * transformSin
-        ) * inverseZonePixelWidth + 0.5f;
-        float localY = (
-                dx * transformSin + dy * transformCos
-        ) * inverseZonePixelHeight + 0.5f;
-
-        // Keep all visualization work after the latency-critical enqueue.
-        transport.offer(
-                action,
-                pointerId,
-                localX,
-                localY,
-                true,
-                true,
-                sampleEventNanos,
-                callbackNanos,
-                historySize,
-                historySpanNanos,
-                crossedLaneCount
-        );
-        lastTouchLane[pointerId] = action == TouchSample.ACTION_UP
-                ? -1
-                : Math.max(
-                        0,
-                        Math.min(
-                                laneCount - 1,
-                                (int) (localX * laneCount)
-                        )
-                );
-        if (updateVisual) {
-            activeTouchX[pointerId] = screenX;
-            activeTouchY[pointerId] = screenY;
-            activeTouchVisible[pointerId] =
-                    action != TouchSample.ACTION_UP;
-        }
-        sentPointers[pointerId] = action != TouchSample.ACTION_UP;
     }
 
     private void handleEditorTouch(
@@ -950,22 +916,12 @@ final class TrackpadView extends View {
         inverseZonePixelHeight = 1f / Math.max(1f, zoneHeight * height);
     }
 
-    private void invalidateForTouch(int action, long callbackNanos) {
-        if (!locked || action != MotionEvent.ACTION_MOVE) {
-            lastPlayVisualNanos = callbackNanos;
-            invalidate();
-            return;
-        }
-        if (callbackNanos - lastPlayVisualNanos >= PLAY_VISUAL_FRAME_NANOS) {
-            lastPlayVisualNanos = callbackNanos;
-            invalidate();
-        }
+    private void invalidateForTouch() {
+        if (!locked) invalidate();
     }
 
-    private void clearPlayTouches() {
-        Arrays.fill(activeTouchVisible, false);
+    private void clearSentPointers() {
         Arrays.fill(sentPointers, false);
-        Arrays.fill(lastTouchLane, -1);
     }
 
     private boolean hasSentPointers() {
@@ -984,28 +940,31 @@ final class TrackpadView extends View {
         }
         this.locked = locked;
         clearEdit();
-        clearPlayTouches();
+        clearSentPointers();
         updateZoneTransform();
         saveZone();
+        invalidate();
     }
 
     private void cancelAll(long eventNanos) {
         if (hasSentPointers()) {
-            transport.offer(
+            transport.offerFrame(
                     TouchSample.ACTION_CANCEL,
                     0,
-                    0,
-                    0,
-                    false,
                     false,
                     eventNanos,
                     System.nanoTime(),
+                    false,
                     0,
-                    0,
-                    0
+                    framePointerIds,
+                    frameX,
+                    frameY,
+                    framePressure,
+                    frameTouchMajor,
+                    frameTouching
             );
         }
-        clearPlayTouches();
+        clearSentPointers();
     }
 
     private void saveZone() {

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>doritrack</title>
+  </head>
+  <body>
+    <main class="shell" aria-labelledby="app-title">
+      <header class="header">
+        <h1 id="app-title">doritrack</h1>
+      </header>
+
+      <form id="settings-form" class="settings">
+        <div class="field">
+          <span id="keys-label" class="field-label">Keys</span>
+          <div id="key-slots" class="key-slots" role="group" aria-labelledby="keys-label">
+            <input class="key-slot" type="text" value="s" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 1 key" autofocus />
+            <input class="key-slot" type="text" value="d" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 2 key" />
+            <input class="key-slot" type="text" value="f" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 3 key" />
+            <input class="key-slot" type="text" value="j" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 4 key" />
+            <input class="key-slot" type="text" value="k" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 5 key" />
+            <input class="key-slot" type="text" value="l" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 6 key" />
+          </div>
+        </div>
+
+        <label class="check-row">
+          <input id="metrics" type="checkbox" />
+          <span>Save latency report when stopped</span>
+        </label>
+
+        <div class="tether-options">
+          <label class="check-row check-row-feature">
+            <input id="local-only-tether" type="checkbox" />
+            <span>Stop the PC from using the phone's internet</span>
+          </label>
+          <div id="admin-action" class="admin-action" hidden>
+            <span>Needs admin elevation.</span>
+            <button id="restart-as-admin" class="secondary-action" type="button">
+              Restart as admin
+            </button>
+          </div>
+        </div>
+
+        <p id="status" class="status" role="status" aria-live="polite">Ready</p>
+
+        <div class="actions">
+          <button id="start" class="primary" type="submit">Start</button>
+          <button id="stop" type="button" disabled>Stop</button>
+        </div>
+      </form>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
