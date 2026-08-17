@@ -1,0 +1,99 @@
+name: Build Linux (experimental)
+
+# Coverage-only workflow for the Linux port: tests, lints, and a build of the
+# release bundle. It intentionally does not publish anything -- release
+# publishing for Linux is the maintainer's call, not something this workflow
+# should decide for them. See .github/workflows/windows-release.yml for the
+# existing (unmodified) Windows release pipeline.
+
+on:
+  # Push and pull_request triggers are disabled: this workflow is an unsolicited
+  # Linux-port contribution and should not consume the repository's CI minutes
+  # unless the maintainer decides to enable it.
+  # push:
+  #   branches: [master]
+  # pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2 system prerequisites for Linux. Package names confirmed
+      # against https://v2.tauri.app/start/prerequisites/ and the official
+      # GitHub Actions recipe at https://v2.tauri.app/distribute/pipelines/github/,
+      # both of which install libwebkit2gtk-4.1-dev (not the Tauri-v1-era
+      # 4.0 package, which no longer exists on Ubuntu 24.04). The 4.1
+      # package is also available on Ubuntu 22.04 (Tauri's own CI matrix
+      # uses it there), so this list needs no per-runner-version branching
+      # even though ubuntu-latest has moved from 22.04 to 24.04.
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev
+
+      # Default-feature native-host tests are intentionally NOT a separate
+      # step here: packaging/build-linux.sh (run later in this workflow)
+      # runs `cargo test --all-targets` on native-host itself as part of
+      # assembling the release bundle, so a standalone copy of that step
+      # would just double this workflow's runtime for no extra coverage.
+
+      - name: Clippy native-host
+        run: cargo clippy --manifest-path native-host/Cargo.toml --all-targets -- -D warnings
+
+      # linux-tether-policy gates the experimental netlink route-policy
+      # implementation (see README.md's Linux setup section): it is not
+      # built by build-linux.sh's default-feature build, so it needs its
+      # own coverage here or it could silently rot.
+      - name: Test native-host (linux-tether-policy feature)
+        run: cargo test --manifest-path native-host/Cargo.toml --all-targets --features linux-tether-policy
+
+      - name: Clippy native-host (linux-tether-policy feature)
+        run: cargo clippy --manifest-path native-host/Cargo.toml --all-targets --features linux-tether-policy -- -D warnings
+
+      # This step (and every Rust step below it) is NOT redundant with
+      # build-linux.sh despite also appearing there: `tauri::generate_context!`
+      # hard-fails the Rust compile itself if `frontendDist` ("../dist", see
+      # tauri.conf.json) does not exist on disk, and dist/ is gitignored, so
+      # every one of the Rust steps below needs a real dist/ to even compile,
+      # not just to pass richer checks. Confirmed locally: with tauri-launcher/
+      # dist/ removed, `cargo build --manifest-path tauri-launcher/src-tauri/
+      # Cargo.toml --all-targets` fails with "proc macro panicked: The
+      # `frontendDist` configuration is set to `../dist` but this path doesn't
+      # exist" -- not a lint or test failure, a hard compile error. So unlike
+      # the native-host test step above, this one stays.
+      - name: Build the launcher frontend
+        working-directory: tauri-launcher
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Build the launcher (Rust)
+        run: cargo build --manifest-path tauri-launcher/src-tauri/Cargo.toml --all-targets
+
+      - name: Clippy the launcher
+        run: cargo clippy --manifest-path tauri-launcher/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Build the Linux release bundle
+        run: packaging/build-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HolodoriPhoneTrackpad-linux-${{ github.sha }}
+          path: release/*
+          if-no-files-found: error
