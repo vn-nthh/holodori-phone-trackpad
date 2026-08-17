@@ -1,4 +1,5 @@
 import ctypes
+import sys
 import unittest
 from unittest import mock
 
@@ -139,6 +140,7 @@ class WinUsbReadPipelineTests(unittest.TestCase):
         self.assertEqual(len(api.kernel.closed), 3)
         self.assertEqual(len(api.winusb.freed), 1)
 
+    @unittest.skipUnless(sys.platform == "win32", "ctypes.get_last_error is Windows-only")
     def test_pending_read_timeout_keeps_request_posted(self):
         api, connection = self.make_connection(
             read_depth=2,
