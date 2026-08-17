@@ -5,6 +5,11 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+
+[features]
+linux-tether-policy = []
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -21,6 +26,14 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Input_Pointer",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# 0.2.189 is the resolved/verified floor: `libc::uinput_setup`, `libc::Ioctl`,
+# and the `RTA_*`/`RT_TABLE_MAIN` netlink constants this crate uses were
+# confirmed present in the vendored source at 0.2.189 (this workspace's
+# locked version, per `tether_policy/linux.rs`'s module comment). A bare
+# "0.2" would also accept much older 0.2.x releases that were not checked.
+libc = "0.2.189"
 
 [lib]
 name = "holodori_native_host"

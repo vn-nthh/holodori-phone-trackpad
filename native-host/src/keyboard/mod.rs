@@ -1,13 +1,17 @@
 use std::collections::BTreeMap;
 use std::io;
-use std::mem::size_of;
-
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
-    MAPVK_VK_TO_VSC, MapVirtualKeyW, SendInput,
-};
 
 use crate::protocol::{ACTION_CANCEL, ACTION_HEARTBEAT, TouchFrame};
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::KeySink;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::KeySink;
 
 #[derive(Clone)]
 struct KeyboardState {
@@ -28,8 +32,10 @@ struct PendingFrame {
     applied: usize,
 }
 
+/// The lane-key bridge. Holds the platform-specific OS input sink plus the
+/// shared, platform-neutral slide/hold/chord interpretation state.
 pub struct KeyboardSink {
-    scan_codes: Vec<u16>,
+    sink: KeySink,
     state: KeyboardState,
     pressed: Vec<bool>,
     pending: Option<PendingFrame>,
@@ -43,31 +49,21 @@ impl KeyboardSink {
                 "at least one lane key is required",
             ));
         }
-        let mut scan_codes = Vec::with_capacity(keys.len());
-        for key in keys {
-            let vk = parse_virtual_key(key)?;
-            let scan_code = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
-            if scan_code == 0 || scan_code > u32::from(u16::MAX) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("cannot map lane key {key:?} to a scan code"),
-                ));
-            }
-            scan_codes.push(scan_code as u16);
-        }
+        let sink = KeySink::new(keys)?;
+        let lanes = sink.lane_count();
         Ok(Self {
             state: KeyboardState {
                 pointer_lanes: BTreeMap::new(),
-                lane_holds: vec![0; scan_codes.len()],
+                lane_holds: vec![0; lanes],
             },
-            pressed: vec![false; scan_codes.len()],
+            pressed: vec![false; lanes],
             pending: None,
-            scan_codes,
+            sink,
         })
     }
 
     pub fn lane_count(&self) -> u8 {
-        self.scan_codes.len().min(u8::MAX as usize) as u8
+        self.pressed.len().min(u8::MAX as usize) as u8
     }
 
     pub fn has_active_input(&self) -> bool {
@@ -93,7 +89,7 @@ impl KeyboardSink {
         }
 
         if self.pending.is_none() {
-            let (next_state, changes) = self.plan(frame);
+            let (next_state, changes) = plan(&self.state, self.pressed.len(), frame);
             self.pending = Some(PendingFrame {
                 sequence: frame.sequence,
                 next_state,
@@ -102,16 +98,13 @@ impl KeyboardSink {
             });
         }
 
-        loop {
-            let Some(pending) = &self.pending else {
-                break;
-            };
+        while let Some(pending) = &self.pending {
             let Some(change) = pending.changes.get(pending.applied).copied() else {
                 let completed = self.pending.take().unwrap();
                 self.state = completed.next_state;
                 break;
             };
-            send_one(key_input(self.scan_codes[change.lane], change.down))?;
+            self.sink.emit(change.lane, change.down)?;
             self.pressed[change.lane] = change.down;
             self.pending.as_mut().unwrap().applied += 1;
         }
@@ -123,7 +116,7 @@ impl KeyboardSink {
         let mut first_error = None;
         for lane in 0..self.pressed.len() {
             if self.pressed[lane] {
-                match send_one(key_input(self.scan_codes[lane], false)) {
+                match self.sink.emit(lane, false) {
                     Ok(()) => self.pressed[lane] = false,
                     Err(error) if first_error.is_none() => first_error = Some(error),
                     Err(_) => {}
@@ -137,44 +130,6 @@ impl KeyboardSink {
         self.state.lane_holds.fill(0);
         Ok(())
     }
-
-    fn plan(&self, frame: &TouchFrame) -> (KeyboardState, Vec<KeyChange>) {
-        let mut next = self.state.clone();
-        let mut changes = Vec::new();
-
-        let mut contacts = frame.contacts.iter().collect::<Vec<_>>();
-        contacts.sort_by_key(|contact| {
-            if contact.pointer_id == frame.action_pointer_id {
-                0
-            } else {
-                1
-            }
-        });
-        for contact in contacts {
-            if contact.touching() && contact.inside() {
-                let lane = lane_for(contact.x, self.scan_codes.len());
-                move_pointer(contact.pointer_id, lane, &mut next, &mut changes);
-            } else {
-                release_pointer(contact.pointer_id, &mut next, &mut changes);
-            }
-        }
-
-        let present: Vec<u8> = frame
-            .contacts
-            .iter()
-            .map(|contact| contact.pointer_id)
-            .collect();
-        let missing: Vec<u8> = next
-            .pointer_lanes
-            .keys()
-            .filter(|pointer_id| !present.contains(pointer_id))
-            .copied()
-            .collect();
-        for pointer_id in missing {
-            release_pointer(pointer_id, &mut next, &mut changes);
-        }
-        (next, changes)
-    }
 }
 
 impl Drop for KeyboardSink {
@@ -187,6 +142,48 @@ impl Drop for KeyboardSink {
             std::thread::yield_now();
         }
     }
+}
+
+/// Interprets one wire frame against the current lane-hold state, producing
+/// the next state and the ordered key-down/key-up changes needed to reach it.
+/// Kept free of any OS sink so unit tests can exercise slide/hold/chord logic
+/// without opening a real input device.
+fn plan(state: &KeyboardState, lane_count: usize, frame: &TouchFrame) -> (KeyboardState, Vec<KeyChange>) {
+    let mut next = state.clone();
+    let mut changes = Vec::new();
+
+    let mut contacts = frame.contacts.iter().collect::<Vec<_>>();
+    contacts.sort_by_key(|contact| {
+        if contact.pointer_id == frame.action_pointer_id {
+            0
+        } else {
+            1
+        }
+    });
+    for contact in contacts {
+        if contact.touching() && contact.inside() {
+            let lane = lane_for(contact.x, lane_count);
+            move_pointer(contact.pointer_id, lane, &mut next, &mut changes);
+        } else {
+            release_pointer(contact.pointer_id, &mut next, &mut changes);
+        }
+    }
+
+    let present: Vec<u8> = frame
+        .contacts
+        .iter()
+        .map(|contact| contact.pointer_id)
+        .collect();
+    let missing: Vec<u8> = next
+        .pointer_lanes
+        .keys()
+        .filter(|pointer_id| !present.contains(pointer_id))
+        .copied()
+        .collect();
+    for pointer_id in missing {
+        release_pointer(pointer_id, &mut next, &mut changes);
+    }
+    (next, changes)
 }
 
 fn move_pointer(
@@ -241,43 +238,6 @@ fn lane_for(x: f32, lane_count: usize) -> usize {
     ((x.clamp(0.0, 1.0) * lane_count as f32).floor() as usize).min(lane_count - 1)
 }
 
-fn parse_virtual_key(key: &str) -> io::Result<u16> {
-    let mut chars = key.chars();
-    let Some(character) = chars.next() else {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty key"));
-    };
-    if chars.next().is_some() || !character.is_ascii_alphanumeric() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("lane key {key:?} must be one ASCII letter or digit"),
-        ));
-    }
-    Ok(character.to_ascii_uppercase() as u16)
-}
-
-fn key_input(scan_code: u16, down: bool) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: 0,
-                wScan: scan_code,
-                dwFlags: KEYEVENTF_SCANCODE | if down { 0 } else { KEYEVENTF_KEYUP },
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
-}
-
-fn send_one(event: INPUT) -> io::Result<()> {
-    let accepted = unsafe { SendInput(1, &event, size_of::<INPUT>() as i32) };
-    if accepted != 1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,12 +255,15 @@ mod tests {
 
     #[test]
     fn slide_plan_emits_every_crossed_lane_without_a_gap() {
-        let mut sink = test_sink(4);
-        let (down_state, down) = sink.plan(&touch_frame(ACTION_DOWN, 0.05));
+        let mut state = KeyboardState {
+            pointer_lanes: BTreeMap::new(),
+            lane_holds: vec![0; 4],
+        };
+        let (down_state, down) = plan(&state, 4, &touch_frame(ACTION_DOWN, 0.05));
         assert_changes(&down, &[(0, true)]);
-        sink.state = down_state;
+        state = down_state;
 
-        let (_, slide) = sink.plan(&touch_frame(ACTION_MOVE, 0.99));
+        let (_, slide) = plan(&state, 4, &touch_frame(ACTION_MOVE, 0.99));
         assert_changes(
             &slide,
             &[
@@ -312,18 +275,6 @@ mod tests {
                 (2, false),
             ],
         );
-    }
-
-    fn test_sink(lanes: usize) -> KeyboardSink {
-        KeyboardSink {
-            scan_codes: vec![1; lanes],
-            state: KeyboardState {
-                pointer_lanes: BTreeMap::new(),
-                lane_holds: vec![0; lanes],
-            },
-            pressed: vec![false; lanes],
-            pending: None,
-        }
     }
 
     fn touch_frame(action: u8, x: f32) -> TouchFrame {

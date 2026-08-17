@@ -2,10 +2,13 @@ use crate::protocol::{
     DISCOVERY_ACK, DISCOVERY_HELLO, FRAME_MAGIC, decode_discovery, encode_discovery,
 };
 use std::io;
+#[cfg(windows)]
 use std::mem::size_of;
 use std::net::{SocketAddr, UdpSocket};
+#[cfg(windows)]
 use std::os::windows::io::AsRawSocket;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
     SO_SNDTIMEO, SOCKET, SOCKET_ERROR, SOL_SOCKET, WSAGetLastError, setsockopt,
 };
@@ -169,6 +172,7 @@ fn send_redundant(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr) -> io::Res
     }
 }
 
+#[cfg(windows)]
 fn set_write_timeout(socket: &UdpSocket, timeout: Duration) -> io::Result<()> {
     let timeout_ms = timeout.as_millis().clamp(1, u128::from(u32::MAX)) as u32;
     let result = unsafe {
@@ -185,6 +189,11 @@ fn set_write_timeout(socket: &UdpSocket, timeout: Duration) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+#[cfg(not(windows))]
+fn set_write_timeout(socket: &UdpSocket, timeout: Duration) -> io::Result<()> {
+    socket.set_write_timeout(Some(timeout))
 }
 
 #[cfg(test)]
