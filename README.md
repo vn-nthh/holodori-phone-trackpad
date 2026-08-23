@@ -1,3 +1,5 @@
+[English](README.md) | [日本語](README.ja.md)
+
 # Doritrack
 
 Use an Android phone as a six-lane touch controller for

@@ -1,0 +1,124 @@
+[English](README.md) | 日本語
+
+# Doritrack
+
+Android スマホを、Windows 上の [hololive Dreams (holodori)](https://store.steampowered.com/app/4282500/hololive_Dreams/) 向け 6 レーン・タッチコントローラーとして使えます。
+
+スマホでタップ、ホールド、スライド、同時押しができます。Windows アプリがそれらのタッチをレーン用キーに変換します。デフォルトのキーは `S D F J K L` です。
+
+> これは非公式のコミュニティ製ツールです。COVER Corp.、hololive production、QualiArts とは一切関係ありません。
+
+## ダウンロード
+
+現在のバージョンは **v0.4.1** です。
+
+- [Windows アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-windows-x64.zip)
+- [Android アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-android.apk)
+- [リリースノート](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.1)
+
+必要なもの:
+
+- Windows 10 または 11 の PC
+- USB テザリング対応の Android スマホ
+- USB データ通信対応ケーブル 1 本
+
+## クイックスタート
+
+1. Windows アプリをダウンロードして解凍します。
+2. Android に APK をインストールします。
+3. USB データケーブルでスマホを PC に接続します。
+4. スマホの設定で **USB テザリング** をオンにします。
+5. Windows で `HolodoriUsbController.exe` を開きます。
+6. 必要なら 6 つのレーンキーを変更し、**Start** を押します。
+7. Android アプリを開きます。
+8. プレイエリアを移動・リサイズ・回転してからロックします。
+9. ゲームを起動してプレイします。
+10. 終わったら Windows アプリで **Stop** を押します。
+
+USB テザリングの設定名と場所は機種によって違います。だいたい **ネットワーク**、**接続**、**ホットスポット**、**テザリング** のいずれかの下にあります。
+
+## できること
+
+- タップは短いキー入力になります。
+- ホールドは指を離すまで押し続けます。
+- スライドは通過したレーンを順に入力します。
+- 複数の指で別レーンを同時にホールドできます。
+- 切断時は押しっぱなしのキーを解放するので、キーが固まりません。
+- レーンキーは Windows アプリで変更できます。
+
+## USB 接続の仕組み
+
+USB テザリングがスマホと PC のあいだに小さなネットワークを作ります。Android アプリはそのリンク上で UDP を使ってタッチ更新を送ります。セットアップが簡単で、専用の USB ドライバは不要です。
+
+各更新には番号が付き、破損も検査されます。重要な更新はすぐ 2 回送られます。両方落ちた場合、スマホは約 2 ミリ秒後に再送します。PC は Windows がキーまたはタッチ操作を受け付けたあとだけ、更新を確認します。
+
+アプリはすべての指の状態を保持します。ホールド、同時押し、速いスライドを維持でき、短い再接続のあともホールドを安全に復元できます。切断後の古いタッチは捨てるので、遅れて再生されません。
+
+このツールは通常の Windows 入力を送ります。ゲームのプロセスを開いたり、読んだり、変更したりはしません。
+
+## Windows のオプション
+
+### レーンキー
+
+各キー枠を選んで、使いたい文字または数字を押します。デフォルトは `S D F J K L` です。
+
+ゲームを開く前に、メモ帳でカスタムキーを試してください。ゲームを管理者として動かしている場合は、コントローラーも管理者として起動してください。
+
+### PC がスマホのインターネットを使わないようにする
+
+USB テザリングだと、PC がスマホをインターネット接続として使うことがあります。スマホと PC のローカル接続だけ欲しいときは **Stop the PC from using the phone's internet** をオンにしてください。
+
+Windows が管理者権限を求めることがあります。ランチャーが提案したら **Restart as admin** を使ってください。普通に Stop すると、元のネットワーク設定に戻ります。
+
+### 停止時にレイテンシレポートを保存する
+
+プレイ後にレポートが欲しい場合はこのチェックを付けたままにしてください。**Stop** を押すと `Windows\Logs` に保存されます。プレイ中はレポートを書きません。
+
+## トラブルシューティング
+
+### スマホが接続できない
+
+- 充電専用ではなく、データ通信対応のケーブルか確認してください。
+- USB テザリングをいったんオフにして、もう一度オンにしてください。
+- Windows が新しい Ethernet または USB ネットワーク接続を作るまで待ってください。
+- Windows 側で **Start** を押してから、スマホアプリを開いてください。
+- Windows ファイアウォールで `holodori-native-host.exe` の UDP ポート `42825` を許可してください。
+- コントローラーの二重起動をやめてください。ポート `42825` を使えるのは 1 つだけです。
+
+### Windows アプリが開かない
+
+ランチャーは Microsoft Edge WebView2 を使います。Windows 10 / 11 には通常入っています。起動したまま閉じる場合は、WebView2 Runtime をインストールまたは更新してください。
+
+### ゲームの外ではキーが効くが、ゲーム内では効かない
+
+ゲームを管理者として動かしている場合は、コントローラーも管理者として再起動してください。
+
+### Android が APK のインストールを拒否する
+
+古いテストビルドの署名鍵が違うことがあります。古い Holodori コントローラーアプリをアンインストールしてから、新しい APK を入れてください。
+
+## 開発者向け
+
+ライブ入力経路は、ネイティブの Rust ホスト、Android アプリ、小さな Tauri ランチャーで構成されています。プロトコルは 120 Hz プレイ向けの 8.333 ms フレーム予算を前提に設計していますが、実測はスマホ、ケーブル、PC に依存します。
+
+リリース用バンドルは PowerShell からビルドします。
+
+```powershell
+.\packaging\build-experimental.ps1 `
+  -CargoHome "$env:USERPROFILE\.cargo" `
+  -JavaHome $env:JAVA_HOME `
+  -AndroidSdk $env:ANDROID_SDK_ROOT
+```
+
+主なテストスイートの実行:
+
+```powershell
+cargo test --manifest-path native-host\Cargo.toml --all-targets
+python -m unittest discover -s tests
+```
+
+実装の詳細は [アーキテクチャガイド](EXPERIMENTAL_ARCHITECTURE.md) と [プロトコル v4 仕様](PROTOCOL_V4.md) を参照してください。
+
+## ライセンス
+
+[MIT](LICENSE)。このツールの利用は、ゲームの利用規約と競技ルールにも従います。
