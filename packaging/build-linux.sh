@@ -200,6 +200,7 @@ cp "${PROJECT_ROOT}/packaging/experimental/README-linux.txt" "${BUNDLE_DIR}/READ
 cp "${PROJECT_ROOT}/packaging/experimental/run-keys.sh" "${BUNDLE_DIR}/"
 chmod +x "${LINUX_DIR}/holodori-native-host" "${BUNDLE_DIR}/HolodoriUsbController" "${BUNDLE_DIR}/run-keys.sh"
 cp "${PROJECT_ROOT}/EXPERIMENTAL_ARCHITECTURE.md" "${DOCS_DIR}/"
+cp "${PROJECT_ROOT}/LINUX_SETUP.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/PROTOCOL_V4.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/LICENSE" "${DOCS_DIR}/"
 

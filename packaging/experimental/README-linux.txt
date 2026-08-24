@@ -142,5 +142,6 @@ Safety and scope:
     queued gameplay, start a new session, and send CANCEL so old input is not
     replayed late. Duplicate controls do not hide an ordering stall.
 
-See Docs/EXPERIMENTAL_ARCHITECTURE.md and Docs/PROTOCOL_V4.md for details.
+See Docs/LINUX_SETUP.md for expanded setup and troubleshooting.
+See Docs/EXPERIMENTAL_ARCHITECTURE.md and Docs/PROTOCOL_V4.md for internals.
 Verify every packaged file against SHA256SUMS.txt.
