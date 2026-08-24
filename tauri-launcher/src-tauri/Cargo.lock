@@ -1213,6 +1213,7 @@ dependencies = [
 name = "holodori-usb-controller"
 version = "0.4.1"
 dependencies = [
+ "dbus",
  "holodori-native-host",
  "serde",
  "tauri",

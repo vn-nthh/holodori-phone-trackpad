@@ -1,21 +1,33 @@
 //! Read-only classification of the network interface used to reach a phone.
 //!
 //! This is deliberately separate from the Windows-only route policy. Both
-//! supported hosts reject discovery from ordinary LAN/Wi-Fi interfaces, but
-//! only Windows mutates route state for the optional local-only mode.
+//! supported hosts reject discovery from ordinary LAN/Wi-Fi interfaces. Only
+//! Windows mutates raw route state; Linux delegates persistent local-only
+//! policy to NetworkManager in the desktop launcher.
 
 #[cfg(windows)]
 pub use crate::tether_policy::{TetherBinding, current_tether_binding};
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::ffi::{CStr, OsString};
+    use std::ffi::{CStr, OsStr, OsString};
     use std::fs;
     use std::io;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::ptr;
+
+    const MAX_IP_OUTPUT: usize = 64 * 1024;
+    const IP_CANDIDATES: [&str; 5] = [
+        "/usr/sbin/ip",
+        "/sbin/ip",
+        "/usr/bin/ip",
+        "/bin/ip",
+        "/run/current-system/sw/bin/ip",
+    ];
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct InterfaceIdentity {
@@ -24,6 +36,38 @@ mod linux {
         device_path: PathBuf,
         driver: OsString,
         hardware_address: String,
+    }
+
+    /// Exact Linux RNDIS device identity shared with the desktop launcher.
+    ///
+    /// The launcher uses this only to select a NetworkManager connection
+    /// profile. Keeping the identity implementation here ensures route-policy
+    /// UI never grows a broader USB-driver allowlist than gameplay discovery.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct LinuxTetherDevice {
+        identity: InterfaceIdentity,
+    }
+
+    impl LinuxTetherDevice {
+        pub fn interface_name(&self) -> &OsStr {
+            &self.identity.name
+        }
+
+        /// Re-read every immutable identity field before or after an external
+        /// NetworkManager operation. An interface-index reuse or USB-device
+        /// replacement therefore fails closed.
+        pub fn verify_present(&self) -> io::Result<bool> {
+            Ok(
+                usb_network_identity(&self.identity.name, self.identity.index)?
+                    .is_some_and(|current| current == self.identity),
+            )
+        }
+
+        /// Read every kernel routing table and report whether this exact
+        /// interface still owns an IPv4 or IPv6 default route.
+        pub fn default_routes_present(&self) -> io::Result<(bool, bool)> {
+            default_routes_for_identity(&self.identity)
+        }
     }
 
     /// Immutable identity of the USB network interface accepted at discovery.
@@ -36,6 +80,16 @@ mod linux {
     impl TetherBinding {
         pub fn interface_index(&self) -> u32 {
             self.identity.index
+        }
+
+        pub fn interface_name(&self) -> &OsStr {
+            &self.identity.name
+        }
+
+        /// Read-only local-only-policy verification used when a Linux host
+        /// accepts a newly discovered tether connection.
+        pub fn default_routes_present(&self) -> io::Result<(bool, bool)> {
+            default_routes_for_identity(&self.identity)
         }
 
         /// Require receive-side packet metadata to name the same interface
@@ -107,6 +161,34 @@ mod linux {
             identity,
             validate_runtime: true,
         }))
+    }
+
+    /// Enumerate present USB network devices accepted by Linux gameplay
+    /// discovery. This is read-only and intentionally returns only
+    /// `rndis_host` devices; NetworkManager decides which one is connected.
+    pub fn linux_tether_devices() -> io::Result<Vec<LinuxTetherDevice>> {
+        let entries = match fs::read_dir("/sys/class/net") {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut devices = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let index = match fs::read_to_string(entry.path().join("ifindex")) {
+                Ok(value) => value.trim().parse::<u32>().ok(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            let Some(index) = index else {
+                continue;
+            };
+            if let Some(identity) = usb_network_identity(&name, index)? {
+                devices.push(LinuxTetherDevice { identity });
+            }
+        }
+        Ok(devices)
     }
 
     fn routed_local_ip(peer: SocketAddr) -> io::Result<IpAddr> {
@@ -273,6 +355,138 @@ mod linux {
         driver.as_bytes() == b"rndis_host"
     }
 
+    fn default_routes_for_identity(identity: &InterfaceIdentity) -> io::Result<(bool, bool)> {
+        if usb_network_identity(&identity.name, identity.index)?.as_ref() != Some(identity) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the RNDIS interface changed before its routes could be inspected",
+            ));
+        }
+        if !valid_command_interface_name(&identity.name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the RNDIS interface has an unsafe or unsupported name",
+            ));
+        }
+        let ip = trusted_ip_path()?;
+        let ipv4 = default_route_present(&ip, "-4", &identity.name)?;
+        let ipv6 = default_route_present(&ip, "-6", &identity.name)?;
+        if usb_network_identity(&identity.name, identity.index)?.as_ref() != Some(identity) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the RNDIS interface changed while its routes were being inspected",
+            ));
+        }
+        Ok((ipv4, ipv6))
+    }
+
+    fn default_route_present(ip: &Path, family: &str, interface: &OsStr) -> io::Result<bool> {
+        let output = Command::new(ip)
+            .arg(family)
+            .args(["route", "show", "table", "all", "default", "dev"])
+            .arg(interface)
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?;
+        if output.stdout.len() > MAX_IP_OUTPUT || output.stderr.len() > MAX_IP_OUTPUT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "iproute2 returned an unexpectedly large response",
+            ));
+        }
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .take(512)
+                .collect::<String>();
+            return Err(io::Error::other(if detail.is_empty() {
+                format!("iproute2 route inspection failed with {}", output.status)
+            } else {
+                format!("iproute2 route inspection failed: {detail}")
+            }));
+        }
+        if output.stderr.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            let detail = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .take(512)
+                .collect::<String>();
+            return Err(io::Error::other(format!(
+                "iproute2 route inspection returned a warning: {detail}"
+            )));
+        }
+        Ok(output.stdout.iter().any(|byte| !byte.is_ascii_whitespace()))
+    }
+
+    fn valid_command_interface_name(name: &OsStr) -> bool {
+        let bytes = name.as_bytes();
+        !bytes.is_empty()
+            && bytes.len() < libc::IFNAMSIZ
+            && bytes[0].is_ascii_alphanumeric()
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    }
+
+    fn trusted_ip_path() -> io::Result<PathBuf> {
+        for candidate in IP_CANDIDATES.map(Path::new) {
+            if !candidate.exists() {
+                continue;
+            }
+            let canonical = fs::canonicalize(candidate)?;
+            if !trusted_executable_and_parents(&canonical)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing untrusted iproute2 executable at {}",
+                        canonical.display()
+                    ),
+                ));
+            }
+            return Ok(canonical);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "a trusted iproute2 `ip` executable was not found",
+        ))
+    }
+
+    fn trusted_executable_and_parents(path: &Path) -> io::Result<bool> {
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file()
+            || metadata.uid() != 0
+            || metadata.mode() & 0o022 != 0
+            || metadata.mode() & 0o111 == 0
+        {
+            return Ok(false);
+        }
+        for parent in path.ancestors().skip(1) {
+            let metadata = fs::metadata(parent)?;
+            if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -294,6 +508,16 @@ mod linux {
                 "",
             ] {
                 assert!(!is_tether_capable_driver(driver.as_ref()));
+            }
+        }
+
+        #[test]
+        fn accepts_only_safe_interface_names_for_iproute2() {
+            for name in ["usb0", "enp0s20f0u1", "rndis_0", "usb.1"] {
+                assert!(valid_command_interface_name(name.as_ref()));
+            }
+            for name in ["", "--help", "usb 0", "usb/0", "abcdefghijklmnop"] {
+                assert!(!valid_command_interface_name(name.as_ref()));
             }
         }
 
@@ -343,4 +567,4 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{TetherBinding, current_tether_binding};
+pub use linux::{LinuxTetherDevice, TetherBinding, current_tether_binding, linux_tether_devices};

@@ -67,10 +67,40 @@ adapter, and removes only the routes recorded in that journal. The connected
 phone subnet remains available for the Holodori UDP link, while the PC's other
 applications continue using their normal interfaces.
 
-Linux deliberately performs no route mutation. The launcher disables this
-option and the backend rejects it; users who need the same policy configure
-both `ipv4.never-default` and `ipv6.never-default` on the NetworkManager tether
-profile.
+Linux deliberately performs no raw route mutation. The launcher enumerates the
+same exact `rndis_host` identities accepted by gameplay discovery, requires one
+active NetworkManager connection, resolves that profile by UUID, and asks
+NetworkManager to set both `ipv4.never-default` and `ipv6.never-default`. It
+revalidates the immutable USB device identity before and after each change. A
+persistent `Update2` replaces the full non-secret settings map only while its
+NetworkManager 1.44 profile version still matches; only the two never-default
+properties are changed in that map. The launcher then reads the applied
+connection with a version ID, changes only those same two applied properties,
+and requests `preserve-external-ip` during reapply so newer external addresses
+and routes survive. It then asks trusted iproute2 to inspect every
+routing table and refuses to report success while that exact interface has an
+IPv4 or IPv6 default route. The native host repeats that read-only route check
+before sending its discovery ACK, keeping process startup outside the gameplay
+session and preventing a reconnected unsafe tether from reaching input.
+
+Both persistent and currently applied values are verified. On failure, rollback
+restores only values still equal to this operation's requested pair, uses a
+fresh version guard for the persistent write, and reads the result back; a newer
+concurrent setting is preserved and reported instead of overwritten. Raw Linux
+routes are never added or deleted. NetworkManager 1.44 or newer is required for
+the persistent guard and route-preserving reapply. NetworkManager 1.58 fixes an
+earlier DHCPv6 reapply case that could leave an IPv6 default; kernel route
+verification makes affected older releases retain the requested profile but stay
+in a pending, Start-blocking state until reconnect and recheck rather than claim
+protection. More than one active RNDIS device, an interface replacement, a
+malformed UUID/D-Bus path, a
+concurrent state change, an absent trusted iproute2 binary, or an unavailable
+NetworkManager service fails closed. The launcher and native host stay
+unelevated in the normal workflow; NetworkManager/polkit owns authorization and
+route convergence.
+The frontend latches a requested or pending state while the tether is absent;
+an unavailable status cannot clear the selection and bypass the native
+pre-session check.
 
 The privileged mutation consumes the immutable adapter identity accepted by
 discovery instead of performing an unrelated second selection. Every queried

@@ -56,6 +56,27 @@ impl UdpHost {
         self.connect_if(timeout, current_tether_binding)
     }
 
+    /// Classify the peer and run a read-only policy check before acknowledging
+    /// discovery. A phone cannot begin its gameplay session until this returns
+    /// successfully and the ACK is sent, so slow system inspection stays off
+    /// the first-frame path.
+    pub fn connect_checked<F>(
+        &self,
+        timeout: Duration,
+        mut check_binding: F,
+    ) -> io::Result<UdpConnection<'_>>
+    where
+        F: FnMut(&TetherBinding) -> io::Result<()>,
+    {
+        self.connect_if(timeout, |peer| {
+            let Some(binding) = current_tether_binding(peer)? else {
+                return Ok(None);
+            };
+            check_binding(&binding)?;
+            Ok(Some(binding))
+        })
+    }
+
     fn connect_if<F>(
         &self,
         timeout: Duration,
@@ -708,6 +729,34 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        let mut response = [0_u8; 32];
+        assert!(phone.recv_from(&mut response).is_err());
+    }
+
+    #[test]
+    fn pre_session_policy_failure_is_propagated_without_an_ack() {
+        let host = UdpHost::bind(0).unwrap();
+        let phone = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        phone
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        phone
+            .send_to(
+                &encode_discovery(DISCOVERY_HELLO, 11, 22, host.port()),
+                ("127.0.0.1", host.port()),
+            )
+            .unwrap();
+
+        let error = match host.connect_if(Duration::from_secs(1), |_| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "local-only policy rejected the tether",
+            ))
+        }) {
+            Ok(_) => panic!("rejected tether unexpectedly connected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         let mut response = [0_u8; 32];
         assert!(phone.recv_from(&mut response).is_err());
     }

@@ -43,6 +43,17 @@ private/local prefix on a conservatively recognized phone-tether adapter. If
 local-only routing is requested, Windows must also route that peer through the
 same interface before any route setting is changed.
 
+On Linux, local-only mode is launcher configuration rather than a protocol or
+native-host route mutation. Before starting the host with that option selected,
+the launcher requires one active `rndis_host` device and verifies that its exact
+NetworkManager profile UUID has both IPv4 and IPv6 `never-default` enabled in
+the persistent profile and the currently applied connection. Persistent writes
+and rollbacks use NetworkManager's profile version guard. It also requires
+that trusted iproute2 find no IPv4 or IPv6 default route for that interface in
+any routing table. The native host repeats the read-only route check before it
+sends the discovery ACK, so no Linux local-only gameplay session starts on an
+unsafe tether.
+
 The host pins the phone IP, source port, discovery nonce, session, and exact
 tether adapter identity. A same-IP hello from a new source port migrates in
 place only after the host reconfirms the peer's unambiguous prefix, route, and

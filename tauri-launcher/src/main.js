@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import "./styles.css";
 import { statusPresentation } from "./status.js";
-import { localOnlyTetherSelection, localOnlyTetherSupported } from "./platform.js";
+import {
+  localOnlyTetherSelection,
+  localOnlyTetherSupported,
+  networkManagerCheckboxState,
+  networkManagerPolicyUnresolved,
+} from "./platform.js";
 
 const form = document.querySelector("#settings-form");
 const keySlots = Array.from(document.querySelectorAll(".key-slot"));
@@ -10,6 +15,7 @@ const localOnlyTetherInput = document.querySelector("#local-only-tether");
 const adminAction = document.querySelector("#admin-action");
 const adminActionText = document.querySelector("#admin-action-text");
 const restartAsAdminButton = document.querySelector("#restart-as-admin");
+const refreshTetherPolicyButton = document.querySelector("#refresh-tether-policy");
 const status = document.querySelector("#status");
 const startButton = document.querySelector("#start");
 const stopButton = document.querySelector("#stop");
@@ -27,6 +33,18 @@ let elevationModel;
 let activeSlotIndex = 0;
 let stopping = false;
 let recoveryNeedsAdmin = false;
+let hostRunning = false;
+let linuxTetherPolicy;
+let linuxTetherRequested = localOnlyTetherInput.checked;
+let tetherPolicyBusy = false;
+
+function saveLocalOnlyTetherPreference(value) {
+  try {
+    localStorage.setItem(LOCAL_ONLY_TETHER_PREFERENCE, String(value));
+  } catch {
+    // The current selection still applies for this session.
+  }
+}
 
 function setStatus(message, tone = "neutral", phase = "ready") {
   status.textContent = message;
@@ -35,16 +53,29 @@ function setStatus(message, tone = "neutral", phase = "ready") {
 }
 
 function setRunning(running) {
+  hostRunning = running;
   keySlots.forEach((slot) => {
     slot.disabled = running;
   });
   metricsInput.disabled = running;
-  // Stays disabled regardless of `running` when the option is unsupported on
-  // this platform (see `updateAdminAction`); otherwise it just follows
-  // `running` like the other controls.
-  localOnlyTetherInput.disabled = running || elevationModel === "unsupported";
+  const linuxProfileUnavailable =
+    elevationModel === "network-manager" && !linuxTetherPolicy?.available;
+  const linuxPolicyUnresolved =
+    elevationModel === "network-manager" &&
+    networkManagerPolicyUnresolved(linuxTetherPolicy, linuxTetherRequested);
+  localOnlyTetherInput.disabled =
+    running ||
+    tetherPolicyBusy ||
+    !localOnlyTetherSupported(elevationModel) ||
+    linuxProfileUnavailable;
   restartAsAdminButton.disabled = running;
-  startButton.disabled = running || recoveryNeedsAdmin;
+  refreshTetherPolicyButton.disabled = running || tetherPolicyBusy;
+  startButton.disabled =
+    running ||
+    recoveryNeedsAdmin ||
+    tetherPolicyBusy ||
+    linuxPolicyUnresolved ||
+    elevationModel === undefined;
   stopButton.disabled = !running;
 }
 
@@ -53,17 +84,37 @@ function updateAdminAction() {
     localOnlyTetherInput.checked = false;
     localOnlyTetherInput.disabled = true;
     restartAsAdminButton.hidden = true;
-    adminActionText.textContent = "This option is Windows-only.";
+    refreshTetherPolicyButton.hidden = true;
+    adminActionText.textContent = "This option is unavailable on this platform.";
     adminAction.hidden = false;
+    setRunning(hostRunning);
+    return;
+  }
+
+  if (elevationModel === "network-manager") {
+    restartAsAdminButton.hidden = true;
+    refreshTetherPolicyButton.hidden = false;
+    if (!tetherPolicyBusy) {
+      const checkbox = networkManagerCheckboxState(linuxTetherPolicy, linuxTetherRequested);
+      localOnlyTetherInput.checked = checkbox.checked;
+      localOnlyTetherInput.indeterminate = checkbox.indeterminate;
+    }
+    adminActionText.textContent =
+      linuxTetherPolicy?.message ?? "Checking NetworkManager for an active RNDIS tether...";
+    adminAction.hidden = false;
+    setRunning(hostRunning);
     return;
   }
 
   restartAsAdminButton.hidden = false;
+  refreshTetherPolicyButton.hidden = true;
+  localOnlyTetherInput.indeterminate = false;
   adminActionText.textContent = recoveryNeedsAdmin
     ? "Administrator access is required to recover USB-tether routes."
     : "Needs admin elevation.";
   const optionNeedsAdmin = localOnlyTetherInput.checked && launcherElevated !== true;
   adminAction.hidden = !recoveryNeedsAdmin && !optionNeedsAdmin;
+  setRunning(hostRunning);
 }
 
 function applyHostStatus(result) {
@@ -93,7 +144,34 @@ async function initElevation() {
   }
   if (elevationModel === "launcher") {
     await refreshElevation();
+  } else if (elevationModel === "network-manager") {
+    await refreshLinuxTetherPolicy();
   } else {
+    updateAdminAction();
+  }
+}
+
+async function refreshLinuxTetherPolicy({ quiet = false } = {}) {
+  if (elevationModel !== "network-manager" || tetherPolicyBusy) return;
+  tetherPolicyBusy = true;
+  updateAdminAction();
+  try {
+    linuxTetherPolicy = await invoke("linux_local_only_tether_status");
+    if (linuxTetherPolicy.enabled || linuxTetherPolicy.configured) {
+      linuxTetherRequested = true;
+      saveLocalOnlyTetherPreference(true);
+    }
+  } catch (error) {
+    linuxTetherPolicy = {
+      available: false,
+      enabled: false,
+      configured: false,
+      mixed: false,
+      message: String(error),
+    };
+    if (!quiet) setStatus(String(error), "error");
+  } finally {
+    tetherPolicyBusy = false;
     updateAdminAction();
   }
 }
@@ -224,6 +302,10 @@ async function refreshStatus() {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (tetherPolicyBusy) {
+    setStatus("Wait for the NetworkManager update to finish.", "error");
+    return;
+  }
   if (recoveryNeedsAdmin) {
     setStatus("Restart as admin to recover USB-tether routes.", "error", "recovery-needs-admin");
     restartAsAdminButton.focus();
@@ -231,9 +313,25 @@ form.addEventListener("submit", async (event) => {
   }
 
   if (elevationModel === undefined) await initElevation();
-  // Never send the option through on a platform where it is unsupported,
-  // regardless of the checkbox's current DOM state.
-  const localOnlyTether = localOnlyTetherSelection(elevationModel, localOnlyTetherInput.checked);
+  if (
+    elevationModel === "network-manager" &&
+    networkManagerPolicyUnresolved(linuxTetherPolicy, linuxTetherRequested)
+  ) {
+    setStatus(
+      linuxTetherPolicy?.message ??
+        "Reconnect and check the tether before starting with the requested policy.",
+      "error",
+    );
+    refreshTetherPolicyButton.focus();
+    return;
+  }
+  // Never send the option through on an unimplemented platform, regardless
+  // of a stale or manually altered checkbox state. The backend independently
+  // verifies the NetworkManager profile on Linux before it starts the host.
+  const localOnlyTether = localOnlyTetherSelection(
+    elevationModel,
+    elevationModel === "network-manager" ? linuxTetherRequested : localOnlyTetherInput.checked,
+  );
 
   if (localOnlyTether && elevationModel === "launcher") {
     if (launcherElevated === undefined) await refreshElevation();
@@ -267,13 +365,40 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-localOnlyTetherInput.addEventListener("change", () => {
-  try {
-    localStorage.setItem(LOCAL_ONLY_TETHER_PREFERENCE, String(localOnlyTetherInput.checked));
-  } catch {
-    // The current selection still applies for this session.
+localOnlyTetherInput.addEventListener("change", async () => {
+  if (elevationModel === "network-manager") {
+    if (hostRunning || tetherPolicyBusy) {
+      updateAdminAction();
+      return;
+    }
+    const enabled = localOnlyTetherInput.checked;
+    localOnlyTetherInput.indeterminate = false;
+    tetherPolicyBusy = true;
+    updateAdminAction();
+    setStatus("Updating the NetworkManager tether profile...");
+    try {
+      linuxTetherPolicy = await invoke("set_linux_local_only_tether", { enabled });
+      linuxTetherRequested = enabled;
+      saveLocalOnlyTetherPreference(enabled);
+      setStatus(linuxTetherPolicy.message);
+    } catch (error) {
+      setStatus(String(error), "error");
+      tetherPolicyBusy = false;
+      await refreshLinuxTetherPolicy({ quiet: true });
+      return;
+    } finally {
+      tetherPolicyBusy = false;
+      updateAdminAction();
+    }
+    return;
   }
+
+  saveLocalOnlyTetherPreference(localOnlyTetherInput.checked);
   updateAdminAction();
+});
+
+refreshTetherPolicyButton.addEventListener("click", async () => {
+  await refreshLinuxTetherPolicy();
 });
 
 restartAsAdminButton.addEventListener("click", async () => {

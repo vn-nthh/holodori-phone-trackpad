@@ -31,7 +31,7 @@
 
         <div class="tether-options">
           <label class="check-row check-row-feature">
-            <input id="local-only-tether" type="checkbox" />
+            <input id="local-only-tether" type="checkbox" disabled />
             <span>Stop the PC from using the phone's internet</span>
           </label>
           <div id="admin-action" class="admin-action" hidden>
@@ -39,13 +39,16 @@
             <button id="restart-as-admin" class="secondary-action" type="button">
               Restart as admin
             </button>
+            <button id="refresh-tether-policy" class="secondary-action" type="button" hidden>
+              Check tether
+            </button>
           </div>
         </div>
 
         <p id="status" class="status" role="status" aria-live="polite" aria-atomic="true" data-phase="ready" data-tone="neutral">Ready</p>
 
         <div class="actions">
-          <button id="start" class="primary" type="submit">Start</button>
+          <button id="start" class="primary" type="submit" disabled>Start</button>
           <button id="stop" type="button" disabled>Stop</button>
         </div>
       </form>

@@ -1,5 +1,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(target_os = "linux")]
+mod linux_network_manager;
+
 #[cfg(windows)]
 use holodori_native_host::tether_policy::{recover_orphaned_policy, RecoveryOutcome};
 use serde::Serialize;
@@ -96,6 +99,30 @@ struct HostStatus {
     recovery_needs_admin: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct LocalOnlyTetherStatus {
+    available: bool,
+    enabled: bool,
+    configured: bool,
+    mixed: bool,
+    interface_name: Option<String>,
+    message: String,
+}
+
+#[cfg(target_os = "linux")]
+impl From<linux_network_manager::LinuxLocalOnlyStatus> for LocalOnlyTetherStatus {
+    fn from(status: linux_network_manager::LinuxLocalOnlyStatus) -> Self {
+        Self {
+            available: status.available,
+            enabled: status.enabled,
+            configured: status.configured,
+            mixed: status.mixed,
+            interface_name: status.interface_name,
+            message: status.message,
+        }
+    }
+}
+
 #[tauri::command]
 fn start_host(
     state: State<'_, Mutex<HostState>>,
@@ -111,12 +138,13 @@ fn start_host(
         return Ok(status(&state));
     }
     ensure_route_recovery(&mut state)?;
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     if local_only_tether {
-        return Err(
-            "Local-only tether route control is Windows-only. Configure the Linux connection as never-default instead."
-                .to_owned(),
-        );
+        linux_network_manager::ensure_enabled()?;
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    if local_only_tether {
+        return Err("Local-only tethering is unavailable on this platform.".to_owned());
     }
 
     let host = find_host().ok_or_else(|| {
@@ -129,8 +157,8 @@ fn start_host(
     })?;
     // On Windows the launcher elevates itself (see `restart_as_admin`), so a
     // plain child process already inherits admin rights when needed.
-    // Local-only tethering is unsupported on Linux (see `elevation_model`),
-    // so no elevation of any kind is ever needed there.
+    // Linux delegates local-only configuration to NetworkManager and never
+    // elevates this launcher or the native gameplay host.
     let mut command = Command::new(&host);
     command
         .current_dir(host.parent().unwrap_or_else(|| std::path::Path::new(".")))
@@ -148,6 +176,7 @@ fn start_host(
     if metrics {
         command.arg("--metrics");
     }
+    #[cfg(any(windows, target_os = "linux"))]
     if local_only_tether {
         command.arg("--local-only-tether");
     }
@@ -306,21 +335,68 @@ fn launcher_is_elevated() -> Result<bool, String> {
 /// - `"launcher"`: the whole launcher process is elevated up front (UAC via
 ///   `restart_as_admin`), and every child it spawns inherits that token.
 ///   This is the Windows model.
-/// - `"unsupported"`: the privileged action is unavailable on this
-///   platform. This is the Linux model: local-only tethering is not
-///   offered there (see `README.md`'s Linux section for why), so the
-///   frontend must disable that option entirely rather than offer any
-///   elevation path for it.
+/// - `"network-manager"`: NetworkManager owns the Linux profile and polkit
+///   authorizes only that settings change; the launcher and gameplay host
+///   do not request elevation.
+/// - `"unsupported"`: no safe platform integration is available.
 #[tauri::command]
 fn elevation_model() -> &'static str {
     #[cfg(windows)]
     {
         "launcher"
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        "network-manager"
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         "unsupported"
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn linux_local_only_tether_status() -> Result<LocalOnlyTetherStatus, String> {
+    linux_network_manager::status().map(Into::into)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn linux_local_only_tether_status() -> Result<LocalOnlyTetherStatus, String> {
+    Ok(LocalOnlyTetherStatus {
+        available: false,
+        enabled: false,
+        configured: false,
+        mixed: false,
+        interface_name: None,
+        message: "NetworkManager profile control is Linux-only.".to_owned(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[tauri::command]
+fn set_linux_local_only_tether(
+    state: State<'_, Mutex<HostState>>,
+    enabled: bool,
+) -> Result<LocalOnlyTetherStatus, String> {
+    let mut state = state
+        .lock()
+        .map_err(|_| "controller state is unavailable")?;
+    reap_child(&mut state)?;
+    if state.runtime.is_some() {
+        return Err("Stop the controller before changing the tether profile.".to_owned());
+    }
+    linux_network_manager::set_enabled(enabled).map(Into::into)
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn set_linux_local_only_tether(
+    _state: State<'_, Mutex<HostState>>,
+    _enabled: bool,
+) -> Result<LocalOnlyTetherStatus, String> {
+    Err("NetworkManager profile control is Linux-only.".to_owned())
 }
 
 #[tauri::command]
@@ -664,6 +740,8 @@ fn main() {
             restart_as_admin,
             launcher_is_elevated,
             elevation_model,
+            linux_local_only_tether_status,
+            set_linux_local_only_tether,
             fit_window_to_content
         ])
         .on_window_event(|window, event| {

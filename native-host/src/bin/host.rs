@@ -102,7 +102,6 @@ struct Options {
     metrics: bool,
     metrics_file: Option<PathBuf>,
     warning_budget_ms: f64,
-    #[cfg(windows)]
     local_only_tether: bool,
 }
 
@@ -264,14 +263,20 @@ fn run() -> Result<(), Box<dyn Error>> {
         // Keep graceful Q/Ctrl+C shutdown bounded even while no phone is
         // present. The outer loop retries, so a one-second discovery slice is
         // sufficient without making exit wait for the old 15-second timeout.
-        let connection = match udp.connect(Duration::from_secs(1)) {
-            Ok(connection) => connection,
-            Err(error) => {
-                eprintln!("{error}; retrying");
-                thread::sleep(Duration::from_millis(250));
-                continue;
-            }
-        };
+        let connection =
+            match connect_phone(&udp, Duration::from_secs(1), options.local_only_tether) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    #[cfg(target_os = "linux")]
+                    if options.local_only_tether && error.kind() == io::ErrorKind::PermissionDenied
+                    {
+                        return Err(error.into());
+                    }
+                    eprintln!("{error}; retrying");
+                    thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
+            };
         #[cfg(windows)]
         if let Some(policy) = tether_policy.as_mut()
             && let Err(error) = policy.protect_peer(connection.peer(), connection.tether_binding())
@@ -356,6 +361,51 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     SHUTDOWN_COMPLETE.store(true, Ordering::Release);
     report_result.map_err(Into::into)
+}
+
+#[cfg(target_os = "linux")]
+fn connect_phone<'a>(
+    udp: &'a UdpHost,
+    timeout: Duration,
+    local_only_tether: bool,
+) -> io::Result<UdpConnection<'a>> {
+    if !local_only_tether {
+        return udp.connect(timeout);
+    }
+    udp.connect_checked(timeout, |binding| {
+        let (ipv4_default, ipv6_default) = binding.default_routes_present().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "could not verify local-only routing on the discovered RNDIS device: {error}"
+                ),
+            )
+        })?;
+        if ipv4_default || ipv6_default {
+            let families = match (ipv4_default, ipv6_default) {
+                (true, true) => "IPv4 and IPv6",
+                (true, false) => "IPv4",
+                (false, true) => "IPv6",
+                (false, false) => unreachable!(),
+            };
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "local-only routing failed closed because a {families} default route uses the discovered RNDIS device"
+                ),
+            ));
+        }
+        Ok(())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn connect_phone<'a>(
+    udp: &'a UdpHost,
+    timeout: Duration,
+    _local_only_tether: bool,
+) -> io::Result<UdpConnection<'a>> {
+    udp.connect(timeout)
 }
 
 fn install_exit_command_thread() -> io::Result<()> {
@@ -700,7 +750,6 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         metrics: false,
         metrics_file: None,
         warning_budget_ms: 1_000.0 / 120.0,
-        #[cfg(windows)]
         local_only_tether: false,
     };
     let mut arguments = env::args().skip(1);
@@ -758,17 +807,11 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    return Err(
-                        "--local-only-tether is Windows-only. On Linux, configure the tether \
-                         connection with NetworkManager's `ipv4.never-default yes` instead."
-                            .into(),
-                    );
+                    options.local_only_tether = true;
                 }
                 #[cfg(not(any(windows, target_os = "linux")))]
                 {
-                    return Err(
-                        "--local-only-tether route control is only implemented on Windows".into(),
-                    );
+                    return Err("--local-only-tether is supported only on Windows and Linux".into());
                 }
             }
             "--warn-ms" => {

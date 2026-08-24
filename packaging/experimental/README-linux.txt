@@ -55,24 +55,38 @@ Start the Linux app:
   2. Set the lane keys if needed. Protocol-v4 discovery uses UDP port 42825.
   3. Leave "Save latency report when stopped" checked unless you do not want
      a report.
-  4. "Stop the PC from using the phone's internet" is Windows-only; the
-     checkbox is disabled in this build. Linux network managers may install
-     a default route for USB tethering, and its metric can outrank the PC's
-     wired or Wi-Fi uplink. Do not assume the existing uplink will win. To
-     guarantee that the PC never routes through the phone, configure
-     NetworkManager directly instead of running a privileged process that
-     rewrites the routing table:
+  4. NetworkManager users can enable "Stop the PC from using the phone's
+     internet" after connecting exactly one Android RNDIS tether. The app
+     sets both never-default properties on that exact active profile; polkit
+     may request authorization. NetworkManager 1.44 or newer is required for
+     version-guarded persistent changes and route-preserving application.
+     NetworkManager 1.58 fixes an earlier DHCPv6 reapply case; on 1.44-1.56,
+     a remaining IPv6 default leaves the option pending and disables Start.
+     Reconnect, then use "Check tether", or turn the option off.
+     A requested/pending option stays latched while the phone is disconnected;
+     checking an absent tether does not silently remove the safety check.
+     nmcli and iproute2 must be installed in normal root-owned system paths.
+     The app checks every IPv4/IPv6 route table and refuses local-only mode if
+     a tether default remains. The launcher and input host do not request root
+     elevation and never edit raw routes. Use "Check tether" after reconnecting.
+     Other network managers require their equivalent setting. Manual
+     NetworkManager commands are:
        nmcli connection show
        nmcli connection modify <tether-connection-name> ipv4.never-default yes ipv6.never-default yes
        nmcli connection up <tether-connection-name>
      Replace <tether-connection-name> with the connection name for the
      tethered link from the first command's output.
-  5. Press Start.
+     The native host's --local-only-tether argument only repeats the read-only
+     pre-session route check; it does not configure NetworkManager by itself.
+  5. Press Start. If local-only mode is selected, startup independently
+     verifies both NetworkManager profile properties and the kernel routes.
+     The input host checks the exact discovered interface again before sending
+     its discovery ACK, outside the gameplay frame path.
   6. Unlock the phone and open the APK.
   7. Arrange and lock the play zone, then tap, hold, chord, and slide.
   8. Press Stop in the app when finished. Held input is released safely.
-      Holodori does not change Linux routes; any NetworkManager setting from
-      step 4 remains in place until you change it yourself.
+      The NetworkManager profile setting remains in place until you turn the
+      checkbox off or change the profile in NetworkManager.
 
 Portable Linux app:
   - The folder is self-contained for Holodori: no installer, ADB, root, or

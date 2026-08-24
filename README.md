@@ -129,6 +129,12 @@ instead of replacing it with an older captured gateway. If the captured tether
 adapter is unplugged before cleanup finishes, its recovery snapshot is retained;
 reconnect that adapter so the launcher can finish restoring its owned setting.
 
+On Linux, the same checkbox updates the one active RNDIS connection profile
+through NetworkManager. NetworkManager or the desktop's polkit agent may ask
+for authorization. The launcher does not request root elevation and never edits
+the kernel route table directly. It verifies the resulting IPv4 and IPv6 routes
+before reporting the policy active.
+
 The status line distinguishes **Waiting**, **Phone connected**,
 **Recovering**, and **Stopping**. Recovering means held input has been released
 and the controller is waiting for a fresh phone session; you do not need to
@@ -219,13 +225,48 @@ sudo firewall-cmd --reload
 
 ### Stop the PC from using the phone's internet
 
-This option is Windows-only; the checkbox is disabled in the Linux app.
-
 Linux network managers may install a default route for USB tethering, and its
 metric can outrank the PC's existing wired or Wi-Fi uplink. Do not assume the
-existing uplink will win. If you need to guarantee that the PC never routes
-through the phone, configure NetworkManager directly instead of running a
-privileged process that rewrites the routing table:
+existing uplink will win.
+
+When NetworkManager is installed and running, connect exactly one Android RNDIS
+tether and select **Stop the PC from using the phone's internet**. The launcher
+resolves the active connection by UUID, sets both `ipv4.never-default` and
+`ipv6.never-default`, persists the change with NetworkManager's version-guarded
+`Update2` API, and applies only those properties through the versioned device
+API. NetworkManager 1.44 or newer is required for the persistent concurrency
+guard and route-preserving application. The launcher revalidates the exact USB
+identity around the change. It uses a trusted
+iproute2 `ip` binary to inspect every routing table and refuses success if an
+IPv4 or IPv6 default route still uses the tether. The native host repeats that
+read-only check before acknowledging phone discovery. It never deletes an
+external route.
+
+On failure, rollback restores an original profile value only through a matching
+profile version and while the current value still matches this operation; newer
+concurrent NetworkManager changes are preserved and reported, and the rollback
+write is read back. The setting persists in that NetworkManager profile
+across reconnects. NetworkManager 1.58 fixes an earlier DHCPv6 reapply case that
+could leave an IPv6 default route. On versions 1.44 through 1.56, the app's
+kernel-route check detects that condition and leaves the requested persistent
+profile in a clearly marked pending state: Start remains disabled until you
+reconnect the tether and choose **Check tether**, turn the option off, or
+upgrade NetworkManager. See the
+[NetworkManager 1.58 release notes](https://networkmanager.dev/blog/networkmanager-1-58/).
+The launcher latches a requested or pending checkbox across temporary
+disconnects, so checking while the phone is absent cannot silently turn off the
+native pre-session guard. Reconnect the active profile before explicitly
+turning the option off.
+
+The control remains disabled when no active RNDIS profile is available, more
+than one active RNDIS tether is present, NetworkManager is unavailable, or the
+controller is running. Use **Check tether** after connecting or reconnecting a
+phone. Authorization is handled by NetworkManager/polkit; the launcher and
+native input host do not require elevation. `nmcli` and iproute2 must be
+installed in their normal root-owned system locations.
+
+For distributions that do not use NetworkManager, configure the equivalent
+policy in their network manager. The manual NetworkManager commands are:
 
 ```sh
 nmcli connection show
@@ -234,11 +275,12 @@ nmcli connection up <tether-connection-name>
 ```
 
 Replace `<tether-connection-name>` with the connection name for the tethered
-link from the first command's output. This tells NetworkManager to never
-assign that connection's route as the default, permanently, the same as any
-other one-time change to a system connection profile (NetworkManager may
-prompt for authentication once via polkit, the same as changing this from
-its own settings GUI).
+link from the first command's output.
+
+On Linux, the native host's `--local-only-tether` argument is an internal,
+read-only pre-discovery route verifier; it does not persist or apply the
+NetworkManager profile policy by itself. Use the launcher toggle (or configure
+both never-default properties manually) before relying on that verifier.
 
 ### Latency report location
 
