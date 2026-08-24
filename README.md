@@ -45,7 +45,8 @@ usually under **Network**, **Connections**, **Hotspot**, or **Tethering**.
 ## What it supports
 
 - Taps become quick key presses.
-- Holds stay pressed until the finger lifts.
+- Holds stay pressed until the finger lifts, even if it moves just outside the
+  play area; the nearest edge lane stays held.
 - Slides pass through every crossed lane in order.
 - Multiple fingers can hold different lanes at the same time.
 - A disconnect releases held keys instead of leaving them stuck.
@@ -55,7 +56,9 @@ usually under **Network**, **Connections**, **Hotspot**, or **Tethering**.
 
 USB tethering creates a small network link between the phone and the PC. The
 Android app sends touch updates over that link with UDP. This keeps setup
-simple and avoids special USB drivers.
+simple and avoids special USB drivers. Discovery is accepted only on a
+recognized USB-tether subnet, and each session pins one phone and one Windows
+endpoint.
 
 Each update is numbered and checked for damage. Important updates are sent
 twice right away. If both copies are lost, the phone tries again after about
@@ -68,6 +71,9 @@ Old touches are discarded after a broken connection so they do not play late.
 
 The tool sends normal Windows input. It does not open, read, or change the game
 process.
+
+Protocol v4 does not yet use cryptographic pairing. Do not expose UDP port
+`42825` to other networks; a device already on the tether subnet can interfere.
 
 ## Windows options
 
@@ -87,7 +93,19 @@ phone-to-PC link.
 
 Windows may ask for administrator access. Use **Restart as admin** when the
 launcher offers it. The original network setting is restored after a normal
-stop.
+stop. The launcher also saves a recovery snapshot before changing routes and
+repairs an interrupted session on its next start. If that repair needs
+elevation, **Restart as admin** appears even when this option is unchecked.
+Route protection begins only after the phone is discovered on a confirmed
+tether interface. Recovery preserves any newer route Windows or the user added
+instead of replacing it with an older captured gateway. If the captured tether
+adapter is unplugged before cleanup finishes, its recovery snapshot is retained;
+reconnect that adapter so the launcher can finish restoring its owned setting.
+
+The status line distinguishes **Waiting**, **Phone connected**,
+**Recovering**, and **Stopping**. Recovering means held input has been released
+and the controller is waiting for a fresh phone session; you do not need to
+press Start again.
 
 ### Save latency report when stopped
 

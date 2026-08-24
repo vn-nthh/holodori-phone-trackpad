@@ -99,6 +99,7 @@ pub struct DiscoveryMessage {
     pub kind: u8,
     pub nonce: u64,
     pub session_id: u64,
+    pub port: u16,
 }
 
 impl fmt::Display for ProtocolError {
@@ -347,16 +348,21 @@ pub fn encode_control(
     bytes
 }
 
-pub fn encode_discovery(kind: u8, nonce: u64, session_id: u64) -> [u8; DISCOVERY_SIZE] {
+pub fn encode_discovery(kind: u8, nonce: u64, session_id: u64, port: u16) -> [u8; DISCOVERY_SIZE] {
     let mut bytes = [0_u8; DISCOVERY_SIZE];
     bytes[..4].copy_from_slice(&DISCOVERY_MAGIC);
     bytes[4] = DISCOVERY_VERSION;
     bytes[5] = kind;
     bytes[8..16].copy_from_slice(&nonce.to_le_bytes());
     bytes[16..24].copy_from_slice(&session_id.to_le_bytes());
+    bytes[24..26].copy_from_slice(&port.to_le_bytes());
     let checksum = crc32(&bytes[..28]);
     bytes[28..32].copy_from_slice(&checksum.to_le_bytes());
     bytes
+}
+
+pub fn discovery_port_acceptable(advertised_port: u16, listening_port: u16) -> bool {
+    advertised_port == 0 || advertised_port == listening_port
 }
 
 pub fn decode_discovery(bytes: &[u8]) -> Option<DiscoveryMessage> {
@@ -372,6 +378,7 @@ pub fn decode_discovery(bytes: &[u8]) -> Option<DiscoveryMessage> {
         kind: bytes[5],
         nonce: read_u64(bytes, 8),
         session_id: read_u64(bytes, 16),
+        port: read_u16(bytes, 24),
     })
 }
 
@@ -744,18 +751,29 @@ mod tests {
 
     #[test]
     fn discovery_record_round_trips_with_crc() {
-        let bytes = encode_discovery(DISCOVERY_HELLO, 123, 456);
+        let bytes = encode_discovery(DISCOVERY_HELLO, 123, 456, 42_825);
         assert_eq!(
             decode_discovery(&bytes),
             Some(DiscoveryMessage {
                 kind: DISCOVERY_HELLO,
                 nonce: 123,
                 session_id: 456,
+                port: 42_825,
             })
         );
 
         let mut corrupted = bytes;
         corrupted[16] ^= 1;
         assert_eq!(decode_discovery(&corrupted), None);
+    }
+
+    #[test]
+    fn discovery_port_accepts_legacy_zero_and_the_listening_port() {
+        assert!(discovery_port_acceptable(0, 42_825));
+        assert!(discovery_port_acceptable(42_825, 42_825));
+        assert!(!discovery_port_acceptable(9, 42_825));
+
+        let legacy = encode_discovery(DISCOVERY_ACK, 1, 2, 0);
+        assert_eq!(decode_discovery(&legacy).unwrap().port, 0);
     }
 }

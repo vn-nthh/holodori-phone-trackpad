@@ -154,6 +154,8 @@ h1 {
 }
 
 .status[data-tone="error"] { color: oklch(76% 0.13 25); }
+.status[data-tone="warning"] { color: oklch(78% 0.12 80); }
+.status[data-tone="success"] { color: oklch(78% 0.12 150); }
 
 .actions { display: flex; gap: 8px; }
 

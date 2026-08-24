@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use holodori_native_host::tether_policy::{recover_orphaned_policy, RecoveryOutcome};
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::net::UdpSocket;
@@ -13,21 +14,76 @@ const DEFAULT_WARNING_BUDGET_MS: &str = "8.333";
 const USB_TETHER_UDP_PORT: u16 = 42_825;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum HostPhase {
+    #[default]
+    Ready,
+    Waiting,
+    Connected,
+    Recovering,
+    Stopping,
+    RecoveryNeedsAdmin,
+    Fatal,
+}
+
+impl HostPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Waiting => "waiting",
+            Self::Connected => "connected",
+            Self::Recovering => "recovering",
+            Self::Stopping => "stopping",
+            Self::RecoveryNeedsAdmin => "recovery-needs-admin",
+            Self::Fatal => "fatal",
+        }
+    }
+
+    fn default_message(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::Waiting => "Waiting for phone...",
+            Self::Connected => "Phone connected",
+            Self::Recovering => "Connection lost — recovering...",
+            Self::Stopping => "Stopping safely...",
+            Self::RecoveryNeedsAdmin => {
+                "Administrator access is required to recover USB-tether routes."
+            }
+            Self::Fatal => "The controller stopped unexpectedly.",
+        }
+    }
+}
+
+struct HostRuntime {
+    child: Child,
+    output: Arc<Mutex<HostOutput>>,
+    readers: Vec<JoinHandle<()>>,
+    local_only_tether: bool,
+}
+
+#[derive(Default)]
+struct HostOutput {
+    phase: Option<HostPhase>,
+    fatal_message: Option<String>,
+}
+
 #[derive(Default)]
 struct HostState {
-    child: Option<Child>,
+    runtime: Option<HostRuntime>,
+    phase: HostPhase,
     stopping: bool,
-    local_only_tether: bool,
-    last_message: Option<String>,
-    native_error: Arc<Mutex<Option<String>>>,
-    stderr_reader: Option<JoinHandle<()>>,
+    message: String,
+    fatal_message: Option<String>,
+    recovery_needs_admin: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct HostStatus {
     running: bool,
     stopping: bool,
+    phase: String,
     message: String,
+    recovery_needs_admin: bool,
 }
 
 #[tauri::command]
@@ -41,9 +97,10 @@ fn start_host(
         .lock()
         .map_err(|_| "controller state is unavailable")?;
     reap_child(&mut state)?;
-    if state.child.is_some() {
-        return Ok(status(&state, "Running"));
+    if state.runtime.is_some() {
+        return Ok(status(&state));
     }
+    ensure_route_recovery(&mut state)?;
 
     let host = find_host().ok_or_else(|| {
         "The Windows controller is missing. Build native-host or re-extract the portable bundle."
@@ -58,7 +115,7 @@ fn start_host(
     command
         .current_dir(host.parent().unwrap_or_else(|| std::path::Path::new(".")))
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .arg("--mode")
         .arg("keys")
@@ -84,27 +141,45 @@ fn start_host(
     let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start the controller: {error}"))?;
-    let native_error = Arc::new(Mutex::new(None));
-    let stderr_reader = child.stderr.take().map(|stderr| {
-        let native_error = Arc::clone(&native_error);
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if let Some(message) = line.strip_prefix("fatal: ") {
-                    if let Ok(mut latest) = native_error.lock() {
-                        *latest = Some(message.to_owned());
+    let output = Arc::new(Mutex::new(HostOutput::default()));
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        let output = Arc::clone(&output);
+        readers.push(std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some(phase) = parse_status_token(&line) {
+                    if let Ok(mut latest) = output.lock() {
+                        latest.phase = Some(phase);
                     }
                 }
             }
-        })
-    });
+        }));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let output = Arc::clone(&output);
+        readers.push(std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Some(message) = line.strip_prefix("fatal: ") {
+                    if let Ok(mut latest) = output.lock() {
+                        latest.fatal_message = Some(message.to_owned());
+                    }
+                }
+            }
+        }));
+    }
 
-    state.child = Some(child);
+    state.runtime = Some(HostRuntime {
+        child,
+        output,
+        readers,
+        local_only_tether,
+    });
+    state.phase = HostPhase::Waiting;
     state.stopping = false;
-    state.local_only_tether = local_only_tether;
-    state.last_message = None;
-    state.native_error = native_error;
-    state.stderr_reader = stderr_reader;
-    Ok(status(&state, "Running"))
+    state.message.clear();
+    state.fatal_message = None;
+    state.recovery_needs_admin = false;
+    Ok(status(&state))
 }
 
 #[tauri::command]
@@ -211,21 +286,19 @@ fn stop_host(state: State<'_, Mutex<HostState>>) -> Result<HostStatus, String> {
         .lock()
         .map_err(|_| "controller state is unavailable")?;
     reap_child(&mut state)?;
-    let Some(child) = state.child.as_mut() else {
-        let message = state
-            .last_message
-            .take()
-            .unwrap_or_else(|| "Ready".to_owned());
-        return Ok(status(&state, &message));
+    let Some(runtime) = state.runtime.as_mut() else {
+        return Ok(status(&state));
     };
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(stdin) = runtime.child.stdin.as_mut() {
         stdin
             .write_all(b"q\n")
             .and_then(|_| stdin.flush())
             .map_err(|error| format!("Could not stop the controller safely: {error}"))?;
     }
     state.stopping = true;
-    Ok(status(&state, "Stopping safely..."))
+    state.phase = HostPhase::Stopping;
+    state.message.clear();
+    Ok(status(&state))
 }
 
 #[tauri::command]
@@ -234,72 +307,144 @@ fn host_status(state: State<'_, Mutex<HostState>>) -> Result<HostStatus, String>
         .lock()
         .map_err(|_| "controller state is unavailable")?;
     reap_child(&mut state)?;
-    if state.child.is_some() {
-        let message = if state.stopping {
-            "Stopping safely..."
-        } else {
-            "Running"
-        };
-        Ok(status(&state, message))
-    } else {
-        let message = state
-            .last_message
-            .take()
-            .unwrap_or_else(|| "Ready".to_owned());
-        Ok(status(&state, &message))
-    }
+    Ok(status(&state))
 }
 
-fn status(state: &HostState, message: &str) -> HostStatus {
+fn status(state: &HostState) -> HostStatus {
     HostStatus {
-        running: state.child.is_some(),
+        running: state.runtime.is_some(),
         stopping: state.stopping,
-        message: message.to_owned(),
+        phase: state.phase.as_str().to_owned(),
+        message: if state.message.is_empty() {
+            state.phase.default_message().to_owned()
+        } else {
+            state.message.clone()
+        },
+        recovery_needs_admin: state.recovery_needs_admin,
     }
 }
 
 fn reap_child(state: &mut HostState) -> Result<(), String> {
-    let Some(child) = state.child.as_mut() else {
+    drain_runtime_events(state);
+    let Some(runtime) = state.runtime.as_mut() else {
         return Ok(());
     };
-    if let Some(exit_status) = child
+    if let Some(exit_status) = runtime
+        .child
         .try_wait()
         .map_err(|error| format!("Could not check controller state: {error}"))?
     {
-        state.child = None;
-        if let Some(reader) = state.stderr_reader.take() {
+        let mut runtime = state.runtime.take().expect("runtime checked above");
+        for reader in runtime.readers.drain(..) {
             let _ = reader.join();
         }
-        let native_error = state
-            .native_error
-            .lock()
-            .ok()
-            .and_then(|message| message.clone());
-        if !exit_status.success() {
-            state.last_message = Some(
-                native_error
-                    .map(user_facing_native_error)
-                    .unwrap_or_else(|| {
-                        if state.local_only_tether && state.stopping {
-                            "The controller did not stop cleanly while local-only tethering was enabled."
-                                .to_owned()
-                        } else if state.stopping {
-                            "The controller did not stop cleanly. Try starting it again.".to_owned()
-                        } else {
-                            "The controller stopped unexpectedly. Try starting it again.".to_owned()
-                        }
-                    }),
-            );
+        apply_output(state, &runtime.output);
+        let expected_stop = state.stopping;
+        let local_only_tether = runtime.local_only_tether;
+        drop(runtime);
+
+        if expected_stop && exit_status.success() {
+            state.phase = HostPhase::Ready;
+            state.message.clear();
+            state.fatal_message = None;
+        } else {
+            state.phase = HostPhase::Fatal;
+            state.message = state
+                .fatal_message
+                .clone()
+                .map(user_facing_native_error)
+                .unwrap_or_else(|| {
+                    if local_only_tether && expected_stop {
+                        "The controller did not stop cleanly while local-only tethering was enabled."
+                            .to_owned()
+                    } else if expected_stop {
+                        "The controller did not stop cleanly. Try starting it again.".to_owned()
+                    } else {
+                        "The controller stopped unexpectedly. Try starting it again.".to_owned()
+                    }
+                });
         }
         state.stopping = false;
-        state.local_only_tether = false;
-        state.native_error = Arc::new(Mutex::new(None));
+        let _ = ensure_route_recovery(state);
     }
     Ok(())
 }
 
+fn drain_runtime_events(state: &mut HostState) {
+    let Some(runtime) = state.runtime.as_ref() else {
+        return;
+    };
+    let output = Arc::clone(&runtime.output);
+    apply_output(state, &output);
+}
+
+fn apply_output(state: &mut HostState, output: &Arc<Mutex<HostOutput>>) {
+    let (phase, fatal_message) = match output.lock() {
+        Ok(mut output) => (output.phase.take(), output.fatal_message.take()),
+        Err(_) => return,
+    };
+    if !state.stopping {
+        if let Some(phase) = phase {
+            state.phase = phase;
+            state.message.clear();
+        }
+    }
+    if let Some(message) = fatal_message {
+        state.phase = HostPhase::Fatal;
+        state.fatal_message = Some(message.clone());
+        state.message = user_facing_native_error(message);
+    }
+}
+
+fn parse_status_token(line: &str) -> Option<HostPhase> {
+    match line {
+        "HPT_STATUS WAITING" => Some(HostPhase::Waiting),
+        "HPT_STATUS CONNECTED" => Some(HostPhase::Connected),
+        "HPT_STATUS RECOVERING" => Some(HostPhase::Recovering),
+        "HPT_STATUS STOPPING" => Some(HostPhase::Stopping),
+        _ => None,
+    }
+}
+
+fn ensure_route_recovery(state: &mut HostState) -> Result<(), String> {
+    match recover_orphaned_policy() {
+        Ok(RecoveryOutcome::NothingToDo | RecoveryOutcome::Restored { .. }) => {
+            state.recovery_needs_admin = false;
+            if state.phase == HostPhase::RecoveryNeedsAdmin {
+                state.phase = HostPhase::Ready;
+                state.message.clear();
+            }
+            Ok(())
+        }
+        Ok(RecoveryOutcome::OwnerStillRunning) => {
+            let message =
+                "A previous controller still owns USB-tether route settings. Close it first."
+                    .to_owned();
+            state.phase = HostPhase::Fatal;
+            state.message = message.clone();
+            Err(message)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            let message =
+                format!("Administrator access is required to recover USB-tether routes: {error}");
+            state.phase = HostPhase::RecoveryNeedsAdmin;
+            state.message = message.clone();
+            state.recovery_needs_admin = true;
+            Err(message)
+        }
+        Err(error) => {
+            let message = format!("Could not recover USB-tether routes safely: {error}");
+            state.phase = HostPhase::Fatal;
+            state.message = message.clone();
+            Err(message)
+        }
+    }
+}
+
 fn user_facing_native_error(message: String) -> String {
-    if message.contains("recognized Android/RNDIS adapter") {
+    if message.contains("recognized Android/RNDIS adapter")
+        || message.contains("not on an unambiguous Android/RNDIS subnet")
+    {
         "The phone was discovered outside USB tethering. Enable USB tethering and try again."
             .to_owned()
     } else {
@@ -332,6 +477,9 @@ fn main() {
     tauri::Builder::default()
         .manage(Mutex::new(HostState::default()))
         .setup(|app| {
+            if let Ok(mut state) = app.state::<Mutex<HostState>>().lock() {
+                let _ = ensure_route_recovery(&mut state);
+            }
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 style_windows_titlebar(&window);
@@ -430,15 +578,52 @@ fn style_windows_titlebar(window: &tauri::WebviewWindow) {
 }
 
 fn request_stop(state: &mut HostState) -> Result<(), String> {
-    let Some(child) = state.child.as_mut() else {
+    let Some(runtime) = state.runtime.as_mut() else {
         return Ok(());
     };
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(stdin) = runtime.child.stdin.as_mut() {
         stdin
             .write_all(b"q\n")
             .and_then(|_| stdin.flush())
             .map_err(|error| format!("Could not stop the controller safely: {error}"))?;
     }
     state.stopping = true;
+    state.phase = HostPhase::Stopping;
+    state.message.clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_status_token, user_facing_native_error, HostPhase};
+
+    #[test]
+    fn parses_only_stable_status_tokens() {
+        assert_eq!(
+            parse_status_token("HPT_STATUS WAITING"),
+            Some(HostPhase::Waiting),
+        );
+        assert_eq!(
+            parse_status_token("HPT_STATUS CONNECTED"),
+            Some(HostPhase::Connected),
+        );
+        assert_eq!(
+            parse_status_token("HPT_STATUS RECOVERING"),
+            Some(HostPhase::Recovering),
+        );
+        assert_eq!(
+            parse_status_token("HPT_STATUS STOPPING"),
+            Some(HostPhase::Stopping),
+        );
+        assert_eq!(parse_status_token("UDP link ready"), None);
+        assert_eq!(parse_status_token("HPT_STATUS CONNECTED extra"), None);
+    }
+
+    #[test]
+    fn keeps_native_fatal_detail_for_the_launcher() {
+        assert_eq!(
+            user_facing_native_error("route restore failed".to_owned()),
+            "route restore failed",
+        );
+    }
 }

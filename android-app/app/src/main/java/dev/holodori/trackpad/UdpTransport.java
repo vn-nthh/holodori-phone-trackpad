@@ -1,23 +1,29 @@
 package dev.holodori.trackpad;
 
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
 import android.os.Process;
 import android.util.Log;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.InterfaceAddress;
 import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.SecureRandom;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -33,11 +39,10 @@ import java.util.zip.CRC32;
  */
 final class UdpTransport implements TouchTransport {
     private static final String TAG = "HolodoriUDP4";
-    private static final int DISCOVERY_PORT = 42_825;
-    private static final int DISCOVERY_VERSION = 1;
-    private static final int DISCOVERY_HELLO = 1;
-    private static final int DISCOVERY_ACK = 2;
-    private static final int DISCOVERY_SIZE = 32;
+    private static final int DISCOVERY_PORT = DiscoveryPolicy.PORT;
+    private static final int DISCOVERY_VERSION = DiscoveryPolicy.VERSION;
+    private static final int DISCOVERY_HELLO = DiscoveryPolicy.HELLO;
+    private static final int DISCOVERY_SIZE = DiscoveryPolicy.SIZE;
     private static final long DISCOVERY_INTERVAL_NANOS = 500_000_000L;
     private static final long HOST_TIMEOUT_NANOS = 2_000_000_000L;
     private static final long ACTIVE_HOST_TIMEOUT_NANOS = 64_000_000L;
@@ -83,6 +88,7 @@ final class UdpTransport implements TouchTransport {
     private final Object lifecycleLock = new Object();
     private final ArrayDeque<PendingPacket> unacknowledged = new ArrayDeque<>();
     private final ArrayDeque<PendingPacket> packetPool = new ArrayDeque<>();
+    private final ConnectivityManager connectivityManager;
     private final TouchTransport.Listener listener;
     private final SecureRandom random = new SecureRandom();
     private final CRC32 writerCrc = new CRC32();
@@ -95,7 +101,10 @@ final class UdpTransport implements TouchTransport {
     private final byte[] discoveryBuffer = new byte[DISCOVERY_SIZE];
     private final ByteBuffer discoveryPacket =
             ByteBuffer.wrap(discoveryBuffer).order(ByteOrder.LITTLE_ENDIAN);
+    private final Set<String> androidNetworkInterfaces = new HashSet<>();
     private final Set<InetAddress> discoveryDestinations = new HashSet<>();
+    private final ArrayList<DiscoveryPolicy.Ipv4Subnet> discoverySubnets =
+            new ArrayList<>();
     private final DatagramPacket discoveryDatagram =
             new DatagramPacket(discoveryBuffer, discoveryBuffer.length);
     // Retain the latest complete contact snapshot so a restarted host can
@@ -130,8 +139,13 @@ final class UdpTransport implements TouchTransport {
     private Thread writerThread;
     private Thread watchdogThread;
 
-    UdpTransport(TouchTransport.Listener listener) {
+    UdpTransport(Context context, TouchTransport.Listener listener) {
         this.listener = listener;
+        Context applicationContext = context.getApplicationContext();
+        Context serviceContext = applicationContext == null ? context : applicationContext;
+        connectivityManager = (ConnectivityManager) serviceContext.getSystemService(
+                Context.CONNECTIVITY_SERVICE
+        );
         for (int index = 0; index < PACKET_POOL_CAPACITY; index++) {
             packetPool.addLast(new PendingPacket());
         }
@@ -345,25 +359,42 @@ final class UdpTransport implements TouchTransport {
                     continue;
                 }
                 int count = incoming.getLength();
-                if (isDiscovery(incoming.getData(), count)) {
-                    if (isValidDiscoveryAck(incoming.getData(), count)) {
+                if (DiscoveryPolicy.hasDiscoveryMagic(incoming.getData(), count)) {
+                    if (DiscoveryPolicy.isValidAck(
+                            incoming.getData(),
+                            count,
+                            discoveryNonce,
+                            sessionId,
+                            controlCrc
+                    )) {
+                        InetSocketAddress source =
+                                (InetSocketAddress) incoming.getSocketAddress();
                         synchronized (queueLock) {
                             if (!isSessionActive(sessionGeneration)) {
                                 continue;
                             }
-                            hostAddress = new InetSocketAddress(
-                                    incoming.getAddress(),
-                                    incoming.getPort()
+                            DiscoveryPolicy.EndpointDecision endpointDecision =
+                                    DiscoveryPolicy.decideEndpoint(
+                                            hostAddress,
+                                            source,
+                                            discoverySubnets
                             );
-                            // Discovery ACKs keep an idle session alive without
-                            // synthetic touch traffic. During active input they
-                            // must not mask a stalled data/ACK path: otherwise
-                            // old touch frames remain queued and can be
-                            // delivered seconds late when UDP recovers.
-                            if (activeContactCount == 0 && unacknowledged.isEmpty()) {
-                                lastControlReceiveNanos = System.nanoTime();
+                            if (endpointDecision
+                                    != DiscoveryPolicy.EndpointDecision.REJECT) {
+                                if (endpointDecision
+                                        == DiscoveryPolicy.EndpointDecision.PIN) {
+                                    hostAddress = source;
+                                }
+                                // Discovery ACKs from the pinned endpoint keep
+                                // an idle session alive without synthetic touch
+                                // traffic. During active input they must not mask
+                                // a stalled data/ACK path.
+                                if (activeContactCount == 0
+                                        && unacknowledged.isEmpty()) {
+                                    lastControlReceiveNanos = System.nanoTime();
+                                }
+                                queueLock.notifyAll();
                             }
-                            queueLock.notifyAll();
                         }
                     }
                     // Discovery traffic can arrive continuously, so do not
@@ -402,20 +433,54 @@ final class UdpTransport implements TouchTransport {
         controlCrc.update(discoveryBuffer, 0, DISCOVERY_SIZE - 4);
         packet.putInt((int) controlCrc.getValue());
 
+        boolean linkPropertiesSnapshotComplete = refreshAndroidNetworkInterfaces();
         discoveryDestinations.clear();
+        discoverySubnets.clear();
+        int bestCandidatePriority = 0;
         Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
         while (interfaces != null && interfaces.hasMoreElements()) {
             NetworkInterface network = interfaces.nextElement();
+            int candidatePriority;
             try {
-                if (!network.isUp() || network.isLoopback() || !isUsbTetherInterface(network)) {
+                if (!network.isUp() || network.isLoopback()) {
+                    continue;
+                }
+                candidatePriority = DiscoveryPolicy.candidatePriority(
+                        network.getName(),
+                        network.getDisplayName(),
+                        androidNetworkInterfaces,
+                        linkPropertiesSnapshotComplete
+                );
+                if (candidatePriority == 0) {
                     continue;
                 }
             } catch (SocketException ignored) {
                 continue;
             }
-            for (java.net.InterfaceAddress address : network.getInterfaceAddresses()) {
-                if (address.getBroadcast() != null) {
-                    discoveryDestinations.add(address.getBroadcast());
+            for (InterfaceAddress address : network.getInterfaceAddresses()) {
+                InetAddress localAddress = address.getAddress();
+                InetAddress broadcastAddress = address.getBroadcast();
+                if (!(localAddress instanceof Inet4Address)
+                        || !(broadcastAddress instanceof Inet4Address)) {
+                    continue;
+                }
+                DiscoveryPolicy.Ipv4Subnet subnet = DiscoveryPolicy.Ipv4Subnet.from(
+                        localAddress,
+                        address.getNetworkPrefixLength()
+                );
+                if (subnet != null) {
+                    if (candidatePriority < bestCandidatePriority) {
+                        continue;
+                    }
+                    if (candidatePriority > bestCandidatePriority) {
+                        discoveryDestinations.clear();
+                        discoverySubnets.clear();
+                        bestCandidatePriority = candidatePriority;
+                    }
+                    discoveryDestinations.add(broadcastAddress);
+                    if (!discoverySubnets.contains(subnet)) {
+                        discoverySubnets.add(subnet);
+                    }
                 }
             }
         }
@@ -430,16 +495,39 @@ final class UdpTransport implements TouchTransport {
         }
     }
 
-    private static boolean isUsbTetherInterface(NetworkInterface network) {
-        String name = network.getName();
-        String displayName = network.getDisplayName();
-        String identity = ((name == null ? "" : name) + " "
-                + (displayName == null ? "" : displayName)).toLowerCase(Locale.ROOT);
-        return identity.contains("rndis")
-                || identity.contains("usb")
-                || identity.contains("ncm")
-                || identity.contains("ethernet")
-                || identity.startsWith("eth");
+    private boolean refreshAndroidNetworkInterfaces() {
+        androidNetworkInterfaces.clear();
+        if (connectivityManager == null) {
+            return false;
+        }
+        boolean complete = true;
+        try {
+            Network[] networks = connectivityManager.getAllNetworks();
+            if (networks == null) {
+                return false;
+            }
+            for (Network network : networks) {
+                LinkProperties properties = connectivityManager.getLinkProperties(network);
+                if (properties == null) {
+                    complete = false;
+                    continue;
+                }
+                collectAndroidNetworkInterfaces(properties);
+            }
+        } catch (RuntimeException ignored) {
+            androidNetworkInterfaces.clear();
+            return false;
+        }
+        return complete;
+    }
+
+    private void collectAndroidNetworkInterfaces(LinkProperties properties) {
+        String interfaceName = DiscoveryPolicy.normalizeInterfaceName(
+                properties.getInterfaceName()
+        );
+        if (!interfaceName.isEmpty()) {
+            androidNetworkInterfaces.add(interfaceName);
+        }
     }
 
     private boolean isHostPacket(InetAddress address, int port) {
@@ -447,29 +535,6 @@ final class UdpTransport implements TouchTransport {
         return known != null
                 && known.getPort() == port
                 && known.getAddress().equals(address);
-    }
-
-    private boolean isDiscovery(byte[] bytes, int length) {
-        return length >= 4
-                && bytes[0] == 'H'
-                && bytes[1] == 'P'
-                && bytes[2] == 'T'
-                && bytes[3] == 'D';
-    }
-
-    private boolean isValidDiscoveryAck(byte[] bytes, int length) {
-        if (length != DISCOVERY_SIZE
-                || (bytes[4] & 0xFF) != DISCOVERY_VERSION
-                || (bytes[5] & 0xFF) != DISCOVERY_ACK) {
-            return false;
-        }
-        if (controlPacket.getLong(8) != discoveryNonce
-                || controlPacket.getLong(16) != sessionId) {
-            return false;
-        }
-        controlCrc.reset();
-        controlCrc.update(bytes, 0, DISCOVERY_SIZE - 4);
-        return (int) controlCrc.getValue() == controlPacket.getInt(DISCOVERY_SIZE - 4);
     }
 
     private void handleControl(
