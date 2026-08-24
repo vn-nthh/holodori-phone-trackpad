@@ -553,7 +553,6 @@ final class UdpTransport implements TouchTransport {
         controlCrc.update(control, 0, TouchSample.CONTROL_SIZE - 4);
         if ((int) controlCrc.getValue()
                 != controlPacket.getInt(TouchSample.CONTROL_SIZE - 4)) {
-            Log.w(TAG, "Ignoring host control record with invalid CRC");
             return;
         }
         int type = control[5] & 0xFF;
@@ -597,8 +596,6 @@ final class UdpTransport implements TouchTransport {
     private boolean acknowledgeLocked(long acknowledgedSequence) {
         if (acknowledgedSequence < 0 || acknowledgedSequence <= highestAcknowledged) return false;
         if (acknowledgedSequence >= nextSequence) {
-            Log.w(TAG, "Ignoring ACK beyond the last queued sequence: "
-                    + acknowledgedSequence);
             return false;
         }
         highestAcknowledged = acknowledgedSequence;

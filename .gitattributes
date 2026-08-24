@@ -1,1 +1,6 @@
 packaging/third_party/libwdi/Microsoft-WDK-License.rtf binary
+
+# Linux entry points must remain directly executable even when the repository
+# is prepared from a Windows worktree with core.autocrlf enabled.
+*.sh text eol=lf
+/android-app/gradlew text eol=lf

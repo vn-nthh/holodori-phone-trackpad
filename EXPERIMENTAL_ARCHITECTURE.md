@@ -1,10 +1,10 @@
 # Experimental lossless touch architecture
 
-This branch is a USB-tethering/RNDIS + UDP experiment. It is deliberately
-not wire-compatible with the stable Python release and does not use ADB,
-root, Android USB accessory mode, WinUSB, UsbDk, or a custom Windows driver.
-The only physical link is the phone's normal USB cable; Windows' inbox RNDIS
-network driver carries the UDP traffic.
+This branch is a USB-tethering/RNDIS + UDP experiment for Windows and Linux. It
+is deliberately not wire-compatible with the stable Python release and does
+not use ADB, root, Android USB accessory mode, WinUSB, UsbDk, or a custom host
+driver. The only physical link is the phone's normal USB cable; the operating
+system's USB-network driver carries the UDP traffic.
 
 ## Data path
 
@@ -14,13 +14,14 @@ Android MotionEvent
   -> retained v4 queue with benchmark timestamps
   -> HPT4 one-datagram UDP send over USB tethering/RNDIS
   -> Rust UDP receiver + CRC + sequence reorder/dedup
-  -> selected Windows OS sink
+  -> selected host OS sink (Windows Touch/keys or Linux uinput keys)
   -> HPA4 cumulative ACK datagram
   -> Android retires acknowledged frames
 ```
 
-The ACK is deliberately after the sink. A valid packet that Windows has not
-accepted remains unacknowledged and is retried; parsing alone is not success.
+The ACK is deliberately after the sink. A valid packet that the operating
+system has not accepted remains unacknowledged and is retried; parsing alone
+is not success.
 UDP is used as a low-overhead datagram framing layer, not as an invitation to
 drop input: the retained queue and cumulative ACK make the live path
 loss-aware.
@@ -31,26 +32,32 @@ The Android app binds one ephemeral UDP socket and broadcasts a 32-byte,
 CRC-protected `HPTD` discovery hello to port 42825 only through conservative
 USB-tether candidates. The host listens on `0.0.0.0:42825` so a tether adapter
 can appear dynamically, but replies only when the source is in one recognized,
-unambiguous RNDIS/NCM/USB-tether prefix. The phone independently verifies that
-the acknowledgement came from its selected tether subnet and pins the first
-host IP/port for the session. No fixed phone IP is assumed.
+unambiguous USB-tether prefix. Both hosts use `IP_PKTINFO` receive metadata to
+require discovery and gameplay datagrams to arrive on that exact interface.
+Linux additionally accepts only the kernel's `rndis_host` driver, so generic
+CDC Ethernet/NCM devices and cross-interface source spoofing fail closed while
+protocol v4 cannot authenticate identity. The phone independently verifies
+that the acknowledgement came from its selected tether subnet and pins the
+first host IP/port for the session. No fixed phone IP is assumed.
 
 Discovery repeats so a host restart does not require toggling USB tethering.
-A same-IP source-port change is adopted in place only after Windows reconfirms
+A same-IP source-port change is adopted in place only after the host reconfirms
 the peer's unambiguous tether prefix, route, and exact original adapter. Failed
 revalidation aborts to discovery through a clean input boundary. A changed
-discovery session also releases Windows input and requires a fresh
+discovery session also releases injected input and requires a fresh
 session-start `CANCEL`. Different-IP hellos and wrong-session gameplay cannot
 retarget an established link.
 
-Protocol v4 has no cryptographic pairing. The interface/subnet checks confine
-the intended trust boundary, but a sender already on or spoofing the tether
-subnet can interfere. CRC protects integrity against corruption, not identity.
+Protocol v4 has no cryptographic pairing. The interface/subnet checks narrow
+the intended trust boundary, but any sender able to reach the host from the
+accepted tether subnet can impersonate the phone and inject input. CRC protects
+integrity against corruption, not identity. Authenticated pairing remains a
+protocol-v5 task.
 
 ## Optional local-only tethering
 
-The Tauri launcher exposes **Stop the PC from using the phone's internet** as an
-opt-in setting. When enabled, the native host recognizes the Android/RNDIS
+On Windows, the Tauri launcher exposes **Stop the PC from using the phone's
+internet** as an opt-in setting. When enabled, the native host recognizes the Android/RNDIS
 adapter only after a valid discovery hello arrives from an unambiguous private
 or local tether prefix and Windows confirms that the peer is routed through
 that same interface. It does not mutate every adapter whose display name looks
@@ -59,6 +66,11 @@ current default routes, disables future default-route installation on that
 adapter, and removes only the routes recorded in that journal. The connected
 phone subnet remains available for the Holodori UDP link, while the PC's other
 applications continue using their normal interfaces.
+
+Linux deliberately performs no route mutation. The launcher disables this
+option and the backend rejects it; users who need the same policy configure
+both `ipv4.never-default` and `ipv6.never-default` on the NetworkManager tether
+profile.
 
 The privileged mutation consumes the immutable adapter identity accepted by
 discovery instead of performing an unrelated second selection. Every queried
@@ -102,11 +114,11 @@ each boundary.
 - Each sample contains the complete simultaneous contact set.
 - The queue has no age-based or capacity-based gameplay eviction.
 - Every frame has a 64-bit session ID, 64-bit sequence, length, and CRC.
-- Windows buffers a future sequence until the missing sequence arrives.
+- The host buffers a future sequence until the missing sequence arrives.
 - Duplicate replays are acknowledged without being applied twice.
 - Every frame, discovery record, and acknowledgement has an immediate
   redundant copy; a second replay round starts after 2 ms.
-- Android retires only the highest contiguous sequence acknowledged by Windows.
+- Android retires only the highest contiguous sequence acknowledged by the host.
 - The lane sink interpolates every lane between old and new positions, even if
   a phone or OS reports a large coordinate jump.
 - A lane transition presses the new lane before releasing the old one.
@@ -114,9 +126,9 @@ each boundary.
   complete contact snapshot, so a restarted host can reconstruct a hold.
 
 A physical cable removal is a visible session boundary, not packet jitter.
-Windows releases active injected input after 32 ms without an ordered frame
+The host releases active injected input after 32 ms without an ordered frame
 being accepted by the OS sink and committed. Valid duplicates or future frames
-behind an ordering hole do not mask that stall. Windows then refuses delayed
+behind an ordering hole do not mask that stall. The host then refuses delayed
 gameplay until a fresh session-start `CANCEL`.
 Protocol v4 does not replay old gameplay after a multi-second reconnect
 because doing so would create late notes. During gameplay Android starts a
@@ -156,13 +168,15 @@ The probe must count them as Windows pointer messages.
 ## Holodori keyboard mode
 
 `--mode keys` converts the same ordered touch frames into Windows keyboard scan
-code input. Multiple fingers use per-lane reference counts, so one finger
+codes or Linux `uinput` key events. Multiple fingers use per-lane reference
+counts, so one finger
 cannot release a key still held by another. A CANCEL, session start, host exit,
 or sink drop releases all held keys. A physical tip remains owned when it
 leaves the painted phone rectangle; normalized X is clamped to the nearest
 edge lane until lift. Each protocol frame's ordered press-before-release
-changes are submitted in one `SendInput` call, with partial-prefix acceptance
-retrying only the unaccepted suffix.
+changes are submitted as one platform batch, with partial-prefix acceptance
+retrying only the unaccepted suffix. Linux counts a transition as accepted only
+after both its `EV_KEY` and following `SYN_REPORT` have reached `uinput`.
 
 The native host reports stable Waiting, Connected, Recovering, and Stopping
 transitions from a background reporter. The launcher drains that stream and
@@ -177,7 +191,7 @@ patches memory, hooks rendering/input code, or constructs game/network packets.
 ## Latency contract
 
 The native hot path has no Python interpreter, JSON, polling bridge, or UI
-work. It uses fixed binary datagrams, stack buffers, direct User32 calls,
+work. It uses fixed binary datagrams, stack buffers, direct native OS input calls,
 immediate redundant sends, and a 2 ms replay threshold. It accepts and sustains
 at least 120 updates per second; the keepalive period is 8 ms.
 
@@ -203,12 +217,15 @@ clock origins.
 Pass `--metrics` to collect bounded in-memory samples. No metrics are formatted,
 sorted, printed, or written while input is active. Press Q then Enter, Ctrl+C,
 or close the console to request graceful shutdown; the host then writes one
-timestamped file under `Windows\Logs`. `--metrics-file PATH` selects an explicit
-destination and `--warn-ms MS` changes the default 8.333 ms final warning budget.
+timestamped file under `Windows\Logs` on Windows or
+`$XDG_STATE_HOME/holodori/logs` (falling back to
+`~/.local/state/holodori/logs`) on Linux. `--metrics-file PATH` selects an
+explicit destination and `--warn-ms MS` changes the default 8.333 ms final
+warning budget.
 
 The report contains mean, max, p50, p90, p99, and p99.9 values for current-event
-to-Windows estimated latency, Android current input dispatch, Android historical
-batch age, Android callback-to-write, symmetric one-way network, Windows
+to-host-input estimated latency, Android current input dispatch, Android historical
+batch age, Android callback-to-write, symmetric one-way network, host
 receive-to-sink, and ACK write. Recovery incidents, out-of-order frames,
 replays, unresolved frames, parser discards, and sink retries are counted once
 at exit. No cross-device clocks are directly subtracted.
@@ -217,8 +234,8 @@ at exit. No cross-device clocks are directly subtracted.
 
 Requirements:
 
-- Windows 10 or 11;
-- Rust stable MSVC toolchain;
+- Windows 10/11 or x86_64 Linux;
+- Rust stable (MSVC on Windows, GNU on the current Linux bundle);
 - JDK 17 and Android SDK Platform 35 for the APK;
 - a phone and PC that support ordinary USB tethering/RNDIS.
 

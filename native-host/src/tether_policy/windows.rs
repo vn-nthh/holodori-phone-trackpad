@@ -125,6 +125,10 @@ impl TetherBinding {
         self.interface_index
     }
 
+    pub(crate) fn accepts_ingress_interface(&self, interface_index: Option<u32>) -> bool {
+        !self.validate_runtime || interface_index == Some(self.interface_index)
+    }
+
     pub fn verify_peer(&self, peer: SocketAddr) -> io::Result<()> {
         if !self.validate_runtime {
             return Ok(());
@@ -2149,6 +2153,9 @@ mod tests {
         };
         let mut current = expected.clone();
         assert!(expected.matches_current(&current));
+        assert!(expected.accepts_ingress_interface(Some(expected.interface_index)));
+        assert!(!expected.accepts_ingress_interface(Some(expected.interface_index ^ 1)));
+        assert!(!expected.accepts_ingress_interface(None));
 
         current.interface_index ^= 1;
         current.adapter.interface_index = current.interface_index;

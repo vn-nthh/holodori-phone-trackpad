@@ -1,8 +1,9 @@
 # Holodori lossless touch protocol v4
 
-Protocol v4 is the duplex binary protocol used by the native Windows
-experiment over Android USB tethering/RNDIS and UDP. Android retains each input
-frame until the host confirms that the selected Windows sink accepted it.
+Protocol v4 is the duplex binary protocol used by the native Windows and Linux
+hosts over Android USB tethering/RNDIS and UDP. Android retains each input
+frame until the host confirms that the selected operating-system sink accepted
+it.
 Version 4 adds stage-separated benchmark timestamps and a duplex clock
 exchange; it is not wire-compatible with protocol v3 or the stable Python host.
 
@@ -11,10 +12,14 @@ exchange; it is not wire-compatible with protocol v3 or the stable Python host.
 The app sends a 32-byte `HPTD` discovery hello to UDP port `42825` only on
 conservatively classified USB-tether interfaces. The host listens on
 `0.0.0.0:42825` so an adapter can appear after startup, but it accepts a hello
-only when the source belongs to one unambiguous recognized RNDIS/NCM/USB-tether
-prefix. It replies to that source and receives HPT4 datagrams from the phone's
-ephemeral source port. The discovery record is little-endian and uses this
-layout:
+only when the source belongs to one unambiguous recognized USB-tether prefix.
+Both hosts require `IP_PKTINFO` receive metadata to report that the datagram
+actually arrived on the accepted interface. Linux additionally requires the
+kernel's `rndis_host` driver; generic CDC Ethernet/NCM adapters and spoofed
+packets arriving on another interface fail closed while protocol v4 has no
+authenticated pairing. The host replies to that source and receives HPT4
+datagrams from the phone's ephemeral source port. The discovery record is
+little-endian and uses this layout:
 
 | Offset | Type | Meaning |
 |---:|---|---|
@@ -40,18 +45,19 @@ same interface before any route setting is changed.
 
 The host pins the phone IP, source port, discovery nonce, session, and exact
 tether adapter identity. A same-IP hello from a new source port migrates in
-place only after Windows reconfirms the peer's unambiguous prefix, route, and
+place only after the host reconfirms the peer's unambiguous prefix, route, and
 original adapter identity. A failed revalidation aborts the connection and
 returns to discovery through a clean input boundary. If the session is
-unchanged, asserted input remains owned; if its session changes, Windows first
+unchanged, asserted input remains owned; if its session changes, the host first
 releases input and requires a sequence-zero session-start `CANCEL`. Hellos from
 a different IP and HPT4 frames with a different session are ignored without an
 acknowledgement.
 
 This is network confinement, not cryptographic authentication. CRC-32 detects
-corruption but does not prove identity. A malicious sender already on, or able
-to spoof, the USB-tether subnet can still interfere with protocol v4. Pairing
-and authenticated framing require a future protocol version.
+corruption but does not prove identity. Any sender able to reach the host from
+the accepted USB-tether subnet can impersonate the phone and inject input.
+Pairing and authenticated framing require protocol v5 and are intentionally
+outside this version.
 
 Each HPT4 frame and HPA4 control record is one UDP datagram. A datagram is
 never concatenated with the next datagram for parsing, and the largest HPT4
@@ -111,7 +117,7 @@ The same-clock stages are exact monotonic differences:
 
 - Android input dispatch: callback minus original event time;
 - Android app/queue: USB-write time minus callback time;
-- Windows service: sink acceptance minus host receipt;
+- host input service: sink acceptance minus host receipt;
 - ACK write: completion minus start of the host bulk write.
 
 The USB-tethered network estimate uses four timestamps from a duplex exchange:
@@ -129,8 +135,8 @@ directions have equal delay, so the report labels the result as an estimate.
 Current samples and historical Android batch samples have separate statistics.
 Historical sample age therefore cannot inflate the live current-event result.
 The estimated current-event end-to-end value is the sum of Android current
-dispatch, callback-to-write, estimated USB-tethered network one-way, and Windows service for the
-same accepted frame.
+dispatch, callback-to-write, estimated USB-tethered network one-way, and host
+input service for the same accepted frame.
 
 The host aggregates the complete session into fixed 4 microsecond histograms.
 It retains exact counts, mean, and maximum while avoiding per-frame allocation,
@@ -143,10 +149,10 @@ breakdown needed to locate a rare stall.
 - Frames carry session, sequence, length, and CRC protection.
 - The host buffers future sequences and applies every sequence exactly once.
 - Android sends every frame twice immediately and begins replay after 2 ms if
-  neither copy produces a cumulative acknowledgement. Windows likewise sends
+  neither copy produces a cumulative acknowledgement. The host likewise sends
   every discovery and control record twice. One lost or corrupt datagram is
   therefore covered without waiting for the replay timer.
-- The host acknowledges only after the selected Windows sink accepts a frame.
+- The host acknowledges only after the selected OS sink accepts a frame.
 - A fresh host can bootstrap from the oldest replay in an active phone session.
 - During gameplay, 64 ms without cumulative ACK advancement makes Android drop
   queued gameplay and start a fresh session with a `CANCEL`. Duplicate, stale,
@@ -162,8 +168,8 @@ breakdown needed to locate a rare stall.
   two seconds without a valid pinned-peer hello or CRC-valid frame returns the
   host to discovery so the launcher cannot remain falsely connected.
 - A cable removal is a session boundary; old gameplay is not replayed late.
-- If no ordered frame reaches the Windows OS sink and commits for 32 ms while
-  input is active, Windows releases injected input, rejects delayed gameplay
+- If no ordered frame reaches the host OS sink and commits for 32 ms while
+  input is active, the host releases injected input, rejects delayed gameplay
   from that session, and waits for a fresh session-start `CANCEL`. Merely
   decoding duplicates or future frames behind a gap does not refresh liveness.
 - Any host read or acknowledgement-write failure also releases injected input

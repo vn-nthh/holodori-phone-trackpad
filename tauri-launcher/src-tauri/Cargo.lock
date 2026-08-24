@@ -1203,6 +1203,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 name = "holodori-native-host"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "windows-sys 0.61.2",

@@ -2,14 +2,27 @@ use crate::protocol::{
     DISCOVERY_ACK, DISCOVERY_HELLO, FRAME_MAGIC, decode_discovery, discovery_port_acceptable,
     encode_discovery,
 };
-use crate::tether_policy::{TetherBinding, current_tether_binding};
+use crate::tether::{TetherBinding, current_tether_binding};
 use std::io;
+#[cfg(any(windows, target_os = "linux"))]
 use std::mem::size_of;
+#[cfg(windows)]
+use std::mem::size_of_val;
+#[cfg(any(windows, target_os = "linux"))]
+use std::net::{IpAddr, Ipv4Addr};
 use std::net::{SocketAddr, UdpSocket};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(windows)]
 use std::os::windows::io::AsRawSocket;
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::{
-    SO_SNDTIMEO, SOCKET, SOCKET_ERROR, SOL_SOCKET, WSAGetLastError, setsockopt,
+    AF_INET, CMSGHDR, IN_PKTINFO, IP_PKTINFO, IPPROTO_IP, LPFN_WSARECVMSG, MSG_CTRUNC,
+    SIO_GET_EXTENSION_FUNCTION_POINTER, SO_SNDTIMEO, SOCKADDR_IN, SOCKET, SOCKET_ERROR, SOL_SOCKET,
+    WSABUF, WSAGetLastError, WSAID_WSARECVMSG, WSAIoctl, WSAMSG, setsockopt,
 };
 
 pub const DEFAULT_UDP_PORT: u16 = 42_825;
@@ -28,6 +41,7 @@ impl UdpHost {
     pub fn bind(port: u16) -> io::Result<Self> {
         let socket = UdpSocket::bind(("0.0.0.0", port))?;
         set_write_timeout(&socket, DATAGRAM_WRITE_TIMEOUT)?;
+        enable_receive_interface(&socket)?;
         let port = socket.local_addr()?.port();
         socket.set_broadcast(true)?;
         socket.set_read_timeout(Some(DISCOVERY_READ_TIMEOUT))?;
@@ -59,8 +73,8 @@ impl UdpHost {
             if Instant::now() >= deadline {
                 return Err(discovery_timeout(self.port));
             }
-            match self.socket.recv_from(&mut buffer) {
-                Ok((count, peer)) => {
+            match receive_datagram(&self.socket, &mut buffer) {
+                Ok((count, peer, ingress_interface)) => {
                     let Some(discovery) = decode_discovery(&buffer[..count]) else {
                         continue;
                     };
@@ -73,6 +87,9 @@ impl UdpHost {
                     let Some(binding) = classify_peer(peer)? else {
                         continue;
                     };
+                    if !binding_accepts_ingress(&binding, ingress_interface) {
+                        continue;
+                    }
                     let acknowledgement = encode_discovery(
                         DISCOVERY_ACK,
                         discovery.nonce,
@@ -128,11 +145,11 @@ impl UdpConnection<'_> {
         &self.binding
     }
 
-    /// Reconfirm that Windows still routes this peer through the exact tether
+    /// Reconfirm that the host still routes this peer through the exact tether
     /// adapter accepted during discovery. Call this before exposing a newly
-    /// discovered connection to the input loop; discovery and route-policy
-    /// setup are separate system snapshots and the adapter can change between
-    /// them.
+    /// discovered connection to the input loop; discovery and the Windows-only
+    /// route-policy setup are separate system snapshots and the adapter can
+    /// change between them.
     pub fn revalidate_peer(&self) -> io::Result<()> {
         self.binding.verify_peer(self.peer)
     }
@@ -153,14 +170,24 @@ impl UdpConnection<'_> {
         self.last_peer_activity = Instant::now();
     }
 
-    pub fn read(&mut self, buffer: &mut [u8], timeout_ms: u32) -> io::Result<usize> {
+    pub fn read(
+        &mut self,
+        buffer: &mut [u8],
+        timeout_ms: u32,
+        allow_discovery: bool,
+    ) -> io::Result<usize> {
         let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms.max(1)));
         loop {
             if Instant::now() >= deadline {
                 return Ok(0);
             }
-            match self.socket.recv_from(buffer) {
-                Ok((count, peer)) if peer == self.peer => {
+            match receive_datagram(self.socket, buffer) {
+                Ok((_, _, ingress_interface))
+                    if !binding_accepts_ingress(&self.binding, ingress_interface) =>
+                {
+                    continue;
+                }
+                Ok((count, peer, _)) if peer == self.peer => {
                     if buffer[..count].starts_with(&FRAME_MAGIC) {
                         if frame_session(&buffer[..count]) == Some(self.discovery_session_id) {
                             return Ok(count);
@@ -170,7 +197,8 @@ impl UdpConnection<'_> {
                     // The phone periodically repeats discovery so a host that
                     // was restarted can be found without restarting the app.
                     // Acknowledge it and keep the data path free for frames.
-                    if let Some(discovery) = decode_discovery(&buffer[..count])
+                    if allow_discovery
+                        && let Some(discovery) = decode_discovery(&buffer[..count])
                         && discovery.kind == DISCOVERY_HELLO
                         && discovery_port_acceptable(
                             discovery.port,
@@ -189,8 +217,9 @@ impl UdpConnection<'_> {
                         self.adopt_discovery(discovery.nonce, discovery.session_id);
                     }
                 }
-                Ok((count, peer)) => {
-                    if let Some(discovery) = decode_discovery(&buffer[..count])
+                Ok((count, peer, _)) => {
+                    if allow_discovery
+                        && let Some(discovery) = decode_discovery(&buffer[..count])
                         && discovery.kind == DISCOVERY_HELLO
                         && peer.ip() == self.peer.ip()
                         && discovery_port_acceptable(
@@ -276,6 +305,274 @@ fn send_redundant(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr) -> io::Res
     }
 }
 
+#[cfg(target_os = "linux")]
+fn enable_receive_interface(socket: &UdpSocket) -> io::Result<()> {
+    let enabled: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_PKTINFO,
+            (&raw const enabled).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+static WINDOWS_RECEIVE_MESSAGE: OnceLock<LPFN_WSARECVMSG> = OnceLock::new();
+
+#[cfg(windows)]
+fn enable_receive_interface(socket: &UdpSocket) -> io::Result<()> {
+    let enabled = 1_u32;
+    let result = unsafe {
+        setsockopt(
+            socket.as_raw_socket() as SOCKET,
+            IPPROTO_IP,
+            IP_PKTINFO,
+            (&raw const enabled).cast(),
+            size_of::<u32>() as i32,
+        )
+    };
+    if result == SOCKET_ERROR {
+        return Err(windows_socket_error());
+    }
+    receive_message_pointer(socket).map(|_| ())
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn enable_receive_interface(_socket: &UdpSocket) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn receive_datagram(
+    socket: &UdpSocket,
+    buffer: &mut [u8],
+) -> io::Result<(usize, SocketAddr, Option<u32>)> {
+    let mut peer: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    let mut vector = libc::iovec {
+        iov_base: buffer.as_mut_ptr().cast(),
+        iov_len: buffer.len(),
+    };
+    // A usize array supplies cmsghdr alignment; 64 bytes is ample for one
+    // IPv4 IP_PKTINFO record while keeping the receive metadata on the stack.
+    let mut control = [0_usize; 8];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_name = (&raw mut peer).cast();
+    message.msg_namelen = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    message.msg_iov = &raw mut vector;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = std::mem::size_of_val(&control);
+
+    let received = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut message, 0) };
+    if received < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if message.msg_namelen < size_of::<libc::sockaddr_in>() as libc::socklen_t
+        || i32::from(peer.sin_family) != libc::AF_INET
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "UDP receive returned a non-IPv4 peer",
+        ));
+    }
+
+    let address = Ipv4Addr::from(peer.sin_addr.s_addr.to_ne_bytes());
+    let peer = SocketAddr::new(IpAddr::V4(address), u16::from_be(peer.sin_port));
+    Ok((received as usize, peer, ingress_interface(&message)))
+}
+
+#[cfg(target_os = "linux")]
+fn ingress_interface(message: &libc::msghdr) -> Option<u32> {
+    if message.msg_flags & libc::MSG_CTRUNC != 0 {
+        return None;
+    }
+    let minimum_length = unsafe { libc::CMSG_LEN(size_of::<libc::in_pktinfo>() as _) } as usize;
+    let mut header = unsafe { libc::CMSG_FIRSTHDR(message) };
+    while !header.is_null() {
+        let current = unsafe { &*header };
+        if current.cmsg_level == libc::IPPROTO_IP
+            && current.cmsg_type == libc::IP_PKTINFO
+            && current.cmsg_len >= minimum_length
+        {
+            let packet_info = unsafe {
+                std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<libc::in_pktinfo>())
+            };
+            return u32::try_from(packet_info.ipi_ifindex)
+                .ok()
+                .filter(|index| *index != 0);
+        }
+        header = unsafe { libc::CMSG_NXTHDR(message, header) };
+    }
+    None
+}
+
+#[cfg(windows)]
+fn receive_message_pointer(socket: &UdpSocket) -> io::Result<LPFN_WSARECVMSG> {
+    if let Some(pointer) = WINDOWS_RECEIVE_MESSAGE.get() {
+        return Ok(*pointer);
+    }
+
+    let mut pointer: LPFN_WSARECVMSG = None;
+    let mut returned = 0_u32;
+    let receive_message_guid = WSAID_WSARECVMSG;
+    let result = unsafe {
+        WSAIoctl(
+            socket.as_raw_socket() as SOCKET,
+            SIO_GET_EXTENSION_FUNCTION_POINTER,
+            (&raw const receive_message_guid).cast(),
+            size_of_val(&receive_message_guid) as u32,
+            (&raw mut pointer).cast(),
+            size_of::<LPFN_WSARECVMSG>() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    if result == SOCKET_ERROR {
+        return Err(windows_socket_error());
+    }
+    if returned as usize != size_of::<LPFN_WSARECVMSG>() || pointer.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows did not provide the WSARecvMsg extension",
+        ));
+    }
+    let _ = WINDOWS_RECEIVE_MESSAGE.set(pointer);
+    Ok(*WINDOWS_RECEIVE_MESSAGE.get().unwrap_or(&pointer))
+}
+
+#[cfg(windows)]
+fn receive_datagram(
+    socket: &UdpSocket,
+    buffer: &mut [u8],
+) -> io::Result<(usize, SocketAddr, Option<u32>)> {
+    let Some(receive_message) = receive_message_pointer(socket)? else {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows did not provide the WSARecvMsg extension",
+        ));
+    };
+    let mut peer = SOCKADDR_IN::default();
+    let mut data = WSABUF {
+        len: u32::try_from(buffer.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP receive buffer is too large",
+            )
+        })?,
+        buf: buffer.as_mut_ptr(),
+    };
+    let mut control = [0_usize; 16];
+    let mut message = WSAMSG {
+        name: (&raw mut peer).cast(),
+        namelen: size_of::<SOCKADDR_IN>() as i32,
+        lpBuffers: &raw mut data,
+        dwBufferCount: 1,
+        Control: WSABUF {
+            len: size_of_val(&control) as u32,
+            buf: control.as_mut_ptr().cast(),
+        },
+        dwFlags: 0,
+    };
+    let mut received = 0_u32;
+    let result = unsafe {
+        receive_message(
+            socket.as_raw_socket() as SOCKET,
+            &mut message,
+            &mut received,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    if result == SOCKET_ERROR {
+        return Err(windows_socket_error());
+    }
+    if message.namelen < size_of::<SOCKADDR_IN>() as i32 || peer.sin_family != AF_INET {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "UDP receive returned a non-IPv4 peer",
+        ));
+    }
+
+    let address = Ipv4Addr::from(unsafe { peer.sin_addr.S_un.S_addr }.to_ne_bytes());
+    let peer = SocketAddr::new(IpAddr::V4(address), u16::from_be(peer.sin_port));
+    Ok((received as usize, peer, windows_ingress_interface(&message)))
+}
+
+#[cfg(windows)]
+fn windows_ingress_interface(message: &WSAMSG) -> Option<u32> {
+    if message.dwFlags & MSG_CTRUNC != 0 || message.Control.buf.is_null() {
+        return None;
+    }
+    let available = (message.Control.len as usize).min(128);
+    let header_length = cmsg_align(size_of::<CMSGHDR>())?;
+    let mut offset = 0_usize;
+    while offset.checked_add(size_of::<CMSGHDR>())? <= available {
+        let header =
+            unsafe { std::ptr::read_unaligned(message.Control.buf.add(offset).cast::<CMSGHDR>()) };
+        if header.cmsg_len < header_length || offset.checked_add(header.cmsg_len)? > available {
+            return None;
+        }
+        if header.cmsg_level == IPPROTO_IP
+            && header.cmsg_type == IP_PKTINFO
+            && header.cmsg_len >= header_length.checked_add(size_of::<IN_PKTINFO>())?
+        {
+            let packet_info = unsafe {
+                std::ptr::read_unaligned(
+                    message
+                        .Control
+                        .buf
+                        .add(offset + header_length)
+                        .cast::<IN_PKTINFO>(),
+                )
+            };
+            return (packet_info.ipi_ifindex != 0).then_some(packet_info.ipi_ifindex);
+        }
+        offset = offset.checked_add(cmsg_align(header.cmsg_len)?)?;
+    }
+    None
+}
+
+#[cfg(windows)]
+fn cmsg_align(length: usize) -> Option<usize> {
+    let mask = size_of::<usize>() - 1;
+    length.checked_add(mask).map(|value| value & !mask)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn receive_datagram(
+    socket: &UdpSocket,
+    buffer: &mut [u8],
+) -> io::Result<(usize, SocketAddr, Option<u32>)> {
+    socket
+        .recv_from(buffer)
+        .map(|(count, peer)| (count, peer, None))
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn binding_accepts_ingress(binding: &TetherBinding, interface_index: Option<u32>) -> bool {
+    binding.accepts_ingress_interface(interface_index)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn binding_accepts_ingress(_binding: &TetherBinding, _interface_index: Option<u32>) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn windows_socket_error() -> io::Error {
+    io::Error::from_raw_os_error(unsafe { WSAGetLastError() })
+}
+
+#[cfg(windows)]
 fn set_write_timeout(socket: &UdpSocket, timeout: Duration) -> io::Result<()> {
     let timeout_ms = timeout.as_millis().clamp(1, u128::from(u32::MAX)) as u32;
     let result = unsafe {
@@ -294,6 +591,11 @@ fn set_write_timeout(socket: &UdpSocket, timeout: Duration) -> io::Result<()> {
     }
 }
 
+#[cfg(not(windows))]
+fn set_write_timeout(socket: &UdpSocket, timeout: Duration) -> io::Result<()> {
+    socket.set_write_timeout(Some(timeout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +606,23 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn receive_reports_the_kernel_ingress_interface() {
+        let host = UdpHost::bind(0).unwrap();
+        let sender = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        sender
+            .send_to(b"pktinfo", ("127.0.0.1", host.port()))
+            .unwrap();
+
+        let mut buffer = [0_u8; 32];
+        let (count, peer, interface_index) = receive_datagram(&host.socket, &mut buffer).unwrap();
+
+        assert_eq!(&buffer[..count], b"pktinfo");
+        assert_eq!(peer, sender.local_addr().unwrap());
+        assert!(interface_index.is_some_and(|index| index != 0));
+    }
 
     #[test]
     fn discovers_a_phone_and_returns_the_ack() {
@@ -362,7 +681,7 @@ mod tests {
 
         let started = Instant::now();
         let mut buffer = [0_u8; MAX_DATAGRAM_SIZE];
-        let result = connection.read(&mut buffer, 4).unwrap();
+        let result = connection.read(&mut buffer, 4, true).unwrap();
         stop.store(true, Ordering::Relaxed);
         sender.join().unwrap();
 
@@ -424,10 +743,51 @@ mod tests {
         phone.send_to(&frame, ("127.0.0.1", host.port())).unwrap();
 
         let mut buffer = [0_u8; 64];
-        assert_eq!(connection.read(&mut buffer, 100).unwrap(), frame.len());
+        assert_eq!(
+            connection.read(&mut buffer, 100, true).unwrap(),
+            frame.len()
+        );
         assert_eq!(connection.peer(), phone.local_addr().unwrap());
         let mut response = [0_u8; 32];
         assert!(foreign.recv_from(&mut response).is_err());
+    }
+
+    #[test]
+    fn active_input_path_skips_repeated_discovery_and_reads_the_next_frame() {
+        let host = UdpHost::bind(0).unwrap();
+        let phone = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        phone
+            .send_to(
+                &encode_discovery(DISCOVERY_HELLO, 11, 22, host.port()),
+                ("127.0.0.1", host.port()),
+            )
+            .unwrap();
+        let mut connection = host
+            .connect_if(Duration::from_secs(1), |_| {
+                Ok(Some(TetherBinding::for_test(7)))
+            })
+            .unwrap();
+        drain_discovery_acks(&phone);
+
+        phone
+            .send_to(
+                &encode_discovery(DISCOVERY_HELLO, 11, 22, host.port()),
+                ("127.0.0.1", host.port()),
+            )
+            .unwrap();
+        let frame = frame_prefix(22);
+        phone.send_to(&frame, ("127.0.0.1", host.port())).unwrap();
+
+        let mut buffer = [0_u8; 64];
+        assert_eq!(
+            connection.read(&mut buffer, 100, false).unwrap(),
+            frame.len()
+        );
+        phone
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let mut response = [0_u8; 32];
+        assert!(phone.recv_from(&mut response).is_err());
     }
 
     #[test]
@@ -463,7 +823,10 @@ mod tests {
             .unwrap();
 
         let mut buffer = [0_u8; 64];
-        assert_eq!(connection.read(&mut buffer, 100).unwrap(), frame.len());
+        assert_eq!(
+            connection.read(&mut buffer, 100, true).unwrap(),
+            frame.len()
+        );
         assert_eq!(connection.peer(), replacement.local_addr().unwrap());
         assert_eq!(connection.discovery_session_id(), 44);
         assert!(connection.take_session_changed());
@@ -504,7 +867,7 @@ mod tests {
             .unwrap();
 
         let mut buffer = [0_u8; 64];
-        assert_eq!(connection.read(&mut buffer, 100).unwrap(), 16);
+        assert_eq!(connection.read(&mut buffer, 100, true).unwrap(), 16);
         assert_eq!(connection.peer(), replacement.local_addr().unwrap());
         assert!(!connection.take_session_changed());
     }
@@ -560,7 +923,7 @@ mod tests {
 
         let mut buffer = [0_u8; 128];
         loop {
-            let count = connection.read(&mut buffer, 20).unwrap();
+            let count = connection.read(&mut buffer, 20, true).unwrap();
             assert_ne!(count, 0, "loopback frame timed out");
             if decode_frame(&buffer[..count]).is_ok() {
                 return started.elapsed();

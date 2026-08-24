@@ -1,13 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::mem::size_of;
-
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
-    MAPVK_VK_TO_VSC, MapVirtualKeyW, SendInput,
-};
 
 use crate::protocol::{ACTION_CANCEL, ACTION_HEARTBEAT, TouchFrame};
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::KeySink;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::KeySink;
 
 #[derive(Clone)]
 struct KeyboardState {
@@ -15,8 +19,8 @@ struct KeyboardState {
     lane_holds: Vec<u16>,
 }
 
-#[derive(Clone, Copy)]
-struct KeyChange {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct KeyChange {
     lane: usize,
     down: bool,
 }
@@ -28,8 +32,10 @@ struct PendingFrame {
     applied: usize,
 }
 
+/// The lane-key bridge. Holds the platform-specific OS input sink plus the
+/// shared, platform-neutral slide/hold/chord interpretation state.
 pub struct KeyboardSink {
-    scan_codes: Vec<u16>,
+    sink: KeySink,
     state: KeyboardState,
     pressed: Vec<bool>,
     pending: Option<PendingFrame>,
@@ -43,46 +49,38 @@ impl KeyboardSink {
                 "at least one lane key is required",
             ));
         }
-        let mut scan_codes = Vec::with_capacity(keys.len());
-        for key in keys {
-            let vk = parse_virtual_key(key)?;
-            let scan_code = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
-            if scan_code == 0 || scan_code > u32::from(u16::MAX) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("cannot map lane key {key:?} to a scan code"),
-                ));
-            }
-            scan_codes.push(scan_code as u16);
-        }
+        validate_lane_keys(keys)?;
+        let sink = KeySink::new(keys)?;
+        let lanes = sink.lane_count();
         Ok(Self {
             state: KeyboardState {
                 pointer_lanes: BTreeMap::new(),
-                lane_holds: vec![0; scan_codes.len()],
+                lane_holds: vec![0; lanes],
             },
-            pressed: vec![false; scan_codes.len()],
+            pressed: vec![false; lanes],
             pending: None,
-            scan_codes,
+            sink,
         })
     }
 
     pub fn lane_count(&self) -> u8 {
-        self.scan_codes.len().min(u8::MAX as usize) as u8
+        self.pressed.len().min(u8::MAX as usize) as u8
     }
 
     pub fn has_active_input(&self) -> bool {
-        self.pressed.iter().any(|pressed| *pressed)
+        self.pressed.iter().any(|pressed| *pressed) || self.sink.has_pending_submission()
     }
 
     pub fn accept(&mut self, frame: &TouchFrame) -> io::Result<()> {
-        self.accept_with(frame, submit_inputs)
+        self.accept_with(frame, KeySink::submit)
     }
 
     fn accept_with<F>(&mut self, frame: &TouchFrame, mut submit: F) -> io::Result<()>
     where
-        F: FnMut(&[INPUT]) -> io::Result<usize>,
+        F: FnMut(&mut KeySink, &[KeyChange]) -> io::Result<usize>,
     {
         if frame.session_start() || frame.action == ACTION_CANCEL || !frame.locked() {
+            self.sink.discard_pending()?;
             return self.release_all_with(submit);
         }
         if frame.action == ACTION_HEARTBEAT && frame.contacts.is_empty() {
@@ -100,7 +98,7 @@ impl KeyboardSink {
         }
 
         if self.pending.is_none() {
-            let (next_state, changes) = self.plan(frame);
+            let (next_state, changes) = plan(&self.state, self.pressed.len(), frame);
             self.pending = Some(PendingFrame {
                 sequence: frame.sequence,
                 next_state,
@@ -118,17 +116,14 @@ impl KeyboardSink {
             return Ok(());
         }
 
-        let inputs: Vec<_> = remaining
-            .iter()
-            .map(|change| key_input(self.scan_codes[change.lane], change.down))
-            .collect();
-        let accepted = submit(&inputs)?;
-        if accepted > inputs.len() {
+        let remaining_len = remaining.len();
+        let accepted = submit(&mut self.sink, remaining)?;
+        if accepted > remaining_len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "input submission accepted {accepted} of {} requested events",
-                    inputs.len()
+                    remaining_len
                 ),
             ));
         }
@@ -140,8 +135,8 @@ impl KeyboardSink {
         }
         self.pending.as_mut().unwrap().applied = applied;
 
-        if accepted != inputs.len() {
-            return Err(incomplete_submission_error(accepted, inputs.len()));
+        if accepted != remaining_len {
+            return Err(incomplete_submission_error(accepted, remaining_len));
         }
 
         let completed = self.pending.take().unwrap();
@@ -150,12 +145,13 @@ impl KeyboardSink {
     }
 
     pub fn release_all(&mut self) -> io::Result<()> {
-        self.release_all_with(submit_inputs)
+        self.sink.discard_pending()?;
+        self.release_all_with(KeySink::submit)
     }
 
     fn release_all_with<F>(&mut self, mut submit: F) -> io::Result<()>
     where
-        F: FnMut(&[INPUT]) -> io::Result<usize>,
+        F: FnMut(&mut KeySink, &[KeyChange]) -> io::Result<usize>,
     {
         self.pending = None;
         let lanes: Vec<_> = self
@@ -170,25 +166,28 @@ impl KeyboardSink {
             return Ok(());
         }
 
-        let inputs: Vec<_> = lanes
+        let changes: Vec<_> = lanes
             .iter()
-            .map(|lane| key_input(self.scan_codes[*lane], false))
+            .map(|lane| KeyChange {
+                lane: *lane,
+                down: false,
+            })
             .collect();
-        let accepted = submit(&inputs)?;
-        if accepted > inputs.len() {
+        let accepted = submit(&mut self.sink, &changes)?;
+        if accepted > changes.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "input submission accepted {accepted} of {} requested events",
-                    inputs.len()
+                    changes.len()
                 ),
             ));
         }
         for lane in lanes.iter().take(accepted) {
             self.pressed[*lane] = false;
         }
-        if accepted != inputs.len() {
-            return Err(incomplete_submission_error(accepted, inputs.len()));
+        if accepted != changes.len() {
+            return Err(incomplete_submission_error(accepted, changes.len()));
         }
 
         self.state.pointer_lanes.clear();
@@ -196,43 +195,24 @@ impl KeyboardSink {
         Ok(())
     }
 
+    #[cfg(test)]
     fn plan(&self, frame: &TouchFrame) -> (KeyboardState, Vec<KeyChange>) {
-        let mut next = self.state.clone();
-        let mut changes = Vec::new();
-
-        let mut contacts = frame.contacts.iter().collect::<Vec<_>>();
-        contacts.sort_by_key(|contact| {
-            if contact.pointer_id == frame.action_pointer_id {
-                0
-            } else {
-                1
-            }
-        });
-        for contact in contacts {
-            if contact.touching() {
-                let lane = lane_for(contact.x, self.scan_codes.len());
-                move_pointer(contact.pointer_id, lane, &mut next, &mut changes);
-            } else {
-                release_pointer(contact.pointer_id, &mut next, &mut changes);
-            }
-        }
-
-        let present: Vec<u8> = frame
-            .contacts
-            .iter()
-            .map(|contact| contact.pointer_id)
-            .collect();
-        let missing: Vec<u8> = next
-            .pointer_lanes
-            .keys()
-            .filter(|pointer_id| !present.contains(pointer_id))
-            .copied()
-            .collect();
-        for pointer_id in missing {
-            release_pointer(pointer_id, &mut next, &mut changes);
-        }
-        (next, changes)
+        plan(&self.state, self.pressed.len(), frame)
     }
+}
+
+fn validate_lane_keys(keys: &[String]) -> io::Result<()> {
+    let mut seen = BTreeSet::new();
+    for key in keys {
+        let normalized = key.to_ascii_uppercase();
+        if !seen.insert(normalized) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("lane key {key:?} is duplicated; every lane key must be unique"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Drop for KeyboardSink {
@@ -244,6 +224,70 @@ impl Drop for KeyboardSink {
             }
             std::thread::yield_now();
         }
+    }
+}
+
+/// Interprets one wire frame against the current lane-hold state, producing
+/// the next state and the ordered key-down/key-up changes needed to reach it.
+/// Kept free of any OS sink so unit tests can exercise slide/hold/chord logic
+/// without opening a real input device.
+fn plan(
+    state: &KeyboardState,
+    lane_count: usize,
+    frame: &TouchFrame,
+) -> (KeyboardState, Vec<KeyChange>) {
+    let mut next = state.clone();
+    let mut changes = Vec::new();
+
+    // Android's action pointer must be applied first, but sorting a copied
+    // snapshot is unnecessary work on the live path. Two bounded passes keep
+    // the exact ordering without allocating or sorting a temporary list.
+    if let Some(contact) = frame
+        .contacts
+        .iter()
+        .find(|contact| contact.pointer_id == frame.action_pointer_id)
+    {
+        apply_contact(contact, lane_count, &mut next, &mut changes);
+    }
+    for contact in &frame.contacts {
+        if contact.pointer_id != frame.action_pointer_id {
+            apply_contact(contact, lane_count, &mut next, &mut changes);
+        }
+    }
+
+    const POINTER_ID_COUNT: usize = u8::MAX as usize + 1;
+    let mut present = [false; POINTER_ID_COUNT];
+    for contact in &frame.contacts {
+        present[usize::from(contact.pointer_id)] = true;
+    }
+    let mut missing = [0_u8; POINTER_ID_COUNT];
+    let mut missing_len = 0;
+    for &pointer_id in next.pointer_lanes.keys() {
+        if !present[usize::from(pointer_id)] {
+            missing[missing_len] = pointer_id;
+            missing_len += 1;
+        }
+    }
+    for &pointer_id in &missing[..missing_len] {
+        release_pointer(pointer_id, &mut next, &mut changes);
+    }
+    (next, changes)
+}
+
+fn apply_contact(
+    contact: &crate::protocol::Contact,
+    lane_count: usize,
+    state: &mut KeyboardState,
+    changes: &mut Vec<KeyChange>,
+) {
+    // Android reports a still-touching contact just outside the locked play
+    // rectangle without the INSIDE flag. It still owns the clamped edge lane
+    // until TIP clears or the complete snapshot omits it.
+    if contact.touching() {
+        let lane = lane_for(contact.x, lane_count);
+        move_pointer(contact.pointer_id, lane, state, changes);
+    } else {
+        release_pointer(contact.pointer_id, state, changes);
     }
 }
 
@@ -299,58 +343,11 @@ fn lane_for(x: f32, lane_count: usize) -> usize {
     ((x.clamp(0.0, 1.0) * lane_count as f32).floor() as usize).min(lane_count - 1)
 }
 
-fn parse_virtual_key(key: &str) -> io::Result<u16> {
-    let mut chars = key.chars();
-    let Some(character) = chars.next() else {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty key"));
-    };
-    if chars.next().is_some() || !character.is_ascii_alphanumeric() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("lane key {key:?} must be one ASCII letter or digit"),
-        ));
-    }
-    Ok(character.to_ascii_uppercase() as u16)
-}
-
-fn key_input(scan_code: u16, down: bool) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: 0,
-                wScan: scan_code,
-                dwFlags: KEYEVENTF_SCANCODE | if down { 0 } else { KEYEVENTF_KEYUP },
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
-}
-
-fn submit_inputs(inputs: &[INPUT]) -> io::Result<usize> {
-    if inputs.is_empty() {
-        return Ok(0);
-    }
-    let count = u32::try_from(inputs.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "too many keyboard events for one SendInput submission",
-        )
-    })?;
-    let accepted = unsafe { SendInput(count, inputs.as_ptr(), size_of::<INPUT>() as i32) } as usize;
-    if accepted == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(accepted)
-}
-
 fn incomplete_submission_error(accepted: usize, requested: usize) -> io::Error {
     io::Error::other(format!(
         "input submission accepted {accepted} of {requested} requested events"
     ))
 }
-
 #[cfg(test)]
 mod tests {
     use std::mem::ManuallyDrop;
@@ -367,6 +364,13 @@ mod tests {
         assert_eq!(lane_for(0.49, 6), 2);
         assert_eq!(lane_for(1.0, 6), 5);
         assert_eq!(lane_for(2.0, 6), 5);
+    }
+
+    #[test]
+    fn duplicate_lane_keys_are_rejected_case_insensitively() {
+        assert!(validate_lane_keys(&["s".to_owned(), "D".to_owned()]).is_ok());
+        let error = validate_lane_keys(&["s".to_owned(), "S".to_owned()]).unwrap_err();
+        assert!(error.to_string().contains("must be unique"));
     }
 
     #[test]
@@ -519,10 +523,13 @@ mod tests {
             let mut sink = held_sink(4, &[(0, 0), (1, 3)]);
             let mut batches = Vec::new();
 
-            sink.accept_with(&frame(2, action, 0, flags, vec![]), |inputs: &[INPUT]| {
-                batches.push(decode_inputs(inputs));
-                Ok(inputs.len())
-            })
+            sink.accept_with(
+                &frame(2, action, 0, flags, vec![]),
+                |_, inputs: &[KeyChange]| {
+                    batches.push(decode_inputs(inputs));
+                    Ok(inputs.len())
+                },
+            )
             .unwrap();
 
             assert_eq!(batches, [vec![(0, false), (3, false)]]);
@@ -544,7 +551,7 @@ mod tests {
         );
         let mut batches = Vec::new();
 
-        sink.accept_with(&slide, |inputs: &[INPUT]| {
+        sink.accept_with(&slide, |_, inputs: &[KeyChange]| {
             batches.push(decode_inputs(inputs));
             Ok(inputs.len())
         })
@@ -581,7 +588,7 @@ mod tests {
         let mut first_batch = Vec::new();
 
         let error = sink
-            .accept_with(&slide, |inputs: &[INPUT]| {
+            .accept_with(&slide, |_, inputs: &[KeyChange]| {
                 first_calls += 1;
                 first_batch = decode_inputs(inputs);
                 Ok(2)
@@ -616,7 +623,7 @@ mod tests {
                     FRAME_FLAG_LOCKED,
                     vec![contact(0, CONTACT_FLAG_TIP, 0.5)],
                 ),
-                |_: &[INPUT]| {
+                |_, _: &[KeyChange]| {
                     future_submitted = true;
                     Ok(0)
                 },
@@ -627,7 +634,7 @@ mod tests {
 
         let mut retry_calls = 0;
         let mut retry_batch = Vec::new();
-        sink.accept_with(&slide, |inputs: &[INPUT]| {
+        sink.accept_with(&slide, |_, inputs: &[KeyChange]| {
             retry_calls += 1;
             retry_batch = decode_inputs(inputs);
             Ok(inputs.len())
@@ -649,7 +656,7 @@ mod tests {
         let mut first_batch = Vec::new();
 
         let error = sink
-            .release_all_with(|inputs: &[INPUT]| {
+            .release_all_with(|_, inputs: &[KeyChange]| {
                 first_calls += 1;
                 first_batch = decode_inputs(inputs);
                 Ok(2)
@@ -665,7 +672,7 @@ mod tests {
 
         let mut retry_calls = 0;
         let mut retry_batch = Vec::new();
-        sink.release_all_with(|inputs: &[INPUT]| {
+        sink.release_all_with(|_, inputs: &[KeyChange]| {
             retry_calls += 1;
             retry_batch = decode_inputs(inputs);
             Ok(inputs.len())
@@ -692,7 +699,7 @@ mod tests {
                 FRAME_FLAG_LOCKED,
                 vec![contact(0, CONTACT_FLAG_TIP, -0.5)],
             ),
-            |_: &[INPUT]| {
+            |_, _: &[KeyChange]| {
                 submitted = true;
                 Ok(0)
             },
@@ -706,9 +713,7 @@ mod tests {
 
     fn test_sink(lanes: usize) -> ManuallyDrop<KeyboardSink> {
         ManuallyDrop::new(KeyboardSink {
-            scan_codes: (1..=lanes)
-                .map(|scan_code| u16::try_from(scan_code).unwrap())
-                .collect(),
+            sink: KeySink::for_test(lanes),
             state: KeyboardState {
                 pointer_lanes: BTreeMap::new(),
                 lane_holds: vec![0; lanes],
@@ -779,19 +784,10 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    fn decode_inputs(inputs: &[INPUT]) -> Vec<(usize, bool)> {
+    fn decode_inputs(inputs: &[KeyChange]) -> Vec<(usize, bool)> {
         inputs
             .iter()
-            .map(|input| {
-                assert_eq!(input.r#type, INPUT_KEYBOARD);
-                let keyboard = unsafe { input.Anonymous.ki };
-                assert_eq!(keyboard.wVk, 0);
-                assert_ne!(keyboard.dwFlags & KEYEVENTF_SCANCODE, 0);
-                (
-                    usize::from(keyboard.wScan) - 1,
-                    keyboard.dwFlags & KEYEVENTF_KEYUP == 0,
-                )
-            })
+            .map(|input| (input.lane, input.down))
             .collect()
     }
 }

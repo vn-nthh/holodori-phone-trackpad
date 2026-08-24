@@ -1,12 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import "./styles.css";
 import { statusPresentation } from "./status.js";
+import { localOnlyTetherSelection, localOnlyTetherSupported } from "./platform.js";
 
 const form = document.querySelector("#settings-form");
 const keySlots = Array.from(document.querySelectorAll(".key-slot"));
 const metricsInput = document.querySelector("#metrics");
 const localOnlyTetherInput = document.querySelector("#local-only-tether");
 const adminAction = document.querySelector("#admin-action");
+const adminActionText = document.querySelector("#admin-action-text");
 const restartAsAdminButton = document.querySelector("#restart-as-admin");
 const status = document.querySelector("#status");
 const startButton = document.querySelector("#start");
@@ -21,6 +23,7 @@ try {
 
 const KEY_PATTERN = /^[a-zA-Z0-9]$/;
 let launcherElevated;
+let elevationModel;
 let activeSlotIndex = 0;
 let stopping = false;
 let recoveryNeedsAdmin = false;
@@ -36,13 +39,29 @@ function setRunning(running) {
     slot.disabled = running;
   });
   metricsInput.disabled = running;
-  localOnlyTetherInput.disabled = running;
+  // Stays disabled regardless of `running` when the option is unsupported on
+  // this platform (see `updateAdminAction`); otherwise it just follows
+  // `running` like the other controls.
+  localOnlyTetherInput.disabled = running || elevationModel === "unsupported";
   restartAsAdminButton.disabled = running;
   startButton.disabled = running || recoveryNeedsAdmin;
   stopButton.disabled = !running;
 }
 
 function updateAdminAction() {
+  if (elevationModel !== undefined && !localOnlyTetherSupported(elevationModel)) {
+    localOnlyTetherInput.checked = false;
+    localOnlyTetherInput.disabled = true;
+    restartAsAdminButton.hidden = true;
+    adminActionText.textContent = "This option is Windows-only.";
+    adminAction.hidden = false;
+    return;
+  }
+
+  restartAsAdminButton.hidden = false;
+  adminActionText.textContent = recoveryNeedsAdmin
+    ? "Administrator access is required to recover USB-tether routes."
+    : "Needs admin elevation.";
   const optionNeedsAdmin = localOnlyTetherInput.checked && launcherElevated !== true;
   adminAction.hidden = !recoveryNeedsAdmin && !optionNeedsAdmin;
 }
@@ -64,6 +83,19 @@ async function refreshElevation() {
     launcherElevated = false;
   }
   updateAdminAction();
+}
+
+async function initElevation() {
+  try {
+    elevationModel = await invoke("elevation_model");
+  } catch {
+    elevationModel = "unsupported";
+  }
+  if (elevationModel === "launcher") {
+    await refreshElevation();
+  } else {
+    updateAdminAction();
+  }
 }
 
 function updateActiveSlot(index) {
@@ -197,7 +229,13 @@ form.addEventListener("submit", async (event) => {
     restartAsAdminButton.focus();
     return;
   }
-  if (localOnlyTetherInput.checked) {
+
+  if (elevationModel === undefined) await initElevation();
+  // Never send the option through on a platform where it is unsupported,
+  // regardless of the checkbox's current DOM state.
+  const localOnlyTether = localOnlyTetherSelection(elevationModel, localOnlyTetherInput.checked);
+
+  if (localOnlyTether && elevationModel === "launcher") {
     if (launcherElevated === undefined) await refreshElevation();
     if (launcherElevated !== true) {
       setStatus("Restart as admin to use this option.", "error");
@@ -220,7 +258,7 @@ form.addEventListener("submit", async (event) => {
     const result = await invoke("start_host", {
       keys,
       metrics: metricsInput.checked,
-      localOnlyTether: localOnlyTetherInput.checked,
+      localOnlyTether: localOnlyTether,
     });
     applyHostStatus(result);
   } catch (error) {
@@ -256,10 +294,50 @@ keySlots.forEach((slot, index) => {
   slot.addEventListener("paste", (event) => handleSlotPaste(event, index));
 });
 
+async function fitWindowToContent() {
+  // GTK's text-DPI scaling can render this layout far taller than the fixed
+  // size chosen for Windows at 96 DPI; grow the window once to fit.
+  //
+  // This deliberately does not ask the backend to compare against
+  // `window.inner_size()` / `window.scale_factor()`: on GTK/Wayland those
+  // were measured to disagree with the webview's real content box by a
+  // large, constant offset, which made the old check conclude the window
+  // was already big enough when it visibly was not.
+  // `document.documentElement`'s box model and `window.devicePixelRatio`
+  // are what the webview itself actually uses to lay out and paint, so they
+  // are trusted here instead: measure in CSS pixels, convert to physical
+  // pixels with `devicePixelRatio` (verified to round-trip exactly through
+  // `set_size(PhysicalSize)` on this stack), and only ask the backend to
+  // resize when this measurement shows real overflow -- which keeps the
+  // whole operation grow-only by construction.
+  const docEl = document.documentElement;
+  const currentWidth = docEl.clientWidth;
+  const currentHeight = docEl.clientHeight;
+  const wantedWidth = docEl.scrollWidth;
+  const wantedHeight = docEl.scrollHeight + 8;
+
+  if (wantedWidth <= currentWidth && wantedHeight <= currentHeight) {
+    return;
+  }
+
+  const scale = window.devicePixelRatio || 1;
+  try {
+    await invoke("fit_window_to_content", {
+      currentWidth: Math.round(currentWidth * scale),
+      currentHeight: Math.round(currentHeight * scale),
+      wantedWidth: Math.round(wantedWidth * scale),
+      wantedHeight: Math.round(wantedHeight * scale),
+      scale,
+    });
+  } catch {
+    // Best-effort only; the launcher still works at its default size.
+  }
+}
+
 updateActiveSlot(0);
 focusSlot(0);
 updateAdminAction();
-refreshElevation();
+initElevation().then(fitWindowToContent);
 
 stopButton.addEventListener("click", async () => {
   if (stopping) return;
