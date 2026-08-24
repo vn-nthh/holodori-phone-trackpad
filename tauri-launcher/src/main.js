@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import "./styles.css";
+import { statusPresentation } from "./status.js";
 
 const form = document.querySelector("#settings-form");
 const keySlots = Array.from(document.querySelectorAll(".key-slot"));
@@ -22,10 +23,12 @@ const KEY_PATTERN = /^[a-zA-Z0-9]$/;
 let launcherElevated;
 let activeSlotIndex = 0;
 let stopping = false;
+let recoveryNeedsAdmin = false;
 
-function setStatus(message, tone = "neutral") {
+function setStatus(message, tone = "neutral", phase = "ready") {
   status.textContent = message;
   status.dataset.tone = tone;
+  status.dataset.phase = phase;
 }
 
 function setRunning(running) {
@@ -35,12 +38,22 @@ function setRunning(running) {
   metricsInput.disabled = running;
   localOnlyTetherInput.disabled = running;
   restartAsAdminButton.disabled = running;
-  startButton.disabled = running;
+  startButton.disabled = running || recoveryNeedsAdmin;
   stopButton.disabled = !running;
 }
 
 function updateAdminAction() {
-  adminAction.hidden = !localOnlyTetherInput.checked || launcherElevated !== false;
+  const optionNeedsAdmin = localOnlyTetherInput.checked && launcherElevated !== true;
+  adminAction.hidden = !recoveryNeedsAdmin && !optionNeedsAdmin;
+}
+
+function applyHostStatus(result) {
+  recoveryNeedsAdmin = Boolean(result.recovery_needs_admin);
+  stopping = Boolean(result.stopping);
+  setRunning(Boolean(result.running));
+  const presentation = statusPresentation(result);
+  setStatus(presentation.label, presentation.tone, presentation.phase);
+  updateAdminAction();
 }
 
 async function refreshElevation() {
@@ -171,15 +184,7 @@ function serializedKeys() {
 async function refreshStatus() {
   try {
     const result = await invoke("host_status");
-    if (result.running) {
-      setRunning(true);
-      setStatus(result.stopping ? "Stopping safely..." : "Running");
-      stopping = result.stopping;
-    } else {
-      setRunning(false);
-      stopping = false;
-      if (result.message) setStatus(result.message);
-    }
+    applyHostStatus(result);
   } catch (error) {
     setStatus(String(error), "error");
   }
@@ -187,6 +192,11 @@ async function refreshStatus() {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (recoveryNeedsAdmin) {
+    setStatus("Restart as admin to recover USB-tether routes.", "error", "recovery-needs-admin");
+    restartAsAdminButton.focus();
+    return;
+  }
   if (localOnlyTetherInput.checked) {
     if (launcherElevated === undefined) await refreshElevation();
     if (launcherElevated !== true) {
@@ -212,8 +222,7 @@ form.addEventListener("submit", async (event) => {
       metrics: metricsInput.checked,
       localOnlyTether: localOnlyTetherInput.checked,
     });
-    setRunning(result.running);
-    setStatus(result.message);
+    applyHostStatus(result);
   } catch (error) {
     setRunning(false);
     setStatus(String(error), "error");

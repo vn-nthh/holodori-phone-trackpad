@@ -8,11 +8,13 @@ exchange; it is not wire-compatible with protocol v3 or the stable Python host.
 
 ## USB-tethered UDP transport
 
-The app sends a 32-byte `HPTD` discovery hello to UDP port `42825` on every
-available interface broadcast address. The host listens on
-`0.0.0.0:42825`, replies with a matching `HPTD` acknowledgement, and then
-receives HPT4 datagrams from the phone's ephemeral source port. The discovery
-record is little-endian and uses this layout:
+The app sends a 32-byte `HPTD` discovery hello to UDP port `42825` only on
+conservatively classified USB-tether interfaces. The host listens on
+`0.0.0.0:42825` so an adapter can appear after startup, but it accepts a hello
+only when the source belongs to one unambiguous recognized RNDIS/NCM/USB-tether
+prefix. It replies to that source and receives HPT4 datagrams from the phone's
+ephemeral source port. The discovery record is little-endian and uses this
+layout:
 
 | Offset | Type | Meaning |
 |---:|---|---|
@@ -25,6 +27,31 @@ record is little-endian and uses this layout:
 | 24 | `u16` | Discovery port, `42825` |
 | 26 | `u16` | Reserved, zero |
 | 28 | `u32` | IEEE CRC-32 of bytes `0..27` |
+
+New senders put the actual listening destination port in offset 24. A receiver
+accepts zero only for compatibility with earlier protocol-v4 builds; every
+other value must equal `42825` (or the host's explicitly configured test port).
+The phone accepts an acknowledgement only from the selected tether subnet,
+then pins the first complete host IP/port for that session.
+The host accepts a hello only when its source belongs to an unambiguous
+private/local prefix on a conservatively recognized phone-tether adapter. If
+local-only routing is requested, Windows must also route that peer through the
+same interface before any route setting is changed.
+
+The host pins the phone IP, source port, discovery nonce, session, and exact
+tether adapter identity. A same-IP hello from a new source port migrates in
+place only after Windows reconfirms the peer's unambiguous prefix, route, and
+original adapter identity. A failed revalidation aborts the connection and
+returns to discovery through a clean input boundary. If the session is
+unchanged, asserted input remains owned; if its session changes, Windows first
+releases input and requires a sequence-zero session-start `CANCEL`. Hellos from
+a different IP and HPT4 frames with a different session are ignored without an
+acknowledgement.
+
+This is network confinement, not cryptographic authentication. CRC-32 detects
+corruption but does not prove identity. A malicious sender already on, or able
+to spoof, the USB-tether subnet can still interfere with protocol v4. Pairing
+and authenticated framing require a future protocol version.
 
 Each HPT4 frame and HPA4 control record is one UDP datagram. A datagram is
 never concatenated with the next datagram for parsing, and the largest HPT4
@@ -131,7 +158,9 @@ breakdown needed to locate a rare stall.
   sustains active stationary contacts, and lets a restarted host reconstruct a
   held contact. Hosts still accept the empty heartbeat emitted by earlier v4
   APKs. Idle sessions send no synthetic touch frames; discovery
-  acknowledgements keep the host liveness check alive.
+  acknowledgements keep the host liveness check alive. With no active input,
+  two seconds without a valid pinned-peer hello or CRC-valid frame returns the
+  host to discovery so the launcher cannot remain falsely connected.
 - A cable removal is a session boundary; old gameplay is not replayed late.
 - If no ordered frame reaches the Windows OS sink and commits for 32 ms while
   input is active, Windows releases injected input, rejects delayed gameplay
