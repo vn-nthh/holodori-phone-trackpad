@@ -29,6 +29,13 @@ the app only needs ordinary network access.
 4. Start the native host. The app discovers it on UDP port 42825 and begins
    sending as soon as the Windows RNDIS adapter is ready.
 
+Discovery deliberately excludes normal Wi-Fi, cellular, VPN, and upstream
+Ethernet networks. The app accepts an `HPTD` acknowledgement only from a
+selected USB-tether subnet, validates the advertised port, and pins the first
+host socket address for that session. Some OEMs expose tethering as `rndis`,
+`ncm`, `usb`, or an otherwise hidden `eth*` interface; the fallback remains
+conservative so a normal Android network is not selected.
+
 ## Protocol v4 behavior
 
 Phone-to-host frames are variable-size `HPT4` records containing:
@@ -61,6 +68,10 @@ inheriting an old idle timestamp. Idle discovery keeps the two-second timeout.
 The latest contact snapshot continues to update during the socket restart, so
 a stationary finger is restored in the fresh session without replaying stale
 transitions.
+
+Protocol v4 uses CRC for corruption detection, not authentication. Interface
+and subnet confinement are the current trust boundary; cryptographic pairing
+is deferred to a future wire version.
 
 See [`../PROTOCOL_V4.md`](../PROTOCOL_V4.md) for the byte layout and
 acknowledgement semantics.

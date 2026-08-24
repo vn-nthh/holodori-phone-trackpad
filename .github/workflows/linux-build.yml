@@ -1,0 +1,136 @@
+name: Build Linux (experimental)
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Needed for HEAD^1 below. On pull requests, diffing the synthetic
+          # merge commit against its first (base) parent checks the complete
+          # proposed tree, not merely uncommitted runner changes.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tauri-launcher/package-lock.json
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Tauri v2 system prerequisites for Linux. Package names confirmed
+      # against https://v2.tauri.app/start/prerequisites/ and the official
+      # GitHub Actions recipe at https://v2.tauri.app/distribute/pipelines/github/,
+      # both of which install libwebkit2gtk-4.1-dev (not the Tauri-v1-era
+      # 4.0 package, which no longer exists on Ubuntu 24.04). The 4.1
+      # package is also available on Ubuntu 22.04 (Tauri's own CI matrix
+      # uses it there), so this list needs no per-runner-version branching
+      # even though ubuntu-latest has moved from 22.04 to 24.04.
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            iproute2 \
+            libdbus-1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            python3-tk
+
+      - name: Audit locked Rust dependencies
+        # RustSec informational warnings (including Tauri's inherited GTK3
+        # maintenance status) remain visible, while vulnerability advisories
+        # fail the job. Pin and lock the audit tool itself as well.
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file native-host/Cargo.lock
+          cargo audit --file tauri-launcher/src-tauri/Cargo.lock
+
+      - name: Test native-host
+        run: cargo test --locked --manifest-path native-host/Cargo.toml --all-targets
+
+      - name: Clippy native-host
+        run: cargo clippy --locked --manifest-path native-host/Cargo.toml --all-targets -- -D warnings
+
+      - name: Check loopback loss recovery budget
+        run: >-
+          cargo test --locked --manifest-path native-host/Cargo.toml --lib
+          network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame
+          -- --ignored --exact
+
+      # This step (and every Rust step below it) is NOT redundant with
+      # build-linux.sh despite also appearing there: `tauri::generate_context!`
+      # hard-fails the Rust compile itself if `frontendDist` ("../dist", see
+      # tauri.conf.json) does not exist on disk, and dist/ is gitignored, so
+      # every one of the Rust steps below needs a real dist/ to even compile,
+      # not just to pass richer checks. Confirmed locally: with tauri-launcher/
+      # dist/ removed, `cargo build --manifest-path tauri-launcher/src-tauri/
+      # Cargo.toml --all-targets` fails with "proc macro panicked: The
+      # `frontendDist` configuration is set to `../dist` but this path doesn't
+      # exist" -- not a lint or test failure, a hard compile error. So unlike
+      # the native-host test step above, this one stays.
+      - name: Build the launcher frontend
+        working-directory: tauri-launcher
+        run: |
+          npm ci --no-audit --no-fund
+          npm audit --audit-level=high
+          npm test
+          npm run build
+
+      - name: Test the launcher
+        run: cargo test --locked --manifest-path tauri-launcher/src-tauri/Cargo.toml --all-targets
+
+      - name: Clippy the launcher
+        run: cargo clippy --locked --manifest-path tauri-launcher/src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Validate Android debug and release builds
+        working-directory: android-app
+        run: >-
+          ./gradlew --no-daemon
+          testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
+
+      - name: Run legacy Python tests
+        # These compatibility tests import the legacy Tk overlay even though
+        # the Linux release itself uses the native Rust/Tauri path.
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Check patch whitespace
+        run: git diff --check HEAD^1 HEAD
+
+      - name: Build the Linux release bundle
+        run: packaging/build-linux.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: HolodoriPhoneTrackpad-linux-${{ github.sha }}
+          path: release/*
+          if-no-files-found: error

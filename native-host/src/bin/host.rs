@@ -2,38 +2,92 @@ use std::env;
 use std::error::Error;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc::{Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use holodori_native_host::keyboard::KeyboardSink;
 use holodori_native_host::metrics::HostMetrics;
 use holodori_native_host::network::{DEFAULT_UDP_PORT, UdpConnection, UdpHost};
+use holodori_native_host::platform;
 use holodori_native_host::protocol::{
     CONTROL_ACK, CONTROL_HELLO, FrameParser, OrderedFrames, ProtocolError, TouchFrame,
     encode_control,
 };
-use holodori_native_host::tether_policy::TetherRoutePolicy;
+#[cfg(windows)]
+use holodori_native_host::tether_policy::{
+    RecoveryOutcome, TetherRoutePolicy, recover_orphaned_policy,
+};
+#[cfg(windows)]
 use holodori_native_host::touch::{PROBE_WINDOW_TITLE, TouchInjector, TouchTarget};
-use windows_sys::Win32::System::Console::{
-    CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
-    SetConsoleCtrlHandler,
-};
-use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThread, HIGH_PRIORITY_CLASS, SetPriorityClass, SetThreadPriority,
-    THREAD_PRIORITY_HIGHEST,
-};
+
+// Touch mode is Windows-only (it drives Windows Touch injection). On other
+// platforms there is no probe window to attach to, so this is just a stable
+// default identifier for the `--target-title` option.
+#[cfg(not(windows))]
+const PROBE_WINDOW_TITLE: &str = "Holodori Touch Probe";
 
 const RECEIVE_WINDOW: u32 = 128;
 const SINK_STALL_TIMEOUT: Duration = Duration::from_millis(8);
 const ACTIVE_INPUT_SILENCE_TIMEOUT: Duration = Duration::from_millis(32);
+const IDLE_PEER_SILENCE_TIMEOUT: Duration = Duration::from_secs(2);
 const SINK_CANCEL_TIMEOUT: Duration = Duration::from_millis(8);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_COMPLETE: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum HostPhase {
+    Waiting = 0,
+    Connected = 1,
+    Recovering = 2,
+    Stopping = 3,
+}
+
+impl HostPhase {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Waiting => "HPT_STATUS WAITING",
+            Self::Connected => "HPT_STATUS CONNECTED",
+            Self::Recovering => "HPT_STATUS RECOVERING",
+            Self::Stopping => "HPT_STATUS STOPPING",
+        }
+    }
+}
+
+struct StatusReporter {
+    phase: AtomicU8,
+    sender: Sender<HostPhase>,
+}
+
+impl StatusReporter {
+    fn start() -> Self {
+        let phase = AtomicU8::new(HostPhase::Waiting as u8);
+        let (sender, receiver) = channel::<HostPhase>();
+        thread::spawn(move || {
+            while let Ok(current) = receiver.recv() {
+                println!("{}", current.token());
+                let _ = io::stdout().flush();
+            }
+        });
+        let reporter = Self { phase, sender };
+        let _ = reporter.sender.send(HostPhase::Waiting);
+        reporter
+    }
+
+    fn publish(&self, phase: HostPhase) {
+        if self.phase.swap(phase as u8, Ordering::AcqRel) != phase as u8 {
+            let _ = self.sender.send(phase);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Mode {
+    #[cfg(windows)]
     Touch,
     Keys,
     Record,
@@ -59,21 +113,25 @@ struct ControlState {
 }
 
 enum Sink {
+    #[cfg(windows)]
     Touch(TouchInjector),
-    Keys(KeyboardSink),
+    Keys(Box<KeyboardSink>),
     Record,
 }
 
 impl Sink {
     fn lane_count(&self, options: &Options) -> u8 {
         match self {
+            #[cfg(windows)]
+            Self::Touch(_) => options.lane_keys.len().min(u8::MAX as usize) as u8,
             Self::Keys(keys) => keys.lane_count(),
-            _ => options.lane_keys.len().min(u8::MAX as usize) as u8,
+            Self::Record => options.lane_keys.len().min(u8::MAX as usize) as u8,
         }
     }
 
     fn accept(&mut self, frame: &TouchFrame) -> io::Result<()> {
         match self {
+            #[cfg(windows)]
             Self::Touch(touch) => touch.accept(frame),
             Self::Keys(keys) => keys.accept(frame),
             Self::Record => {
@@ -95,6 +153,7 @@ impl Sink {
 
     fn has_active_input(&self) -> bool {
         match self {
+            #[cfg(windows)]
             Self::Touch(touch) => touch.has_active_input(),
             Self::Keys(keys) => keys.has_active_input(),
             Self::Record => false,
@@ -103,6 +162,7 @@ impl Sink {
 
     fn cancel_all(&mut self) -> io::Result<()> {
         match self {
+            #[cfg(windows)]
             Self::Touch(touch) => touch.cancel_all(),
             Self::Keys(keys) => keys.release_all(),
             Self::Record => Ok(()),
@@ -118,18 +178,46 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    raise_input_priority();
-    install_shutdown_handler()?;
+    platform::raise_input_priority();
+    platform::install_shutdown_handler(&SHUTDOWN_REQUESTED, &SHUTDOWN_COMPLETE)?;
     let options = parse_options()?;
+    #[cfg(windows)]
+    {
+        match recover_orphaned_policy().map_err(|error| {
+            let hint = if error.kind() == io::ErrorKind::PermissionDenied {
+                "; run the launcher as administrator"
+            } else {
+                ""
+            };
+            format!("could not recover a previous local-only tether policy: {error}{hint}")
+        })? {
+            RecoveryOutcome::NothingToDo => {}
+            RecoveryOutcome::Restored { snapshots } => {
+                println!("Recovered {snapshots} orphaned USB-tether route settings.");
+            }
+            RecoveryOutcome::OwnerStillRunning => {
+                return Err("another local-only tether policy owner is still running".into());
+            }
+        }
+    }
     let mut sink = build_sink(&options)?;
     let lane_count = sink.lane_count(&options);
     let udp = UdpHost::bind(options.udp_port)?;
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms);
-    let mut tether_policy = options.local_only_tether.then(TetherRoutePolicy::new);
+    #[cfg(windows)]
+    let mut tether_policy =
+        if options.local_only_tether {
+            Some(TetherRoutePolicy::new().map_err(|error| {
+                format!("could not initialize local-only USB tethering: {error}")
+            })?)
+        } else {
+            None
+        };
     // The launcher owns the host's stdin and sends `q` for a graceful stop.
     // Keep this available even when the user turns report writing off so the
     // UI never has to terminate the process and risk held input.
     install_exit_command_thread()?;
+    let status = StatusReporter::start();
 
     println!("Holodori native host - USB tethering/RNDIS + UDP protocol v4");
     println!(
@@ -147,6 +235,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut ordered = OrderedFrames::new();
     let mut parser = FrameParser::default();
     while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        #[cfg(windows)]
         if let Some(policy) = tether_policy.as_mut() {
             policy.refresh().map_err(|error| {
                 let hint = if error.kind() == io::ErrorKind::PermissionDenied {
@@ -161,7 +250,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             match cancel_sink_with_deadline(&mut sink, &mut metrics) {
                 Ok(()) => {}
                 Err(error) => {
-                    eprintln!("Windows still has active injected input: {error}; retrying release");
+                    eprintln!("the OS still has active injected input: {error}; retrying release");
                     thread::sleep(Duration::from_millis(1));
                     continue;
                 }
@@ -174,27 +263,47 @@ fn run() -> Result<(), Box<dyn Error>> {
         // Keep graceful Q/Ctrl+C shutdown bounded even while no phone is
         // present. The outer loop retries, so a one-second discovery slice is
         // sufficient without making exit wait for the old 15-second timeout.
-        let connection = match udp.connect(Duration::from_secs(1)) {
-            Ok(connection) => connection,
-            Err(error) => {
-                eprintln!("{error}; retrying");
-                thread::sleep(Duration::from_millis(250));
-                continue;
+        let connection =
+            match connect_phone(&udp, Duration::from_secs(1), options.local_only_tether) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    #[cfg(target_os = "linux")]
+                    if options.local_only_tether && error.kind() == io::ErrorKind::PermissionDenied
+                    {
+                        return Err(error.into());
+                    }
+                    eprintln!("{error}; retrying");
+                    thread::sleep(Duration::from_millis(250));
+                    continue;
+                }
+            };
+        #[cfg(windows)]
+        if let Some(policy) = tether_policy.as_mut()
+            && let Err(error) = policy.protect_peer(connection.peer(), connection.tether_binding())
+        {
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                return Err(format!(
+                        "could not protect the USB tether route for {}: {error}; run the launcher as administrator",
+                        connection.peer(),
+                    )
+                    .into());
             }
-        };
-        if let Some(policy) = tether_policy.as_mut() {
-            policy.protect_peer(connection.peer()).map_err(|error| {
-                let hint = if error.kind() == io::ErrorKind::PermissionDenied {
-                    "; run the launcher as administrator"
-                } else {
-                    ""
-                };
-                format!(
-                    "could not protect the USB tether route for {}: {error}{hint}",
-                    connection.peer(),
-                )
-            })?;
+            eprintln!(
+                "USB tether peer or adapter changed before route protection for {}: {error}; retrying discovery",
+                connection.peer(),
+            );
+            status.publish(HostPhase::Recovering);
+            continue;
         }
+        if let Err(error) = connection.revalidate_peer() {
+            eprintln!(
+                "USB tether peer or adapter changed after discovery for {}: {error}; retrying discovery",
+                connection.peer(),
+            );
+            status.publish(HostPhase::Recovering);
+            continue;
+        }
+        status.publish(HostPhase::Connected);
         println!("UDP link ready from {}", connection.peer());
         io::stdout().flush()?;
         parser.begin_connection();
@@ -213,6 +322,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             // A read or ACK-write failure can happen after the OS accepted a
             // key/touch. Never wait in discovery with that input held, and do
             // not allow delayed frames from the failed link to reapply it.
+            status.publish(HostPhase::Recovering);
             ordered.require_fresh_session();
             if let Err(release_error) = cancel_sink_with_deadline(&mut sink, &mut metrics) {
                 eprintln!(
@@ -227,6 +337,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    status.publish(HostPhase::Stopping);
     let release_result = cancel_sink_with_deadline(&mut sink, &mut metrics);
 
     metrics.set_parser_counters(
@@ -244,6 +355,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Ok(())
     };
     release_result?;
+    #[cfg(windows)]
     if let Some(policy) = tether_policy.as_mut() {
         policy.restore()?;
     }
@@ -251,11 +363,49 @@ fn run() -> Result<(), Box<dyn Error>> {
     report_result.map_err(Into::into)
 }
 
-fn install_shutdown_handler() -> io::Result<()> {
-    if unsafe { SetConsoleCtrlHandler(Some(console_control_handler), 1) } == 0 {
-        return Err(io::Error::last_os_error());
+#[cfg(target_os = "linux")]
+fn connect_phone<'a>(
+    udp: &'a UdpHost,
+    timeout: Duration,
+    local_only_tether: bool,
+) -> io::Result<UdpConnection<'a>> {
+    if !local_only_tether {
+        return udp.connect(timeout);
     }
-    Ok(())
+    udp.connect_checked(timeout, |binding| {
+        let (ipv4_default, ipv6_default) = binding.default_routes_present().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "could not verify local-only routing on the discovered RNDIS device: {error}"
+                ),
+            )
+        })?;
+        if ipv4_default || ipv6_default {
+            let families = match (ipv4_default, ipv6_default) {
+                (true, true) => "IPv4 and IPv6",
+                (true, false) => "IPv4",
+                (false, true) => "IPv6",
+                (false, false) => unreachable!(),
+            };
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "local-only routing failed closed because a {families} default route uses the discovered RNDIS device"
+                ),
+            ));
+        }
+        Ok(())
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn connect_phone<'a>(
+    udp: &'a UdpHost,
+    timeout: Duration,
+    _local_only_tether: bool,
+) -> io::Result<UdpConnection<'a>> {
+    udp.connect(timeout)
 }
 
 fn install_exit_command_thread() -> io::Result<()> {
@@ -281,43 +431,40 @@ fn install_exit_command_thread() -> io::Result<()> {
         .map(|_| ())
 }
 
-unsafe extern "system" fn console_control_handler(event: u32) -> i32 {
-    match event {
-        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
-            SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
-            1
-        }
-        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
-            SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
-            let deadline = Instant::now() + Duration::from_secs(4);
-            while !SHUTDOWN_COMPLETE.load(Ordering::Acquire) && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(10));
-            }
-            1
-        }
-        _ => 0,
-    }
-}
-
 fn default_metrics_path() -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let directory = env::current_exe()
+    metrics_log_directory().join(format!("holodori-metrics-{timestamp}.txt"))
+}
+
+#[cfg(windows)]
+fn metrics_log_directory() -> PathBuf {
+    env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Logs");
-    directory.join(format!("holodori-metrics-{timestamp}.txt"))
+        .join("Logs")
 }
 
-fn raise_input_priority() {
-    let process_ok = unsafe { SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS) } != 0;
-    let thread_ok = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) } != 0;
-    if !process_ok || !thread_ok {
-        eprintln!("warning: Windows did not grant the requested high input priority");
+#[cfg(not(windows))]
+fn metrics_log_directory() -> PathBuf {
+    // Writing next to the binary (the Windows convention) is wrong on Linux:
+    // the binary directory is often read-only (e.g. /usr/bin) and is not
+    // where per-user runtime state belongs. Follow the XDG base directory
+    // spec instead. `write_report` creates this directory if it is missing.
+    if let Ok(state_home) = env::var("XDG_STATE_HOME")
+        && !state_home.is_empty()
+    {
+        return PathBuf::from(state_home).join("holodori").join("logs");
     }
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+    PathBuf::from(home)
+        .join(".local")
+        .join("state")
+        .join("holodori")
+        .join("logs")
 }
 
 fn serve_connection(
@@ -337,6 +484,17 @@ fn serve_connection(
     };
 
     while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        if idle_peer_timed_out(sink.has_active_input(), connection.peer_activity_elapsed()) {
+            ordered.require_fresh_session();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "phone sent no valid peer activity for {} ms; returning to discovery",
+                    IDLE_PEER_SILENCE_TIMEOUT.as_millis()
+                ),
+            )
+            .into());
+        }
         // Check before every read, not only after a socket timeout. A stream
         // of valid-but-uncommittable future frames must not keep stale input
         // held forever behind one missing or rejected sequence.
@@ -354,7 +512,19 @@ fn serve_connection(
             )
             .into());
         }
-        let count = connection.read(&mut read_buffer, 4)?;
+        // Android repeats discovery every 500 ms. Revalidating its adapter
+        // identity may enumerate interfaces/read sysfs, so do that only while
+        // input is idle. During active input, cumulative control ACKs sustain
+        // the phone; a real migration reaches the 32 ms committed-progress
+        // watchdog, releases input, and returns to discovery cleanly.
+        let count = connection.read(&mut read_buffer, 4, !sink.has_active_input())?;
+        if connection.take_session_changed() {
+            ordered.require_fresh_session();
+            cancel_sink_with_deadline(sink, metrics)?;
+            control.hello_session = None;
+            control.last_ack = None;
+            control.last_committed_frame = Instant::now();
+        }
         if count == 0 {
             continue;
         }
@@ -382,6 +552,10 @@ fn serve_connection(
     Ok(())
 }
 
+fn idle_peer_timed_out(has_active_input: bool, peer_silence: Duration) -> bool {
+    !has_active_input && peer_silence >= IDLE_PEER_SILENCE_TIMEOUT
+}
+
 fn cancel_sink_with_deadline(sink: &mut Sink, metrics: &mut HostMetrics) -> io::Result<()> {
     let deadline = Instant::now() + SINK_CANCEL_TIMEOUT;
     loop {
@@ -407,11 +581,11 @@ fn process_decoded_frame(
 ) -> Result<(), Box<dyn Error>> {
     let frame = match decoded {
         Ok(frame) => frame,
-        Err(error) => {
-            eprintln!("wire frame rejected: {error}; waiting for replay");
-            return Ok(());
-        }
+        // Parser counters retain bounded diagnostics for the stop-time
+        // report. Never perform per-packet logging on the live input path.
+        Err(_) => return Ok(()),
     };
+    connection.note_valid_peer_activity();
     let incoming_session = frame.session_id;
     let same_session = ordered.session_id() == Some(frame.session_id);
     let expected = ordered.expected_sequence();
@@ -520,6 +694,7 @@ fn process_decoded_frame(
 
 fn build_sink(options: &Options) -> Result<Sink, Box<dyn Error>> {
     match options.mode {
+        #[cfg(windows)]
         Mode::Touch => {
             if options.spawn_probe && options.target_title == PROBE_WINDOW_TITLE {
                 ensure_probe()?;
@@ -531,11 +706,12 @@ fn build_sink(options: &Options) -> Result<Sink, Box<dyn Error>> {
             );
             Ok(Sink::Touch(TouchInjector::new(target)?))
         }
-        Mode::Keys => Ok(Sink::Keys(KeyboardSink::new(&options.lane_keys)?)),
+        Mode::Keys => Ok(Sink::Keys(Box::new(KeyboardSink::new(&options.lane_keys)?))),
         Mode::Record => Ok(Sink::Record),
     }
 }
 
+#[cfg(windows)]
 fn ensure_probe() -> io::Result<()> {
     if TouchTarget::from_window_title(PROBE_WINDOW_TITLE).is_ok() {
         return Ok(());
@@ -563,7 +739,7 @@ fn ensure_probe() -> io::Result<()> {
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut options = Options {
-        mode: Mode::Touch,
+        mode: default_mode(),
         lane_keys: ["s", "d", "f", "j", "k", "l"]
             .into_iter()
             .map(str::to_owned)
@@ -581,7 +757,10 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         match argument.as_str() {
             "--mode" => {
                 options.mode = match arguments.next().as_deref() {
+                    #[cfg(windows)]
                     Some("touch") => Mode::Touch,
+                    #[cfg(not(windows))]
+                    Some("touch") => return Err("--mode touch is Windows-only".into()),
                     Some("keys") => Mode::Keys,
                     Some("record") => Mode::Record,
                     Some(value) => return Err(format!("unknown mode {value:?}").into()),
@@ -621,7 +800,20 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                     arguments.next().ok_or("--metrics-file needs a path")?,
                 ));
             }
-            "--local-only-tether" => options.local_only_tether = true,
+            "--local-only-tether" => {
+                #[cfg(windows)]
+                {
+                    options.local_only_tether = true;
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    options.local_only_tether = true;
+                }
+                #[cfg(not(any(windows, target_os = "linux")))]
+                {
+                    return Err("--local-only-tether is supported only on Windows and Linux".into());
+                }
+            }
             "--warn-ms" => {
                 let milliseconds: f64 = arguments
                     .next()
@@ -645,4 +837,41 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         }
     }
     Ok(options)
+}
+
+#[cfg(windows)]
+fn default_mode() -> Mode {
+    Mode::Touch
+}
+
+#[cfg(not(windows))]
+fn default_mode() -> Mode {
+    Mode::Keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HostPhase, IDLE_PEER_SILENCE_TIMEOUT, idle_peer_timed_out};
+    use std::time::Duration;
+
+    #[test]
+    fn status_tokens_are_stable() {
+        assert_eq!(HostPhase::Waiting.token(), "HPT_STATUS WAITING");
+        assert_eq!(HostPhase::Connected.token(), "HPT_STATUS CONNECTED");
+        assert_eq!(HostPhase::Recovering.token(), "HPT_STATUS RECOVERING");
+        assert_eq!(HostPhase::Stopping.token(), "HPT_STATUS STOPPING");
+    }
+
+    #[test]
+    fn idle_timeout_never_replaces_active_committed_progress_watchdog() {
+        assert!(!idle_peer_timed_out(
+            false,
+            IDLE_PEER_SILENCE_TIMEOUT - Duration::from_millis(1),
+        ));
+        assert!(idle_peer_timed_out(false, IDLE_PEER_SILENCE_TIMEOUT));
+        assert!(!idle_peer_timed_out(
+            true,
+            IDLE_PEER_SILENCE_TIMEOUT + Duration::from_secs(1),
+        ));
+    }
 }

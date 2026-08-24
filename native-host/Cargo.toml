@@ -5,6 +5,10 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -13,7 +17,10 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Networking_WinSock",
     "Win32_System_LibraryLoader",
     "Win32_System_Console",
+    "Win32_System_IO",
     "Win32_System_Performance",
+    "Win32_System_Registry",
+    "Win32_Security",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Controls",
@@ -21,6 +28,11 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_Input_Pointer",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# 0.2.189 is the verified floor for the uinput and getifaddrs APIs used by
+# the Linux input and tether-peer classification paths.
+libc = "0.2.189"
 
 [lib]
 name = "holodori_native_host"

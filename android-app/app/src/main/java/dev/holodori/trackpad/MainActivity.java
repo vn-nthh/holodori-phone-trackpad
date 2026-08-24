@@ -34,7 +34,7 @@ public final class MainActivity extends Activity implements TouchTransport.Liste
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemUi();
 
-        transport = new UdpTransport(this);
+        transport = new UdpTransport(this, this);
         trackpadView = new TrackpadView(this, transport);
         setContentView(trackpadView);
         transport.open();

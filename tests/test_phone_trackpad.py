@@ -2,8 +2,12 @@ import contextlib
 import ctypes
 import io
 import subprocess
+import sys
 import unittest
 from unittest import mock
+
+if sys.platform != "win32":
+    raise unittest.SkipTest("phone_trackpad drives the Windows-only ctypes.windll input API")
 
 import phone_trackpad
 from phone_trackpad import (

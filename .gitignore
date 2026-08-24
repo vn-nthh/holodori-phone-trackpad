@@ -26,6 +26,7 @@ release/
 .signing/
 
 # OS / editor
+.codex-remote-attachments/
 .DS_Store
 Thumbs.db
 Desktop.ini

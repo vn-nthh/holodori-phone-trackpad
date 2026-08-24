@@ -418,7 +418,7 @@ impl HostMetrics {
         );
         warn_p99(
             &mut warnings,
-            "Windows host service",
+            "host input service",
             service,
             self.warning_budget_ms,
         );
@@ -485,11 +485,30 @@ impl HostMetrics {
             self.connection_discarded_bytes,
             self.sink_retries
         )?;
-        write_snapshot(
-            &mut writer,
-            "touch_current_event_to_windows_estimated_ms",
-            end_to_end,
-        )?;
+        // Keep the published Windows report keys stable while giving Linux
+        // reports platform-neutral names. Reports are written only at stop,
+        // so this conditional is never on the input hot path.
+        let end_to_end_key = if cfg!(windows) {
+            "touch_current_event_to_windows_estimated_ms"
+        } else {
+            "touch_current_event_to_host_input_estimated_ms"
+        };
+        let sink_key = if cfg!(windows) {
+            "windows_receive_to_sink_ms"
+        } else {
+            "host_receive_to_sink_ms"
+        };
+        let sink_label = if cfg!(windows) {
+            "windows_sink"
+        } else {
+            "host_sink"
+        };
+        let worst_sink_label = if cfg!(windows) {
+            "windows_sink_ms"
+        } else {
+            "host_sink_ms"
+        };
+        write_snapshot(&mut writer, end_to_end_key, end_to_end)?;
         write_snapshot(
             &mut writer,
             "android_current_event_to_callback_ms",
@@ -510,11 +529,11 @@ impl HostMetrics {
             "usb_tethered_network_one_way_symmetric_estimate_ms",
             transport,
         )?;
-        write_snapshot(&mut writer, "windows_receive_to_sink_ms", service)?;
+        write_snapshot(&mut writer, sink_key, service)?;
         write_snapshot(&mut writer, "ack_write_ms", ack)?;
         writeln!(
             writer,
-            "tail_over_{:.3}ms: end_to_end={} android_dispatch={} callback_to_write={} usb={} windows_sink={} ack={}",
+            "tail_over_{:.3}ms: end_to_end={} android_dispatch={} callback_to_write={} usb={} {sink_label}={} ack={}",
             self.warning_budget_ms,
             tail_budget[0],
             tail_budget[1],
@@ -525,13 +544,13 @@ impl HostMetrics {
         )?;
         writeln!(
             writer,
-            "tail_over_{severe_threshold_ms:.0}ms: end_to_end={} android_dispatch={} callback_to_write={} usb={} windows_sink={} ack={}",
+            "tail_over_{severe_threshold_ms:.0}ms: end_to_end={} android_dispatch={} callback_to_write={} usb={} {sink_label}={} ack={}",
             severe[0], severe[1], severe[2], severe[3], severe[4], severe[5]
         )?;
         if let Some(worst) = self.worst_current {
             writeln!(
                 writer,
-                "worst_current_event: session={:016x} seq={} total_ms={:.3} android_dispatch_ms={:.3} callback_to_write_ms={:.3} usb_ms={:.3} windows_sink_ms={:.3}",
+                "worst_current_event: session={:016x} seq={} total_ms={:.3} android_dispatch_ms={:.3} callback_to_write_ms={:.3} usb_ms={:.3} {worst_sink_label}={:.3}",
                 worst.session_id,
                 worst.sequence,
                 worst.total_nanos / NANOS_PER_MILLI,
