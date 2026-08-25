@@ -116,9 +116,9 @@ can show it.
 7. Arrange and lock the phone play area.
 8. Press **Stop** in the controller when finished.
 
-No ADB, phone root access, custom kernel driver, or controller elevation is
-required. Your desktop may display a NetworkManager/polkit authorization prompt
-if you enable the optional internet-routing protection.
+No phone root access, custom kernel driver, or controller elevation is required.
+Your desktop may display a NetworkManager/polkit authorization prompt if you
+enable the optional internet-routing protection.
 
 ## Keeping the PC off the phone's internet
 

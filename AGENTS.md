@@ -63,7 +63,7 @@ Changes must preserve these properties:
 - no intentional batching, debounce, frame-age wait, or polling bridge;
 - no UI rendering, logging, report formatting, sorting, or file I/O on the hot
   path;
-- no Python, JSON, or per-frame process boundary in the native path;
+- no JSON or per-frame process boundary in the native path;
 - first send is immediate, its redundant copy is immediate, and repair begins
   after 2 ms;
 - every datagram remains below the tethered Ethernet MTU;
@@ -78,8 +78,7 @@ that frame through the 2 ms replay.
 ## Why the architecture looks this way
 
 - **USB tethering/RNDIS:** uses the phone's normal USB cable and Windows inbox
-  networking. It avoids USB debugging, ADB, root, Android accessory mode,
-  WinUSB, UsbDk, and custom driver installation.
+  networking without custom driver installation.
 - **UDP datagrams:** provide low-overhead atomic framing. Protocol v4 adds the
   reliability UDP does not: session IDs, sequence numbers, CRC, reorder,
   deduplication, cumulative ACKs, redundant sends, and replay.
@@ -116,7 +115,6 @@ published tag unless the user explicitly authorizes it.
 - Android debug and release builds plus debug/release lint
 - launcher frontend tests/build and strict Rust checks when launcher code or a
   release bundle is involved
-- legacy Python suite when producing a full release
 - `git diff --check`
 - loopback fault injection for corrupt/lost copies and loss of both immediate
   copies, checked against the 8.333 ms budget

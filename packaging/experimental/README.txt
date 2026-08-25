@@ -1,9 +1,8 @@
 HOLODORI LOSSLESS TOUCH - USB TETHERING / RNDIS / UDP
 ========================================================
 
-This experimental bundle uses the phone's normal USB tethering network. It
-does not use ADB, root, Android USB accessory mode, WinUSB, UsbDk, or a custom
-Windows driver. Windows supplies its inbox RNDIS network driver.
+This experimental bundle uses the phone's normal USB tethering network.
+Windows supplies its inbox RNDIS network driver.
 
 Install:
   1. Copy Android\HolodoriUsbTetheredUdp-v4.apk to the phone.
@@ -30,8 +29,8 @@ Start the Windows app:
      the original tether routes are restored.
 
 Portable Windows app:
-  - The folder is self-contained for Holodori: no installer, ADB, root,
-    UsbDk, WinUSB, or custom driver is included or used.
+  - The folder is self-contained for Holodori and needs no installer or custom
+    driver.
   - The Tauri UI uses the Microsoft Edge WebView2 runtime supplied by supported
     Windows 10/11 installations. If the app does not open, install or update
     the WebView2 Runtime once from Microsoft.

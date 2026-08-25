@@ -1,9 +1,8 @@
 HOLODORI LOSSLESS TOUCH - USB TETHERING / RNDIS / UDP (LINUX)
 ========================================================
 
-This experimental bundle uses the phone's normal USB tethering network. It
-does not use ADB, root, Android USB accessory mode, or a custom Linux driver.
-Your distribution's kernel and network manager supply the USB network device.
+This experimental bundle uses the phone's normal USB tethering network. Your
+distribution's kernel and network manager supply the USB network device.
 The current host deliberately accepts only the kernel's rndis_host driver;
 generic USB Ethernet/NCM adapters fail closed because protocol v4 cannot
 authenticate them.
@@ -89,8 +88,8 @@ Start the Linux app:
       checkbox off or change the profile in NetworkManager.
 
 Portable Linux app:
-  - The folder is self-contained for Holodori: no installer, ADB, root, or
-    custom driver is included or used.
+  - The folder is self-contained for Holodori and needs no installer or custom
+    driver.
   - The Tauri UI uses the system webkit2gtk/GTK libraries. Install them with
     your distribution's package manager if the app does not start.
 

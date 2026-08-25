@@ -1,11 +1,8 @@
 # Android companion app
 
-This module is the no-debugging phone side of Holodori Phone Trackpad. The
-experimental branch uses acknowledged protocol v4 over the phone's USB
-tethering/RNDIS network.
-
-The APK does not use ADB, root, the Android USB host/accessory API, WinUSB, or
-UsbDk. Android's normal USB tethering feature provides the physical USB path;
+This module is the phone side of Holodori Phone Trackpad. The experimental
+branch uses acknowledged protocol v4 over the phone's USB tethering/RNDIS
+network. Android's normal USB tethering feature provides the physical USB path;
 the app only needs ordinary network access.
 
 ## Build

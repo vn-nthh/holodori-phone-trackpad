@@ -1,10 +1,9 @@
 # Experimental lossless touch architecture
 
-This branch is a USB-tethering/RNDIS + UDP experiment for Windows and Linux. It
-is deliberately not wire-compatible with the stable Python release and does
-not use ADB, root, Android USB accessory mode, WinUSB, UsbDk, or a custom host
-driver. The only physical link is the phone's normal USB cable; the operating
-system's USB-network driver carries the UDP traffic.
+This branch is a USB-tethering/RNDIS + UDP experiment for Windows and Linux.
+The phone's normal USB cable is the only physical link, and the operating
+system's USB-network driver carries the UDP traffic without a custom host
+driver.
 
 ## Data path
 
@@ -220,10 +219,10 @@ patches memory, hooks rendering/input code, or constructs game/network packets.
 
 ## Latency contract
 
-The native hot path has no Python interpreter, JSON, polling bridge, or UI
-work. It uses fixed binary datagrams, stack buffers, direct native OS input calls,
-immediate redundant sends, and a 2 ms replay threshold. It accepts and sustains
-at least 120 updates per second; the keepalive period is 8 ms.
+The native hot path has no JSON, polling bridge, or UI work. It uses fixed
+binary datagrams, stack buffers, direct native OS input calls, immediate
+redundant sends, and a 2 ms replay threshold. It accepts and sustains at least
+120 updates per second; the keepalive period is 8 ms.
 
 An absolute promise that every phone is faster than every physical keyboard is
 not physically testable or universally true: phone touch scan rate and USB

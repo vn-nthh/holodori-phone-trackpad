@@ -1,13 +1,4 @@
-# Local runtime config (device path + play zone)
-config.json
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.venv/
-venv/
+# Local environment
 .env
 
 # Android / Gradle
@@ -19,7 +10,6 @@ android-app/local.properties
 native-host/target/
 
 # Packaging
-.venv-package/
 build/
 dist/
 release/

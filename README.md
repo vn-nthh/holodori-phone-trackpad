@@ -192,18 +192,16 @@ Or from Bash on Linux:
 packaging/build-linux.sh
 ```
 
-Run the main test suites:
+Run the native tests:
 
 ```powershell
 cargo test --manifest-path native-host\Cargo.toml --all-targets
-python -m unittest discover -s tests
 ```
 
 On Linux:
 
 ```sh
 cargo test --manifest-path native-host/Cargo.toml --all-targets
-python -m unittest discover -s tests
 ```
 
 See the [Linux setup guide](LINUX_SETUP.md),

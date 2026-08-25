@@ -117,11 +117,10 @@ Windows が管理者権限を求めることがあります。ランチャーが
   -AndroidSdk $env:ANDROID_SDK_ROOT
 ```
 
-主なテストスイートの実行:
+ネイティブテストの実行:
 
 ```powershell
 cargo test --manifest-path native-host\Cargo.toml --all-targets
-python -m unittest discover -s tests
 ```
 
 実装の詳細は [アーキテクチャガイド](EXPERIMENTAL_ARCHITECTURE.md) と [プロトコル v4 仕様](PROTOCOL_V4.md) を参照してください。

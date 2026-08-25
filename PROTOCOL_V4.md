@@ -5,7 +5,7 @@ hosts over Android USB tethering/RNDIS and UDP. Android retains each input
 frame until the host confirms that the selected operating-system sink accepted
 it.
 Version 4 adds stage-separated benchmark timestamps and a duplex clock
-exchange; it is not wire-compatible with protocol v3 or the stable Python host.
+exchange; it is not wire-compatible with protocol v3.
 
 ## USB-tethered UDP transport
 
