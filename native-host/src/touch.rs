@@ -1,10 +1,9 @@
-use std::collections::BTreeMap;
 use std::io;
 use std::ptr::null;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{ERROR_NOT_READY, GetLastError, HWND, POINT, RECT};
+use windows_sys::Win32::Foundation::{ERROR_NOT_READY, GetLastError, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::UI::Input::Pointer::{
     InitializeTouchInjection, InjectTouchInput, POINTER_FLAG_CANCELED, POINTER_FLAG_DOWN,
@@ -22,28 +21,38 @@ use crate::protocol::{
 
 pub const PROBE_WINDOW_TITLE: &str = "Holodori Touch Probe";
 
-#[derive(Clone, Copy, Debug)]
+const POINTER_ID_COUNT: usize = u8::MAX as usize + 1;
+
+#[derive(Clone, Debug)]
 pub struct TouchTarget {
     pub left: i32,
     pub top: i32,
     pub width: i32,
     pub height: i32,
+    window_title: Vec<u16>,
 }
 
 impl TouchTarget {
     pub fn from_window_title(title: &str) -> io::Result<Self> {
-        let wide_title = wide(title);
-        let hwnd = unsafe { FindWindowW(null(), wide_title.as_ptr()) };
+        let mut target = Self {
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            window_title: wide(title),
+        };
+        target.refresh()?;
+        Ok(target)
+    }
+
+    fn refresh(&mut self) -> io::Result<()> {
+        let hwnd = unsafe { FindWindowW(null(), self.window_title.as_ptr()) };
         if hwnd.is_null() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("window not found: {title:?}"),
+                "touch target window was closed",
             ));
         }
-        Self::from_client(hwnd)
-    }
-
-    fn from_client(hwnd: HWND) -> io::Result<Self> {
         let mut client = RECT::default();
         if unsafe { GetClientRect(hwnd, &mut client) } == 0 {
             return Err(io::Error::last_os_error());
@@ -54,12 +63,11 @@ impl TouchTarget {
             return Err(io::Error::last_os_error());
         }
 
-        Ok(Self {
-            left: origin.x,
-            top: origin.y,
-            width: (client.right - client.left).max(1),
-            height: (client.bottom - client.top).max(1),
-        })
+        self.left = origin.x;
+        self.top = origin.y;
+        self.width = (client.right - client.left).max(1);
+        self.height = (client.bottom - client.top).max(1);
+        Ok(())
     }
 
     fn map(&self, contact: &Contact) -> POINT {
@@ -81,7 +89,9 @@ struct ActiveContact {
 
 pub struct TouchInjector {
     target: TouchTarget,
-    active: BTreeMap<u8, ActiveContact>,
+    active: [Option<ActiveContact>; POINTER_ID_COUNT],
+    active_count: usize,
+    injection: Vec<POINTER_TOUCH_INFO>,
 }
 
 impl TouchInjector {
@@ -91,16 +101,14 @@ impl TouchInjector {
         }
         Ok(Self {
             target,
-            active: BTreeMap::new(),
+            active: [None; POINTER_ID_COUNT],
+            active_count: 0,
+            injection: Vec::with_capacity(MAX_CONTACTS * 2),
         })
     }
 
-    pub fn set_target(&mut self, target: TouchTarget) {
-        self.target = target;
-    }
-
     pub fn has_active_input(&self) -> bool {
-        !self.active.is_empty()
+        self.active_count > 0
     }
 
     pub fn accept(&mut self, frame: &TouchFrame) -> io::Result<()> {
@@ -110,115 +118,125 @@ impl TouchInjector {
         if frame.action == ACTION_HEARTBEAT && frame.contacts.is_empty() {
             // Protocol-v4 APKs before snapshot heartbeats sent an empty
             // keepalive. Preserve compatibility with those sessions.
-            let contacts = self.make_update_contacts(&self.active);
-            if contacts.is_empty() {
+            fill_update_contacts(&self.active, &self.active, &mut self.injection);
+            if self.injection.is_empty() {
                 return Ok(());
             }
-            return inject_retry(&contacts);
+            return inject_retry(&self.injection);
         }
 
-        let proposed = self.proposed_contacts(frame);
+        if self.active_count == 0 {
+            self.target.refresh()?;
+        }
+        let mut proposed = [None; POINTER_ID_COUNT];
+        let mut present = [false; POINTER_ID_COUNT];
+        for contact in &frame.contacts {
+            let index = usize::from(contact.pointer_id);
+            proposed[index] = Some(self.contact_state(contact));
+            present[index] = true;
+        }
 
         if frame.action == ACTION_UP
-            && let Some(previous) = self.active.get(&frame.action_pointer_id)
-            && let Some(next) = proposed.get(&frame.action_pointer_id)
+            && let Some(previous) = self.active[usize::from(frame.action_pointer_id)]
+            && let Some(next) = proposed[usize::from(frame.action_pointer_id)]
             && (previous.location.x != next.location.x || previous.location.y != next.location.y)
         {
-            let update = self.make_update_contacts(&proposed);
-            inject_retry(&update)?;
-            self.active = proposed.clone();
+            fill_update_contacts(&self.active, &proposed, &mut self.injection);
+            inject_retry(&self.injection)?;
+            self.active = proposed;
+            self.active_count = self.active.iter().flatten().count();
         }
 
-        let mut contacts = Vec::with_capacity(proposed.len().max(1));
+        self.injection.clear();
+        for (pointer_id, state) in self.active.iter().enumerate() {
+            if let Some(state) = state
+                && !present[pointer_id]
+            {
+                self.injection
+                    .push(to_touch_info(pointer_id as u8, *state, POINTER_FLAG_UP));
+            }
+        }
         for contact in &frame.contacts {
-            let Some(state) = proposed.get(&contact.pointer_id).copied() else {
-                continue;
-            };
+            let state = proposed[usize::from(contact.pointer_id)].unwrap();
             let Some(flags) = transition_flags(
-                self.active.contains_key(&contact.pointer_id),
+                self.active[usize::from(contact.pointer_id)].is_some(),
                 contact.touching(),
             ) else {
                 // A host can restart after the original UP was accepted by the
                 // old process. Treat that replay as already satisfied.
                 continue;
             };
-            contacts.push(to_touch_info(contact.pointer_id, state, flags));
+            self.injection
+                .push(to_touch_info(contact.pointer_id, state, flags));
         }
 
-        if contacts.is_empty() {
-            self.active.clear();
-            return Ok(());
+        if !self.injection.is_empty() {
+            inject_retry(&self.injection)?;
         }
-        inject_retry(&contacts)?;
-
-        self.active = proposed
-            .into_iter()
-            .filter(|(pointer_id, _)| {
-                frame
-                    .contacts
-                    .iter()
-                    .find(|contact| contact.pointer_id == *pointer_id)
-                    .is_some_and(Contact::touching)
-            })
-            .collect();
+        self.active.fill(None);
+        self.active_count = 0;
+        for contact in &frame.contacts {
+            if contact.touching() {
+                self.active[usize::from(contact.pointer_id)] =
+                    proposed[usize::from(contact.pointer_id)];
+                self.active_count += 1;
+            }
+        }
         Ok(())
     }
 
     pub fn cancel_all(&mut self) -> io::Result<()> {
-        if self.active.is_empty() {
+        if self.active_count == 0 {
             return Ok(());
         }
-        let contacts: Vec<_> = self
-            .active
-            .iter()
-            .map(|(pointer_id, state)| {
-                to_touch_info(*pointer_id, *state, POINTER_FLAG_UP | POINTER_FLAG_CANCELED)
-            })
-            .collect();
-        inject_retry(&contacts)?;
-        self.active.clear();
+        self.injection.clear();
+        for (pointer_id, state) in self.active.iter().enumerate() {
+            if let Some(state) = state {
+                self.injection.push(to_touch_info(
+                    pointer_id as u8,
+                    *state,
+                    POINTER_FLAG_UP | POINTER_FLAG_CANCELED,
+                ));
+            }
+        }
+        inject_retry(&self.injection)?;
+        self.active.fill(None);
+        self.active_count = 0;
         Ok(())
     }
 
-    fn proposed_contacts(&self, frame: &TouchFrame) -> BTreeMap<u8, ActiveContact> {
-        frame
-            .contacts
-            .iter()
-            .map(|contact| {
-                let location = self.target.map(contact);
-                let pressure = (contact.pressure.clamp(0.0, 1.0) * 1023.0).round() as u32 + 1;
-                let radius = ((contact.touch_major.clamp(0.0, 1.0)
-                    * self.target.width.min(self.target.height) as f32
-                    * 0.5)
-                    .round() as i32)
-                    .clamp(2, 32);
-                (
-                    contact.pointer_id,
-                    ActiveContact {
-                        location,
-                        pressure,
-                        radius,
-                    },
-                )
-            })
-            .collect()
+    fn contact_state(&self, contact: &Contact) -> ActiveContact {
+        let location = self.target.map(contact);
+        let pressure = (contact.pressure.clamp(0.0, 1.0) * 1023.0).round() as u32 + 1;
+        let radius = ((contact.touch_major.clamp(0.0, 1.0)
+            * self.target.width.min(self.target.height) as f32
+            * 0.5)
+            .round() as i32)
+            .clamp(2, 32);
+        ActiveContact {
+            location,
+            pressure,
+            radius,
+        }
     }
+}
 
-    fn make_update_contacts(
-        &self,
-        contacts: &BTreeMap<u8, ActiveContact>,
-    ) -> Vec<POINTER_TOUCH_INFO> {
-        contacts
-            .iter()
-            .filter(|(pointer_id, _)| self.active.contains_key(pointer_id))
-            .map(|(pointer_id, state)| {
-                to_touch_info(
-                    *pointer_id,
-                    *state,
-                    POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT,
-                )
-            })
-            .collect()
+fn fill_update_contacts(
+    active: &[Option<ActiveContact>; POINTER_ID_COUNT],
+    proposed: &[Option<ActiveContact>; POINTER_ID_COUNT],
+    contacts: &mut Vec<POINTER_TOUCH_INFO>,
+) {
+    contacts.clear();
+    for (pointer_id, state) in proposed.iter().enumerate() {
+        if active[pointer_id].is_some()
+            && let Some(state) = state
+        {
+            contacts.push(to_touch_info(
+                pointer_id as u8,
+                *state,
+                POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT,
+            ));
+        }
     }
 }
 

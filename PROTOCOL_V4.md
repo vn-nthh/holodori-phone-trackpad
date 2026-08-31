@@ -156,7 +156,9 @@ breakdown needed to locate a rare stall.
 
 ## Reliability
 
-- Android has an ordered queue with no age or capacity eviction.
+- Android never coalesces or individually evicts ordered gameplay frames. A
+  64 ms oldest-frame boundary abandons the whole session instead of replaying
+  stale transitions.
 - Frames carry session, sequence, length, and CRC protection.
 - The host buffers future sequences and applies every sequence exactly once.
 - Android sends every frame twice immediately and begins replay after 2 ms if
@@ -165,9 +167,10 @@ breakdown needed to locate a rare stall.
   therefore covered without waiting for the replay timer.
 - The host acknowledges only after the selected OS sink accepts a frame.
 - A fresh host can bootstrap from the oldest replay in an active phone session.
-- During gameplay, 64 ms without cumulative ACK advancement makes Android drop
-  queued gameplay and start a fresh session with a `CANCEL`. Duplicate, stale,
-  or out-of-range controls do not count as ordered progress. The first active
+- During gameplay, either 64 ms without cumulative ACK advancement or a 64 ms
+  oldest pending frame makes Android drop queued gameplay and start a fresh
+  session with a `CANCEL`. Duplicate, stale, or out-of-range controls do not
+  count as ordered progress. The first active
   frame starts a fresh response window rather than inheriting an older idle
   discovery timestamp. An idle search may wait two seconds. The initial
   socket-restart backoff is 4 ms.

@@ -14,6 +14,7 @@ use super::KeyChange;
 
 pub(super) struct KeySink {
     scan_codes: Vec<u16>,
+    inputs: Vec<INPUT>,
 }
 
 impl KeySink {
@@ -30,7 +31,10 @@ impl KeySink {
             }
             scan_codes.push(scan_code as u16);
         }
-        Ok(Self { scan_codes })
+        Ok(Self {
+            inputs: Vec::with_capacity(scan_codes.len() * 4),
+            scan_codes,
+        })
     }
 
     pub(super) fn lane_count(&self) -> usize {
@@ -49,18 +53,20 @@ impl KeySink {
         if changes.is_empty() {
             return Ok(0);
         }
-        let inputs: Vec<_> = changes
-            .iter()
-            .map(|change| key_input(self.scan_codes[change.lane], change.down))
-            .collect();
-        let count = u32::try_from(inputs.len()).map_err(|_| {
+        self.inputs.clear();
+        self.inputs.extend(
+            changes
+                .iter()
+                .map(|change| key_input(self.scan_codes[change.lane], change.down)),
+        );
+        let count = u32::try_from(self.inputs.len()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "too many keyboard events for one SendInput submission",
             )
         })?;
         let accepted =
-            unsafe { SendInput(count, inputs.as_ptr(), size_of::<INPUT>() as i32) } as usize;
+            unsafe { SendInput(count, self.inputs.as_ptr(), size_of::<INPUT>() as i32) } as usize;
         if accepted == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -73,6 +79,7 @@ impl KeySink {
             scan_codes: (1..=lanes)
                 .map(|scan_code| u16::try_from(scan_code).expect("test lane fits u16"))
                 .collect(),
+            inputs: Vec::new(),
         }
     }
 }

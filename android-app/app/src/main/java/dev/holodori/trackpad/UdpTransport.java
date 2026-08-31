@@ -46,6 +46,7 @@ final class UdpTransport implements TouchTransport {
     private static final long DISCOVERY_INTERVAL_NANOS = 500_000_000L;
     private static final long HOST_TIMEOUT_NANOS = 2_000_000_000L;
     private static final long ACTIVE_HOST_TIMEOUT_NANOS = 64_000_000L;
+    private static final long MAX_GAMEPLAY_BACKLOG_NANOS = 64_000_000L;
     private static final long WATCHDOG_INTERVAL_MILLIS = 4L;
     // Windows touch injection needs a high-rate refresh while a contact is
     // stationary. Idle sessions do not need synthetic touch frames; discovery
@@ -71,13 +72,15 @@ final class UdpTransport implements TouchTransport {
         final byte[] bytes = new byte[TouchSample.MAX_FRAME_SIZE];
         final ByteBuffer packet = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
         int length;
+        long queuedNanos;
         long lastSentNanos;
         int sendCount;
 
-        void reset(long sessionId, long sequence, int length) {
+        void reset(long sessionId, long sequence, int length, long queuedNanos) {
             this.sessionId = sessionId;
             this.sequence = sequence;
             this.length = length;
+            this.queuedNanos = queuedNanos;
             lastSentNanos = 0;
             sendCount = 0;
             packet.clear();
@@ -712,6 +715,7 @@ final class UdpTransport implements TouchTransport {
 
     private void checkHostTimeout(int sessionGeneration) {
         boolean timedOut = false;
+        boolean backlogExpired = false;
         int staleFrames = 0;
         synchronized (queueLock) {
             if (!isSessionActive(sessionGeneration)) return;
@@ -729,7 +733,8 @@ final class UdpTransport implements TouchTransport {
                     && activeDataPath
                     && activePathStartedNanos > 0
                     && nowNanos - activePathStartedNanos >= ACTIVE_HOST_TIMEOUT_NANOS;
-            if (hostTimedOut || discoveryTimedOut) {
+            backlogExpired = gameplayBacklogExpiredLocked(nowNanos);
+            if (hostTimedOut || discoveryTimedOut || backlogExpired) {
                 staleFrames = unacknowledged.size();
                 timedOut = true;
             }
@@ -740,7 +745,8 @@ final class UdpTransport implements TouchTransport {
             // watchdog or prevent MainActivity from opening a fresh session.
             listener.onConnectionChanged(
                     false,
-                    "Host not responding; dropped "
+                    (backlogExpired ? "Input backlog expired; dropped "
+                            : "Host not responding; dropped ")
                             + staleFrames
                             + " stale frames; restarting"
             );
@@ -767,6 +773,19 @@ final class UdpTransport implements TouchTransport {
         // UP/CANCEL from setup traffic.
         PendingPacket newest = unacknowledged.peekLast();
         return newest != null && newest.sequence > 0;
+    }
+
+    private boolean gameplayBacklogExpiredLocked(long nowNanos) {
+        for (PendingPacket packet : unacknowledged) {
+            if (packet.sequence > 0) {
+                return gameplayBacklogExpired(packet.queuedNanos, nowNanos);
+            }
+        }
+        return false;
+    }
+
+    static boolean gameplayBacklogExpired(long queuedNanos, long nowNanos) {
+        return nowNanos - queuedNanos >= MAX_GAMEPLAY_BACKLOG_NANOS;
     }
 
     private boolean hasActiveDataPathLocked() {
@@ -886,7 +905,7 @@ final class UdpTransport implements TouchTransport {
     private PendingPacket obtainPacketLocked(long packetSessionId, long sequence, int length) {
         PendingPacket packet = packetPool.pollFirst();
         if (packet == null) packet = new PendingPacket();
-        packet.reset(packetSessionId, sequence, length);
+        packet.reset(packetSessionId, sequence, length, System.nanoTime());
         return packet;
     }
 

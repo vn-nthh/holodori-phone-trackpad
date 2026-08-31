@@ -141,7 +141,9 @@ each boundary.
 
 - Android copies every `MotionEvent` history sample before the current sample.
 - Each sample contains the complete simultaneous contact set.
-- The queue has no age-based or capacity-based gameplay eviction.
+- Android never coalesces or individually evicts gameplay frames. If the
+  oldest pending gameplay frame reaches 64 ms, it drops the whole failed
+  session and starts again from a fresh `CANCEL` plus the latest snapshot.
 - Every frame has a 64-bit session ID, 64-bit sequence, length, and CRC.
 - The host buffers a future sequence until the missing sequence arrives.
 - Duplicate replays are acknowledged without being applied twice.
@@ -161,9 +163,10 @@ behind an ordering hole do not mask that stall. The host then refuses delayed
 gameplay until a fresh session-start `CANCEL`.
 Protocol v4 does not replay old gameplay after a multi-second reconnect
 because doing so would create late notes. During gameplay Android starts a
-fresh session after 64 ms without cumulative ACK advancement, drops queued
-gameplay, and sends a new session-start `CANCEL`; duplicate or invalid ACKs do
-not count as progress. The first gameplay frame receives a fresh response
+fresh session after either 64 ms without cumulative ACK advancement or 64 ms
+of oldest-frame backlog age, drops queued gameplay, and sends a new
+session-start `CANCEL`; duplicate or invalid ACKs do not count as progress.
+The first gameplay frame receives a fresh response
 window so an older idle-discovery timestamp cannot cause an immediate false
 timeout. Idle discovery retains the two-second timeout. Socket restart begins
 with a 4 ms backoff. The latest complete contact snapshot survives that restart,

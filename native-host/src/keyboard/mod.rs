@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io;
 
 use crate::protocol::{ACTION_CANCEL, ACTION_HEARTBEAT, TouchFrame};
@@ -13,10 +13,21 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux::KeySink;
 
+const POINTER_ID_COUNT: usize = u8::MAX as usize + 1;
+
 #[derive(Clone)]
 struct KeyboardState {
-    pointer_lanes: BTreeMap<u8, usize>,
+    pointer_lanes: [Option<usize>; POINTER_ID_COUNT],
     lane_holds: Vec<u16>,
+}
+
+impl KeyboardState {
+    fn new(lanes: usize) -> Self {
+        Self {
+            pointer_lanes: [None; POINTER_ID_COUNT],
+            lane_holds: vec![0; lanes],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,7 +37,7 @@ pub(super) struct KeyChange {
 }
 
 struct PendingFrame {
-    sequence: u64,
+    sequence: Option<u64>,
     next_state: KeyboardState,
     changes: Vec<KeyChange>,
     applied: usize,
@@ -38,7 +49,7 @@ pub struct KeyboardSink {
     sink: KeySink,
     state: KeyboardState,
     pressed: Vec<bool>,
-    pending: Option<PendingFrame>,
+    pending: PendingFrame,
 }
 
 impl KeyboardSink {
@@ -52,13 +63,16 @@ impl KeyboardSink {
         validate_lane_keys(keys)?;
         let sink = KeySink::new(keys)?;
         let lanes = sink.lane_count();
+        let state = KeyboardState::new(lanes);
         Ok(Self {
-            state: KeyboardState {
-                pointer_lanes: BTreeMap::new(),
-                lane_holds: vec![0; lanes],
-            },
+            state: state.clone(),
             pressed: vec![false; lanes],
-            pending: None,
+            pending: PendingFrame {
+                sequence: None,
+                next_state: state,
+                changes: Vec::with_capacity(lanes * 4),
+                applied: 0,
+            },
             sink,
         })
     }
@@ -88,31 +102,33 @@ impl KeyboardSink {
             // the latest snapshot so a restarted host can restore held keys.
             return Ok(());
         }
-        if let Some(pending) = &self.pending
-            && pending.sequence != frame.sequence
+        let pending = &mut self.pending;
+        if let Some(sequence) = pending.sequence
+            && sequence != frame.sequence
         {
             return Err(io::Error::other(format!(
                 "sequence {} is still partially applied",
-                pending.sequence
+                sequence
             )));
         }
 
-        if self.pending.is_none() {
-            let (next_state, changes) = plan(&self.state, self.pressed.len(), frame);
-            self.pending = Some(PendingFrame {
-                sequence: frame.sequence,
-                next_state,
-                changes,
-                applied: 0,
-            });
+        if pending.sequence.is_none() {
+            plan_into(
+                &self.state,
+                self.pressed.len(),
+                frame,
+                &mut pending.next_state,
+                &mut pending.changes,
+            );
+            pending.sequence = Some(frame.sequence);
+            pending.applied = 0;
         }
 
-        let pending = self.pending.as_ref().unwrap();
         let first = pending.applied;
         let remaining = &pending.changes[first..];
         if remaining.is_empty() {
-            let completed = self.pending.take().unwrap();
-            self.state = completed.next_state;
+            std::mem::swap(&mut self.state, &mut pending.next_state);
+            pending.sequence = None;
             return Ok(());
         }
 
@@ -130,17 +146,17 @@ impl KeyboardSink {
 
         let applied = first + accepted;
         for index in first..applied {
-            let change = self.pending.as_ref().unwrap().changes[index];
+            let change = pending.changes[index];
             self.pressed[change.lane] = change.down;
         }
-        self.pending.as_mut().unwrap().applied = applied;
+        pending.applied = applied;
 
         if accepted != remaining_len {
             return Err(incomplete_submission_error(accepted, remaining_len));
         }
 
-        let completed = self.pending.take().unwrap();
-        self.state = completed.next_state;
+        std::mem::swap(&mut self.state, &mut pending.next_state);
+        pending.sequence = None;
         Ok(())
     }
 
@@ -153,7 +169,10 @@ impl KeyboardSink {
     where
         F: FnMut(&mut KeySink, &[KeyChange]) -> io::Result<usize>,
     {
-        self.pending = None;
+        let pending = &mut self.pending;
+        pending.sequence = None;
+        pending.changes.clear();
+        pending.applied = 0;
         let lanes: Vec<_> = self
             .pressed
             .iter()
@@ -161,7 +180,7 @@ impl KeyboardSink {
             .filter_map(|(lane, pressed)| pressed.then_some(lane))
             .collect();
         if lanes.is_empty() {
-            self.state.pointer_lanes.clear();
+            self.state.pointer_lanes.fill(None);
             self.state.lane_holds.fill(0);
             return Ok(());
         }
@@ -190,14 +209,23 @@ impl KeyboardSink {
             return Err(incomplete_submission_error(accepted, changes.len()));
         }
 
-        self.state.pointer_lanes.clear();
+        self.state.pointer_lanes.fill(None);
         self.state.lane_holds.fill(0);
         Ok(())
     }
 
     #[cfg(test)]
     fn plan(&self, frame: &TouchFrame) -> (KeyboardState, Vec<KeyChange>) {
-        plan(&self.state, self.pressed.len(), frame)
+        let mut next = KeyboardState::new(self.pressed.len());
+        let mut changes = Vec::new();
+        plan_into(
+            &self.state,
+            self.pressed.len(),
+            frame,
+            &mut next,
+            &mut changes,
+        );
+        (next, changes)
     }
 }
 
@@ -231,13 +259,15 @@ impl Drop for KeyboardSink {
 /// the next state and the ordered key-down/key-up changes needed to reach it.
 /// Kept free of any OS sink so unit tests can exercise slide/hold/chord logic
 /// without opening a real input device.
-fn plan(
+fn plan_into(
     state: &KeyboardState,
     lane_count: usize,
     frame: &TouchFrame,
-) -> (KeyboardState, Vec<KeyChange>) {
-    let mut next = state.clone();
-    let mut changes = Vec::new();
+    next: &mut KeyboardState,
+    changes: &mut Vec<KeyChange>,
+) {
+    next.clone_from(state);
+    changes.clear();
 
     // Android's action pointer must be applied first, but sorting a copied
     // snapshot is unnecessary work on the live path. Two bounded passes keep
@@ -247,31 +277,34 @@ fn plan(
         .iter()
         .find(|contact| contact.pointer_id == frame.action_pointer_id)
     {
-        apply_contact(contact, lane_count, &mut next, &mut changes);
+        apply_contact(contact, lane_count, next, changes);
     }
     for contact in &frame.contacts {
         if contact.pointer_id != frame.action_pointer_id {
-            apply_contact(contact, lane_count, &mut next, &mut changes);
+            apply_contact(contact, lane_count, next, changes);
         }
     }
 
-    const POINTER_ID_COUNT: usize = u8::MAX as usize + 1;
     let mut present = [false; POINTER_ID_COUNT];
     for contact in &frame.contacts {
         present[usize::from(contact.pointer_id)] = true;
     }
     let mut missing = [0_u8; POINTER_ID_COUNT];
     let mut missing_len = 0;
-    for &pointer_id in next.pointer_lanes.keys() {
-        if !present[usize::from(pointer_id)] {
-            missing[missing_len] = pointer_id;
+    for (pointer_id, lane) in next.pointer_lanes.iter().enumerate() {
+        if lane.is_some() && !present[pointer_id] {
+            missing[missing_len] = pointer_id as u8;
             missing_len += 1;
         }
     }
     for &pointer_id in &missing[..missing_len] {
-        release_pointer(pointer_id, &mut next, &mut changes);
+        release_pointer(pointer_id, next, changes);
     }
-    (next, changes)
+    // A complete snapshot can transfer ownership between fingers. If a lane
+    // is owned both before and after the frame, keep its asserted key state
+    // continuous instead of exposing pointer-iteration order as an UP/DOWN.
+    changes
+        .retain(|change| state.lane_holds[change.lane] == 0 || next.lane_holds[change.lane] == 0);
 }
 
 fn apply_contact(
@@ -297,9 +330,10 @@ fn move_pointer(
     state: &mut KeyboardState,
     changes: &mut Vec<KeyChange>,
 ) {
-    let Some(mut current) = state.pointer_lanes.get(&pointer_id).copied() else {
+    let pointer_index = usize::from(pointer_id);
+    let Some(mut current) = state.pointer_lanes[pointer_index] else {
         acquire_lane(destination, state, changes);
-        state.pointer_lanes.insert(pointer_id, destination);
+        state.pointer_lanes[pointer_index] = Some(destination);
         return;
     };
     while current != destination {
@@ -313,11 +347,11 @@ fn move_pointer(
         release_lane(current, state, changes);
         current = next;
     }
-    state.pointer_lanes.insert(pointer_id, destination);
+    state.pointer_lanes[pointer_index] = Some(destination);
 }
 
 fn release_pointer(pointer_id: u8, state: &mut KeyboardState, changes: &mut Vec<KeyChange>) {
-    if let Some(lane) = state.pointer_lanes.remove(&pointer_id) {
+    if let Some(lane) = state.pointer_lanes[usize::from(pointer_id)].take() {
         release_lane(lane, state, changes);
     }
 }
@@ -385,7 +419,7 @@ mod tests {
             vec![contact(0, CONTACT_FLAG_TIP, -0.5)],
         ));
         assert_changes(&left, &[(0, true)]);
-        assert_eq!(left_state.pointer_lanes.get(&0), Some(&0));
+        assert_eq!(left_state.pointer_lanes[0], Some(0));
         assert_eq!(left_state.lane_holds, [1, 0, 0, 0]);
 
         let (right_state, right) = sink.plan(&frame(
@@ -396,7 +430,7 @@ mod tests {
             vec![contact(0, CONTACT_FLAG_TIP, 1.5)],
         ));
         assert_changes(&right, &[(3, true)]);
-        assert_eq!(right_state.pointer_lanes.get(&0), Some(&3));
+        assert_eq!(right_state.pointer_lanes[0], Some(3));
         assert_eq!(right_state.lane_holds, [0, 0, 0, 1]);
     }
 
@@ -421,7 +455,7 @@ mod tests {
             vec![contact(0, CONTACT_FLAG_TIP, -0.25)],
         ));
         assert_changes(&outside, &[]);
-        assert_eq!(outside_state.pointer_lanes.get(&0), Some(&0));
+        assert_eq!(outside_state.pointer_lanes[0], Some(0));
         assert_eq!(outside_state.lane_holds, [1, 0, 0, 0]);
 
         sink.state = outside_state.clone();
@@ -433,14 +467,14 @@ mod tests {
             vec![contact(0, CONTACT_FLAG_INSIDE, 0.05)],
         ));
         assert_changes(&tip_clear, &[(0, false)]);
-        assert!(tip_clear_state.pointer_lanes.is_empty());
+        assert_eq!(active_pointer_count(&tip_clear_state), 0);
         assert_eq!(tip_clear_state.lane_holds, [0, 0, 0, 0]);
 
         sink.state = outside_state;
         let (missing_state, missing) =
             sink.plan(&frame(3, ACTION_MOVE, 0, FRAME_FLAG_LOCKED, vec![]));
         assert_changes(&missing, &[(0, false)]);
-        assert!(missing_state.pointer_lanes.is_empty());
+        assert_eq!(active_pointer_count(&missing_state), 0);
         assert_eq!(missing_state.lane_holds, [0, 0, 0, 0]);
     }
 
@@ -469,8 +503,8 @@ mod tests {
             vec![contact(1, CONTACT_FLAG_TIP, 1.3)],
         ));
         assert_changes(&one, &[]);
-        assert_eq!(one_state.pointer_lanes.len(), 1);
-        assert_eq!(one_state.pointer_lanes.get(&1), Some(&3));
+        assert_eq!(active_pointer_count(&one_state), 1);
+        assert_eq!(one_state.pointer_lanes[1], Some(3));
         assert_eq!(one_state.lane_holds, [0, 0, 0, 1]);
         sink.state = one_state;
 
@@ -482,7 +516,7 @@ mod tests {
             vec![contact(1, 0, 1.3)],
         ));
         assert_changes(&none, &[(3, false)]);
-        assert!(none_state.pointer_lanes.is_empty());
+        assert_eq!(active_pointer_count(&none_state), 0);
         assert_eq!(none_state.lane_holds, [0, 0, 0, 0]);
     }
 
@@ -514,6 +548,27 @@ mod tests {
     }
 
     #[test]
+    fn simultaneous_lane_swap_keeps_the_chord_asserted() {
+        let sink = held_sink(4, &[(0, 0), (1, 1)]);
+
+        let (next, changes) = sink.plan(&frame(
+            2,
+            ACTION_MOVE,
+            0,
+            FRAME_FLAG_LOCKED,
+            vec![
+                contact(0, CONTACT_FLAG_TIP, 0.3),
+                contact(1, CONTACT_FLAG_TIP, 0.1),
+            ],
+        ));
+
+        assert_changes(&changes, &[]);
+        assert_eq!(next.pointer_lanes[0], Some(1));
+        assert_eq!(next.pointer_lanes[1], Some(0));
+        assert_eq!(next.lane_holds, [1, 1, 0, 0]);
+    }
+
+    #[test]
     fn cancel_unlock_and_session_start_batch_all_releases() {
         for (action, flags) in [
             (ACTION_CANCEL, FRAME_FLAG_LOCKED),
@@ -533,7 +588,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(batches, [vec![(0, false), (3, false)]]);
-            assert!(sink.state.pointer_lanes.is_empty());
+            assert_eq!(active_pointer_count(&sink.state), 0);
             assert_eq!(sink.state.lane_holds, [0, 0, 0, 0]);
             assert_eq!(sink.pressed, [false, false, false, false]);
         }
@@ -568,10 +623,10 @@ mod tests {
                 (2, false),
             ]]
         );
-        assert_eq!(sink.state.pointer_lanes.get(&0), Some(&3));
+        assert_eq!(sink.state.pointer_lanes[0], Some(3));
         assert_eq!(sink.state.lane_holds, [0, 0, 0, 1]);
         assert_eq!(sink.pressed, [false, false, false, true]);
-        assert!(sink.pending.is_none());
+        assert!(sink.pending.sequence.is_none());
     }
 
     #[test]
@@ -608,8 +663,8 @@ mod tests {
             ]
         );
         assert!(error.to_string().contains("accepted 2 of 6"));
-        assert_eq!(sink.pending.as_ref().unwrap().applied, 2);
-        assert_eq!(sink.state.pointer_lanes.get(&0), Some(&0));
+        assert_eq!(sink.pending.applied, 2);
+        assert_eq!(sink.state.pointer_lanes[0], Some(0));
         assert_eq!(sink.state.lane_holds, [1, 0, 0, 0]);
         assert_eq!(sink.pressed, [false, true, false, false]);
 
@@ -643,10 +698,10 @@ mod tests {
 
         assert_eq!(retry_calls, 1);
         assert_eq!(retry_batch, [(2, true), (1, false), (3, true), (2, false)]);
-        assert_eq!(sink.state.pointer_lanes.get(&0), Some(&3));
+        assert_eq!(sink.state.pointer_lanes[0], Some(3));
         assert_eq!(sink.state.lane_holds, [0, 0, 0, 1]);
         assert_eq!(sink.pressed, [false, false, false, true]);
-        assert!(sink.pending.is_none());
+        assert!(sink.pending.sequence.is_none());
     }
 
     #[test]
@@ -667,7 +722,7 @@ mod tests {
         assert_eq!(first_batch, [(0, false), (2, false), (4, false)]);
         assert!(error.to_string().contains("accepted 2 of 3"));
         assert_eq!(sink.pressed, [false, false, false, false, true]);
-        assert_eq!(sink.state.pointer_lanes.len(), 3);
+        assert_eq!(active_pointer_count(&sink.state), 3);
         assert_eq!(sink.state.lane_holds, [1, 0, 1, 0, 1]);
 
         let mut retry_calls = 0;
@@ -682,7 +737,7 @@ mod tests {
         assert_eq!(retry_calls, 1);
         assert_eq!(retry_batch, [(4, false)]);
         assert_eq!(sink.pressed, [false, false, false, false, false]);
-        assert!(sink.state.pointer_lanes.is_empty());
+        assert_eq!(active_pointer_count(&sink.state), 0);
         assert_eq!(sink.state.lane_holds, [0, 0, 0, 0, 0]);
     }
 
@@ -707,26 +762,29 @@ mod tests {
         .unwrap();
 
         assert!(!submitted);
-        assert_eq!(sink.state.pointer_lanes.get(&0), Some(&0));
+        assert_eq!(sink.state.pointer_lanes[0], Some(0));
         assert_eq!(sink.pressed, [true, false, false, false]);
     }
 
     fn test_sink(lanes: usize) -> ManuallyDrop<KeyboardSink> {
+        let state = KeyboardState::new(lanes);
         ManuallyDrop::new(KeyboardSink {
             sink: KeySink::for_test(lanes),
-            state: KeyboardState {
-                pointer_lanes: BTreeMap::new(),
-                lane_holds: vec![0; lanes],
-            },
+            state: state.clone(),
             pressed: vec![false; lanes],
-            pending: None,
+            pending: PendingFrame {
+                sequence: None,
+                next_state: state,
+                changes: Vec::new(),
+                applied: 0,
+            },
         })
     }
 
     fn held_sink(lanes: usize, pointers: &[(u8, usize)]) -> ManuallyDrop<KeyboardSink> {
         let mut sink = test_sink(lanes);
         for (pointer_id, lane) in pointers {
-            sink.state.pointer_lanes.insert(*pointer_id, *lane);
+            sink.state.pointer_lanes[usize::from(*pointer_id)] = Some(*lane);
             sink.state.lane_holds[*lane] += 1;
             sink.pressed[*lane] = true;
         }
@@ -782,6 +840,10 @@ mod tests {
             .map(|change| (change.lane, change.down))
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    fn active_pointer_count(state: &KeyboardState) -> usize {
+        state.pointer_lanes.iter().flatten().count()
     }
 
     fn decode_inputs(inputs: &[KeyChange]) -> Vec<(usize, bool)> {

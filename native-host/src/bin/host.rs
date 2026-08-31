@@ -114,7 +114,7 @@ struct ControlState {
 
 enum Sink {
     #[cfg(windows)]
-    Touch(TouchInjector),
+    Touch(Box<TouchInjector>),
     Keys(Box<KeyboardSink>),
     Record,
 }
@@ -704,7 +704,7 @@ fn build_sink(options: &Options) -> Result<Sink, Box<dyn Error>> {
                 "Windows Touch target {:?}: {},{} {}x{}",
                 options.target_title, target.left, target.top, target.width, target.height
             );
-            Ok(Sink::Touch(TouchInjector::new(target)?))
+            Ok(Sink::Touch(Box::new(TouchInjector::new(target)?)))
         }
         Mode::Keys => Ok(Sink::Keys(Box::new(KeyboardSink::new(&options.lane_keys)?))),
         Mode::Record => Ok(Sink::Record),
