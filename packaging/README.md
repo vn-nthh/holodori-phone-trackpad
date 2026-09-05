@@ -1,14 +1,16 @@
-# Packaging protocol-v4 builds
+# Packaging protocol-v5 builds
 
 Build release bundles with `build-experimental.ps1` as documented in the root
 README. Keep the native host, Tauri launcher, and APK from the same source
-revision: discovery port validation, endpoint pinning, status tokens, and route
-recovery are coordinated across those artifacts.
+revision: Noise identities, discovery confinement, interoperability vectors,
+status tokens, and clean recovery are coordinated across those artifacts.
 
 Before publishing, run the validation commands in `AGENTS.md`. Also verify on a
 real Windows PC that:
 
-- discovery succeeds only over the phone's USB-tether adapter;
+- pairing and remembered sessions stay on the explicitly selected USB or
+  local-network interface;
+- V5 never accepts legacy-v4 gameplay on the Wi-Fi listener;
 - the launcher shows Waiting, Connected, Recovering, and Stopping;
 - killing the host during local-only mode leaves a recovery snapshot, and the
   next launcher start restores it (requesting elevation when required);

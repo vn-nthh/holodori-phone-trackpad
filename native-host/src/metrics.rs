@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::protocol::{ACTION_HEARTBEAT, TouchFrame};
+use crate::protocol::{ACTION_HEARTBEAT, MAX_REORDERED_FRAMES, TouchFrame};
 
 const HISTOGRAM_BIN_NANOS: f64 = 4_000.0;
 const HISTOGRAM_BINS: usize = 131_072;
@@ -21,6 +20,7 @@ pub struct Snapshot {
     pub p99_9_ms: f64,
 }
 
+#[derive(Default)]
 struct SampleSeries {
     bins: Box<[u64]>,
     samples: u64,
@@ -94,6 +94,7 @@ impl SampleSeries {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ArrivalObservation {
     arrival: Instant,
     input_dispatch_nanos: Option<f64>,
@@ -116,6 +117,7 @@ struct WorstCurrentEvent {
 pub struct HostMetrics {
     enabled: bool,
     started: Instant,
+    protocol_version: u8,
     warning_budget_ms: f64,
     input_current: SampleSeries,
     input_historical: SampleSeries,
@@ -126,7 +128,7 @@ pub struct HostMetrics {
     ack_write: SampleSeries,
     interarrival: SampleSeries,
     worst_current: Option<WorstCurrentEvent>,
-    arrivals: HashMap<(u64, u64), ArrivalObservation>,
+    arrivals: Vec<Option<((u64, u64), ArrivalObservation)>>,
     last_arrival: Option<Instant>,
     active_gap: Option<(u64, u64)>,
     frames_received: u64,
@@ -145,21 +147,33 @@ pub struct HostMetrics {
 }
 
 impl HostMetrics {
-    pub fn new(enabled: bool, warning_budget_ms: f64) -> Self {
+    pub fn new(enabled: bool, warning_budget_ms: f64, protocol_version: u8) -> Self {
+        let series = || {
+            if enabled {
+                SampleSeries::new()
+            } else {
+                SampleSeries::default()
+            }
+        };
         Self {
             enabled,
             started: Instant::now(),
+            protocol_version,
             warning_budget_ms,
-            input_current: SampleSeries::new(),
-            input_historical: SampleSeries::new(),
-            callback_to_write: SampleSeries::new(),
-            transport_one_way: SampleSeries::new(),
-            service: SampleSeries::new(),
-            end_to_end_current: SampleSeries::new(),
-            ack_write: SampleSeries::new(),
-            interarrival: SampleSeries::new(),
+            input_current: series(),
+            input_historical: series(),
+            callback_to_write: series(),
+            transport_one_way: series(),
+            service: series(),
+            end_to_end_current: series(),
+            ack_write: series(),
+            interarrival: series(),
             worst_current: None,
-            arrivals: HashMap::with_capacity(256),
+            arrivals: if enabled {
+                vec![None; MAX_REORDERED_FRAMES]
+            } else {
+                Vec::new()
+            },
             last_arrival: None,
             active_gap: None,
             frames_received: 0,
@@ -187,7 +201,7 @@ impl HostMetrics {
             return;
         }
         self.connections += 1;
-        self.arrivals.clear();
+        self.arrivals.fill(None);
         self.last_arrival = None;
         self.active_gap = None;
     }
@@ -246,15 +260,17 @@ impl HostMetrics {
             self.transport_one_way.push_nanos(value);
         }
 
-        self.arrivals
-            .entry((frame.session_id, frame.sequence))
-            .or_insert(ArrivalObservation {
+        let slot = &mut self.arrivals[frame.sequence as usize % MAX_REORDERED_FRAMES];
+        *slot = Some((
+            (frame.session_id, frame.sequence),
+            ArrivalObservation {
                 arrival,
                 input_dispatch_nanos,
                 callback_to_write_nanos,
                 transport_nanos,
                 current_touch: gameplay && !frame.historical(),
-            });
+            },
+        ));
     }
 
     pub fn observe_accepted(&mut self, frame: &TouchFrame, now: Instant) {
@@ -262,9 +278,14 @@ impl HostMetrics {
             return;
         }
         self.accepted += 1;
-        let Some(observation) = self.arrivals.remove(&(frame.session_id, frame.sequence)) else {
+        let slot = &mut self.arrivals[frame.sequence as usize % MAX_REORDERED_FRAMES];
+        if slot
+            .as_ref()
+            .is_none_or(|(key, _)| *key != (frame.session_id, frame.sequence))
+        {
             return;
-        };
+        }
+        let (_, observation) = slot.take().expect("matching observation checked");
         let service_nanos = now
             .saturating_duration_since(observation.arrival)
             .as_nanos() as f64;
@@ -424,7 +445,7 @@ impl HostMetrics {
         );
         if interarrival.max_ms > self.warning_budget_ms * 2.0 {
             warnings.push(format!(
-                "maximum USB-tethered network receive gap {:.3} ms exceeded two 120 Hz frames",
+                "maximum network receive gap {:.3} ms exceeded two 120 Hz frames",
                 interarrival.max_ms
             ));
         }
@@ -459,7 +480,8 @@ impl HostMetrics {
         writeln!(writer, "Holodori lossless host benchmark")?;
         writeln!(
             writer,
-            "protocol=4 duration_s={:.3} warning_budget_ms={:.3}",
+            "protocol={} duration_s={:.3} warning_budget_ms={:.3}",
+            self.protocol_version,
             self.started.elapsed().as_secs_f64(),
             self.warning_budget_ms
         )?;
@@ -636,6 +658,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disabled_metrics_do_not_allocate_histograms_or_arrival_storage() {
+        let (_, allocations) = crate::allocation_check::count(|| HostMetrics::new(false, 8.333, 5));
+        assert_eq!(allocations, 0);
+    }
+
+    #[test]
     fn all_session_histogram_reports_tail() {
         let mut series = SampleSeries::new();
         for value in 1..=200_000 {
@@ -665,7 +693,7 @@ mod tests {
 
     #[test]
     fn one_missing_sequence_is_one_recovery_event() {
-        let mut metrics = HostMetrics::new(true, 8.333);
+        let mut metrics = HostMetrics::new(true, 8.333, 4);
         metrics.observe_gap(7, 10, 11);
         metrics.observe_gap(7, 10, 12);
         metrics.observe_gap(7, 10, 13);

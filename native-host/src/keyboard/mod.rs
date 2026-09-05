@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io;
 
-use crate::protocol::{ACTION_CANCEL, ACTION_HEARTBEAT, TouchFrame};
+use crate::protocol::{ACTION_CANCEL, ACTION_HEARTBEAT, MAX_CONTACTS, TouchFrame};
 
 #[cfg(windows)]
 mod windows;
@@ -14,6 +14,11 @@ mod linux;
 use linux::KeySink;
 
 const POINTER_ID_COUNT: usize = u8::MAX as usize + 1;
+
+// Every contact can traverse every lane, followed by releases for omitted contacts.
+fn max_key_changes(lanes: usize) -> usize {
+    MAX_CONTACTS * (2 * lanes + 1)
+}
 
 #[derive(Clone)]
 struct KeyboardState {
@@ -70,7 +75,7 @@ impl KeyboardSink {
             pending: PendingFrame {
                 sequence: None,
                 next_state: state,
-                changes: Vec::with_capacity(lanes * 4),
+                changes: Vec::with_capacity(max_key_changes(lanes)),
                 applied: 0,
             },
             sink,
@@ -87,6 +92,16 @@ impl KeyboardSink {
 
     pub fn accept(&mut self, frame: &TouchFrame) -> io::Result<()> {
         self.accept_with(frame, KeySink::submit)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn accept_recorded(&mut self, frame: &TouchFrame) -> io::Result<()> {
+        self.accept_with(frame, KeySink::submit_recorded)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_recorded(&mut self) -> io::Result<()> {
+        self.release_all_with(KeySink::submit_recorded)
     }
 
     fn accept_with<F>(&mut self, frame: &TouchFrame, mut submit: F) -> io::Result<()>
@@ -173,40 +188,32 @@ impl KeyboardSink {
         pending.sequence = None;
         pending.changes.clear();
         pending.applied = 0;
-        let lanes: Vec<_> = self
-            .pressed
-            .iter()
-            .enumerate()
-            .filter_map(|(lane, pressed)| pressed.then_some(lane))
-            .collect();
-        if lanes.is_empty() {
+        for (lane, pressed) in self.pressed.iter().enumerate() {
+            if *pressed {
+                pending.changes.push(KeyChange { lane, down: false });
+            }
+        }
+        if pending.changes.is_empty() {
             self.state.pointer_lanes.fill(None);
             self.state.lane_holds.fill(0);
             return Ok(());
         }
 
-        let changes: Vec<_> = lanes
-            .iter()
-            .map(|lane| KeyChange {
-                lane: *lane,
-                down: false,
-            })
-            .collect();
-        let accepted = submit(&mut self.sink, &changes)?;
-        if accepted > changes.len() {
+        let accepted = submit(&mut self.sink, &pending.changes)?;
+        if accepted > pending.changes.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "input submission accepted {accepted} of {} requested events",
-                    changes.len()
+                    pending.changes.len()
                 ),
             ));
         }
-        for lane in lanes.iter().take(accepted) {
-            self.pressed[*lane] = false;
+        for change in pending.changes.iter().take(accepted) {
+            self.pressed[change.lane] = false;
         }
-        if accepted != changes.len() {
-            return Err(incomplete_submission_error(accepted, changes.len()));
+        if accepted != pending.changes.len() {
+            return Err(incomplete_submission_error(accepted, pending.changes.len()));
         }
 
         self.state.pointer_lanes.fill(None);
@@ -266,7 +273,8 @@ fn plan_into(
     next: &mut KeyboardState,
     changes: &mut Vec<KeyChange>,
 ) {
-    next.clone_from(state);
+    next.pointer_lanes.copy_from_slice(&state.pointer_lanes);
+    next.lane_holds.copy_from_slice(&state.lane_holds);
     changes.clear();
 
     // Android's action pointer must be applied first, but sorting a copied
@@ -383,7 +391,7 @@ fn incomplete_submission_error(accepted: usize, requested: usize) -> io::Error {
     ))
 }
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::mem::ManuallyDrop;
 
     use super::*;
@@ -766,7 +774,7 @@ mod tests {
         assert_eq!(sink.pressed, [true, false, false, false]);
     }
 
-    fn test_sink(lanes: usize) -> ManuallyDrop<KeyboardSink> {
+    pub(crate) fn test_sink(lanes: usize) -> ManuallyDrop<KeyboardSink> {
         let state = KeyboardState::new(lanes);
         ManuallyDrop::new(KeyboardSink {
             sink: KeySink::for_test(lanes),
@@ -775,7 +783,7 @@ mod tests {
             pending: PendingFrame {
                 sequence: None,
                 next_state: state,
-                changes: Vec::new(),
+                changes: Vec::with_capacity(max_key_changes(lanes)),
                 applied: 0,
             },
         })
@@ -819,7 +827,7 @@ mod tests {
             action,
             action_pointer_id,
             flags,
-            contacts,
+            contacts: contacts.into_iter().collect(),
         }
     }
 

@@ -14,7 +14,12 @@ into lane keys. The default keys are `S D F J K L`.
 
 ## Download
 
-The current version is **v0.4.1**.
+The stable version is **v0.4.1**.
+
+**Experimental protocol V5:** [v0.5.0-alpha1](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha1)
+adds authenticated USB/Wi-Fi sessions, pairing, thumb mode, and the latency
+fixes documented in [LATENCY_VALIDATION.md](LATENCY_VALIDATION.md).
+Install the phone and host from the same experimental release.
 
 - [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-windows-x64.zip)
 - Linux app: a ready-made download is not available yet. See the
@@ -85,11 +90,15 @@ change the game process.
 
 The current version does not yet pair the phone and PC with a code. Use it only
 on a trusted PC. If your firewall asks, allow the controller only on the phone's
-USB connection—not on home or public Wi-Fi. Pairing is planned for a future
-version.
+USB connection—not on home or public Wi-Fi. Authenticated pairing, explicit
+USB or local-network selection, Wi-Fi path checks, and thumb mode are specified
+for protocol v5 but are not implemented in the current download.
 
 Developers can read the [architecture guide](EXPERIMENTAL_ARCHITECTURE.md) and
-[protocol specification](PROTOCOL_V4.md) for the transport and recovery details.
+[current protocol v4 specification](PROTOCOL_V4.md) for the shipping transport,
+or the [protocol v5 specification](PROTOCOL_V5.md) and
+[interoperability vectors](PROTOCOL_V5_TEST_VECTORS.md) for the authenticated
+implementation now present in this branch.
 
 ## Controller options
 
@@ -206,7 +215,9 @@ cargo test --manifest-path native-host/Cargo.toml --all-targets
 
 See the [Linux setup guide](LINUX_SETUP.md),
 [architecture guide](EXPERIMENTAL_ARCHITECTURE.md), and
-[protocol v4 specification](PROTOCOL_V4.md) for implementation details.
+[protocol v5 specification](PROTOCOL_V5.md) for current source-build details.
+The [protocol v4 specification](PROTOCOL_V4.md) documents the published v0.4.1
+transport and the explicit legacy migration mode.
 
 ## License
 

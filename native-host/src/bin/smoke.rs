@@ -62,14 +62,16 @@ mod imp {
             action,
             action_pointer_id: 0,
             flags: FRAME_FLAG_LOCKED,
-            contacts: vec![Contact {
+            contacts: [Contact {
                 pointer_id: 0,
                 flags: CONTACT_FLAG_INSIDE | if touching { CONTACT_FLAG_TIP } else { 0 },
                 x,
                 y: 0.55,
                 pressure: 0.5,
                 touch_major: 0.04,
-            }],
+            }]
+            .into_iter()
+            .collect(),
         }
     }
 }

@@ -1,11 +1,44 @@
-# Experimental lossless touch architecture
+# Lossless touch architecture
 
-This branch is a USB-tethering/RNDIS + UDP experiment for Windows and Linux.
-The phone's normal USB cable is the only physical link, and the operating
-system's USB-network driver carries the UDP traffic without a custom host
-driver.
+This document separates the protocol-v5 implementation in this branch from
+the protocol-v4 code in the published v0.4.1 release. The gameplay invariants
+and latency budget apply to both. New builds default to
+[protocol v5](PROTOCOL_V5.md); [protocol v4](PROTOCOL_V4.md) remains available
+only through the explicit legacy USB option during migration.
 
-## Data path
+## Protocol v5 data path
+
+```text
+Android MotionEvent
+  -> optional thumb-mode physical-to-logical transform
+  -> complete chronological contact frame
+  -> retained logical-frame queue with benchmark timestamps
+  -> HPT5 AEAD datagram over explicitly selected USB or local network
+  -> authenticated Rust receiver + sequence reorder/dedup
+  -> selected host OS sink (Windows Touch/keys or Linux uinput keys)
+  -> HPA5 authenticated cumulative ACK datagram
+  -> Android retires acknowledged logical frames
+```
+
+The host and phone select USB or Wi-Fi/local network before pairing or Start.
+First use authenticates a Noise XX exchange by comparing an eight-step pattern
+on the six phone lanes and requiring local host approval while the real phone
+shows a match. Later sessions use the remembered identities and a fresh Noise
+IK exchange. Every send attempt has a unique AEAD packet number, while
+redundant copies and repair retain the logical frame sequence that the host
+applies exactly once.
+
+Wi-Fi is allowed on 2.4, 5, or 6 GHz. A bounded authenticated path check runs
+during pairing and reports signal and delivery tails; it does not use band or
+RSSI as an authentication or compatibility gate. Thumb mode remains entirely
+on Android and transforms every historical and current sample before framing,
+so the host still sees one ordered six-lane surface.
+
+## Legacy protocol v4 data path
+
+The current release uses USB tethering/RNDIS + UDP on Windows and Linux. The
+phone's normal USB cable is the only physical link, and the operating system's
+USB-network driver carries the traffic without a custom host driver.
 
 ```text
 Android MotionEvent
@@ -25,7 +58,7 @@ UDP is used as a low-overhead datagram framing layer, not as an invitation to
 drop input: the retained queue and cumulative ACK make the live path
 loss-aware.
 
-## Discovery and packet boundaries
+## Current protocol v4 discovery and packet boundaries
 
 The Android app binds one ephemeral UDP socket and broadcasts a 32-byte,
 CRC-protected `HPTD` discovery hello to port 42825 only through conservative
@@ -50,8 +83,8 @@ retarget an established link.
 Protocol v4 has no cryptographic pairing. The interface/subnet checks narrow
 the intended trust boundary, but any sender able to reach the host from the
 accepted tether subnet can impersonate the phone and inject input. CRC protects
-integrity against corruption, not identity. Authenticated pairing remains a
-protocol-v5 task.
+integrity against corruption, not identity. Authenticated pairing is specified
+in [protocol v5](PROTOCOL_V5.md).
 
 ## Optional local-only tethering
 
@@ -214,8 +247,10 @@ The native host reports stable Waiting, Connected, Recovering, and Stopping
 transitions from a background reporter. The launcher drains that stream and
 shows the matching phase without doing UI, logging, or formatting on the
 gameplay path. An idle peer disappears from Connected after two seconds
-without a valid pinned-peer hello or frame; active input still uses the
-32 ms committed-progress watchdog.
+without a valid pinned-peer hello or frame in v4. V5 uses authenticated idle
+PING/PONG every 500 ms and expires after two seconds without a fresh idle
+control ID or committed frame. Active input still uses the 32 ms
+committed-progress watchdog; idle controls cannot sustain held input.
 
 This mode sends ordinary OS input only. It never opens the game process,
 patches memory, hooks rendering/input code, or constructs game/network packets.
@@ -226,6 +261,14 @@ The native hot path has no JSON, polling bridge, or UI work. It uses fixed
 binary datagrams, stack buffers, direct native OS input calls, immediate
 redundant sends, and a 2 ms replay threshold. It accepts and sustains at least
 120 updates per second; the keepalive period is 8 ms.
+
+V5 decrypts into a reused datagram buffer, stores contacts inline, and uses a
+fixed reorder ring. Lane planning and native event encoding reuse buffers
+sized for the maximum contact count, including cancellation. Optional metrics
+use bounded arrival storage and allocate no histograms when disabled. Android
+uses independent cipher locks for send and receive, reusable control buffers,
+and a retained-frame ring with deadline waits and fair 2 ms repairs. Network
+interface checks run on watchdog workers, outside gameplay send/receive work.
 
 An absolute promise that every phone is faster than every physical keyboard is
 not physically testable or universally true: phone touch scan rate and USB
@@ -262,7 +305,7 @@ receive-to-sink, and ACK write. Recovery incidents, out-of-order frames,
 replays, unresolved frames, parser discards, and sink retries are counted once
 at exit. No cross-device clocks are directly subtracted.
 
-## Build and operation
+## Current protocol v4 build and operation
 
 Requirements:
 

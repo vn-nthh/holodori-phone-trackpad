@@ -27,6 +27,7 @@ enum HostPhase {
     Connected,
     Recovering,
     Stopping,
+    Pairing,
     #[cfg(windows)]
     RecoveryNeedsAdmin,
     Fatal,
@@ -40,6 +41,7 @@ impl HostPhase {
             Self::Connected => "connected",
             Self::Recovering => "recovering",
             Self::Stopping => "stopping",
+            Self::Pairing => "pairing",
             #[cfg(windows)]
             Self::RecoveryNeedsAdmin => "recovery-needs-admin",
             Self::Fatal => "fatal",
@@ -53,6 +55,7 @@ impl HostPhase {
             Self::Connected => "Phone connected",
             Self::Recovering => "Connection lost — recovering...",
             Self::Stopping => "Stopping safely...",
+            Self::Pairing => "Pairing window open...",
             #[cfg(windows)]
             Self::RecoveryNeedsAdmin => {
                 "Administrator access is required to recover USB-tether routes."
@@ -67,12 +70,23 @@ struct HostRuntime {
     output: Arc<Mutex<HostOutput>>,
     readers: Vec<JoinHandle<()>>,
     local_only_tether: bool,
+    kind: RuntimeKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeKind {
+    Controller,
+    Pairing,
 }
 
 #[derive(Default)]
 struct HostOutput {
     phase: Option<HostPhase>,
     fatal_message: Option<String>,
+    pattern: Option<Vec<u8>>,
+    can_approve: Option<bool>,
+    pair_complete: bool,
+    quality: Option<String>,
 }
 
 #[cfg(windows)]
@@ -88,6 +102,10 @@ struct HostState {
     message: String,
     fatal_message: Option<String>,
     recovery_needs_admin: bool,
+    paired: bool,
+    pattern: Option<Vec<u8>>,
+    can_approve: bool,
+    quality: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +115,11 @@ struct HostStatus {
     phase: String,
     message: String,
     recovery_needs_admin: bool,
+    pairing: bool,
+    paired: bool,
+    pattern: Option<Vec<u8>>,
+    can_approve: bool,
+    quality: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -129,6 +152,8 @@ fn start_host(
     keys: String,
     metrics: bool,
     local_only_tether: bool,
+    transport: String,
+    legacy_v4: bool,
 ) -> Result<HostStatus, String> {
     let mut state = state
         .lock()
@@ -136,6 +161,20 @@ fn start_host(
     reap_child(&mut state)?;
     if state.runtime.is_some() {
         return Ok(status(&state));
+    }
+    let transport = validate_transport(&transport)?;
+    if local_only_tether && transport != "usb" {
+        return Err("Local-only tethering requires the USB transport.".to_owned());
+    }
+    if legacy_v4 && transport != "usb" {
+        return Err("Protocol v4 is available only over USB.".to_owned());
+    }
+    if !legacy_v4 && !state.paired {
+        state.paired =
+            holodori_native_host::credentials::is_paired().map_err(|error| error.to_string())?;
+        if !state.paired {
+            return Err("Pair this host and phone before starting protocol v5.".to_owned());
+        }
     }
     ensure_route_recovery(&mut state)?;
     #[cfg(target_os = "linux")]
@@ -171,8 +210,13 @@ fn start_host(
         .arg(keys)
         .arg("--udp-port")
         .arg(USB_TETHER_UDP_PORT.to_string())
+        .arg("--transport")
+        .arg(transport)
         .arg("--warn-ms")
         .arg(DEFAULT_WARNING_BUDGET_MS);
+    if legacy_v4 {
+        command.arg("--legacy-v4");
+    }
     if metrics {
         command.arg("--metrics");
     }
@@ -187,6 +231,131 @@ fn start_host(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    state.runtime = Some(spawn_runtime(
+        command,
+        RuntimeKind::Controller,
+        local_only_tether,
+    )?);
+    state.phase = HostPhase::Waiting;
+    state.stopping = false;
+    state.message.clear();
+    state.fatal_message = None;
+    state.recovery_needs_admin = false;
+    state.pattern = None;
+    state.can_approve = false;
+    state.quality = None;
+    Ok(status(&state))
+}
+
+#[tauri::command]
+fn begin_pairing(
+    state: State<'_, Mutex<HostState>>,
+    transport: String,
+) -> Result<HostStatus, String> {
+    let mut state = state
+        .lock()
+        .map_err(|_| "controller state is unavailable")?;
+    reap_child(&mut state)?;
+    if state.runtime.is_some() {
+        return Err("Stop the current controller or pairing window first.".to_owned());
+    }
+    ensure_route_recovery(&mut state)?;
+    let transport = validate_transport(&transport)?;
+    let host = find_host().ok_or_else(|| {
+        "The controller is missing. Build native-host or re-extract the portable bundle.".to_owned()
+    })?;
+    UdpSocket::bind(("0.0.0.0", USB_TETHER_UDP_PORT)).map_err(|error| {
+        format!(
+            "UDP port {USB_TETHER_UDP_PORT} is already in use. Stop another Holodori host, then try again: {error}"
+        )
+    })?;
+    let mut command = Command::new(&host);
+    command
+        .current_dir(host.parent().unwrap_or_else(|| std::path::Path::new(".")))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .arg("--pair")
+        .arg("--transport")
+        .arg(transport)
+        .arg("--udp-port")
+        .arg(USB_TETHER_UDP_PORT.to_string());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    state.runtime = Some(spawn_runtime(command, RuntimeKind::Pairing, false)?);
+    state.phase = HostPhase::Pairing;
+    state.stopping = false;
+    state.message.clear();
+    state.fatal_message = None;
+    state.pattern = None;
+    state.can_approve = false;
+    state.quality = None;
+    Ok(status(&state))
+}
+
+#[tauri::command]
+fn approve_pairing(state: State<'_, Mutex<HostState>>) -> Result<HostStatus, String> {
+    let mut state = state
+        .lock()
+        .map_err(|_| "controller state is unavailable")?;
+    reap_child(&mut state)?;
+    if !state.can_approve {
+        return Err("Wait until the phone says Pattern matched before approving.".to_owned());
+    }
+    let Some(runtime) = state.runtime.as_mut() else {
+        return Err("No pairing window is open.".to_owned());
+    };
+    if runtime.kind != RuntimeKind::Pairing {
+        return Err("Wait until the phone says Pattern matched before approving.".to_owned());
+    }
+    let stdin = runtime
+        .child
+        .stdin
+        .as_mut()
+        .ok_or("Pairing input is unavailable.")?;
+    stdin
+        .write_all(b"approve\n")
+        .and_then(|_| stdin.flush())
+        .map_err(|error| format!("Could not approve pairing: {error}"))?;
+    state.can_approve = false;
+    state.message = "Approval sent; finishing secure pairing...".to_owned();
+    Ok(status(&state))
+}
+
+#[tauri::command]
+fn forget_device(state: State<'_, Mutex<HostState>>) -> Result<HostStatus, String> {
+    let mut state = state
+        .lock()
+        .map_err(|_| "controller state is unavailable")?;
+    reap_child(&mut state)?;
+    if state.runtime.is_some() {
+        return Err("Stop the controller before forgetting the phone.".to_owned());
+    }
+    holodori_native_host::credentials::forget_phone().map_err(|error| error.to_string())?;
+    state.paired = false;
+    state.pattern = None;
+    state.can_approve = false;
+    state.quality = None;
+    state.phase = HostPhase::Ready;
+    state.message = "Paired phone forgotten.".to_owned();
+    Ok(status(&state))
+}
+
+fn validate_transport(transport: &str) -> Result<&str, String> {
+    match transport {
+        "usb" | "wifi" => Ok(transport),
+        _ => Err("Choose USB or Wi-Fi / local network.".to_owned()),
+    }
+}
+
+fn spawn_runtime(
+    mut command: Command,
+    kind: RuntimeKind,
+    local_only_tether: bool,
+) -> Result<HostRuntime, String> {
     let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start the controller: {error}"))?;
@@ -196,10 +365,8 @@ fn start_host(
         let output = Arc::clone(&output);
         readers.push(std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Some(phase) = parse_status_token(&line) {
-                    if let Ok(mut latest) = output.lock() {
-                        latest.phase = Some(phase);
-                    }
+                if let Ok(mut latest) = output.lock() {
+                    parse_host_output_line(&line, &mut latest);
                 }
             }
         }));
@@ -216,19 +383,40 @@ fn start_host(
             }
         }));
     }
-
-    state.runtime = Some(HostRuntime {
+    Ok(HostRuntime {
         child,
         output,
         readers,
         local_only_tether,
-    });
-    state.phase = HostPhase::Waiting;
-    state.stopping = false;
-    state.message.clear();
-    state.fatal_message = None;
-    state.recovery_needs_admin = false;
-    Ok(status(&state))
+        kind,
+    })
+}
+
+fn parse_host_output_line(line: &str, output: &mut HostOutput) {
+    if let Some(phase) = parse_status_token(line) {
+        output.phase = Some(phase);
+        return;
+    }
+    if let Some(value) = line.strip_prefix("HPT_PAIR PATTERN ") {
+        let pattern: Option<Vec<u8>> = value
+            .split(',')
+            .map(|lane| {
+                lane.parse::<u8>()
+                    .ok()
+                    .filter(|lane| (1..=6).contains(lane))
+            })
+            .collect();
+        if pattern.as_ref().is_some_and(|pattern| pattern.len() == 8) {
+            output.pattern = pattern;
+        }
+    } else if line == "HPT_PAIR CONFIRMED" {
+        output.can_approve = Some(true);
+    } else if line == "HPT_PAIR COMPLETE" {
+        output.pair_complete = true;
+        output.can_approve = Some(false);
+    } else if let Some(summary) = line.strip_prefix("HPT_QUALITY ") {
+        output.quality = Some(summary.chars().take(1_024).collect());
+    }
 }
 
 #[tauri::command]
@@ -440,6 +628,14 @@ fn status(state: &HostState) -> HostStatus {
             state.message.clone()
         },
         recovery_needs_admin: state.recovery_needs_admin,
+        pairing: state
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.kind == RuntimeKind::Pairing),
+        paired: state.paired,
+        pattern: state.pattern.clone(),
+        can_approve: state.can_approve,
+        quality: state.quality.clone(),
     }
 }
 
@@ -460,11 +656,16 @@ fn reap_child(state: &mut HostState) -> Result<(), String> {
         apply_output(state, &runtime.output);
         let expected_stop = state.stopping;
         let local_only_tether = runtime.local_only_tether;
+        let runtime_kind = runtime.kind;
         drop(runtime);
 
-        if expected_stop && exit_status.success() {
+        if exit_status.success() {
             state.phase = HostPhase::Ready;
-            state.message.clear();
+            state.message = if runtime_kind == RuntimeKind::Pairing && !expected_stop {
+                "Pairing complete. Ready to start.".to_owned()
+            } else {
+                String::new()
+            };
             state.fatal_message = None;
         } else {
             state.phase = HostPhase::Fatal;
@@ -498,8 +699,15 @@ fn drain_runtime_events(state: &mut HostState) {
 }
 
 fn apply_output(state: &mut HostState, output: &Arc<Mutex<HostOutput>>) {
-    let (phase, fatal_message) = match output.lock() {
-        Ok(mut output) => (output.phase.take(), output.fatal_message.take()),
+    let (phase, fatal_message, pattern, can_approve, pair_complete, quality) = match output.lock() {
+        Ok(mut output) => (
+            output.phase.take(),
+            output.fatal_message.take(),
+            output.pattern.take(),
+            output.can_approve.take(),
+            std::mem::take(&mut output.pair_complete),
+            output.quality.take(),
+        ),
         Err(_) => return,
     };
     if !state.stopping {
@@ -513,6 +721,26 @@ fn apply_output(state: &mut HostState, output: &Arc<Mutex<HostOutput>>) {
         state.fatal_message = Some(message.clone());
         state.message = user_facing_native_error(message);
     }
+    if let Some(pattern) = pattern {
+        state.pattern = Some(pattern);
+        state.message = "Replicate this pattern on the phone's six lanes.".to_owned();
+    }
+    if let Some(can_approve) = can_approve {
+        state.can_approve = can_approve;
+        if can_approve {
+            state.message =
+                "Phone reports Pattern matched. Confirm that on the real phone, then approve."
+                    .to_owned();
+        }
+    }
+    if let Some(quality) = quality {
+        state.quality = Some(quality);
+    }
+    if pair_complete {
+        state.paired = true;
+        state.can_approve = false;
+        state.message = "Pairing complete. Ready to start.".to_owned();
+    }
 }
 
 fn parse_status_token(line: &str) -> Option<HostPhase> {
@@ -521,6 +749,7 @@ fn parse_status_token(line: &str) -> Option<HostPhase> {
         "HPT_STATUS CONNECTED" => Some(HostPhase::Connected),
         "HPT_STATUS RECOVERING" => Some(HostPhase::Recovering),
         "HPT_STATUS STOPPING" => Some(HostPhase::Stopping),
+        "HPT_STATUS PAIRING" => Some(HostPhase::Pairing),
         _ => None,
     }
 }
@@ -726,6 +955,13 @@ fn main() {
         .setup(|app| {
             if let Ok(mut state) = app.state::<Mutex<HostState>>().lock() {
                 let _ = ensure_route_recovery(&mut state);
+                match holodori_native_host::credentials::is_paired() {
+                    Ok(paired) => state.paired = paired,
+                    Err(error) => {
+                        state.phase = HostPhase::Fatal;
+                        state.message = error.to_string();
+                    }
+                }
             }
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
@@ -735,6 +971,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             start_host,
+            begin_pairing,
+            approve_pairing,
+            forget_device,
             stop_host,
             host_status,
             restart_as_admin,
@@ -846,7 +1085,9 @@ fn request_stop(state: &mut HostState) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_status_token, user_facing_native_error, HostPhase};
+    use super::{
+        parse_host_output_line, parse_status_token, user_facing_native_error, HostOutput, HostPhase,
+    };
 
     #[test]
     fn parses_only_stable_status_tokens() {
@@ -866,8 +1107,21 @@ mod tests {
             parse_status_token("HPT_STATUS STOPPING"),
             Some(HostPhase::Stopping),
         );
+        assert_eq!(
+            parse_status_token("HPT_STATUS PAIRING"),
+            Some(HostPhase::Pairing),
+        );
         assert_eq!(parse_status_token("UDP link ready"), None);
         assert_eq!(parse_status_token("HPT_STATUS CONNECTED extra"), None);
+    }
+
+    #[test]
+    fn parses_pairing_pattern_without_accepting_invalid_lanes() {
+        let mut output = HostOutput::default();
+        parse_host_output_line("HPT_PAIR PATTERN 1,2,3,4,5,6,1,2", &mut output);
+        assert_eq!(output.pattern, Some(vec![1, 2, 3, 4, 5, 6, 1, 2]));
+        parse_host_output_line("HPT_PAIR PATTERN 1,2,3,4,5,7,1,2", &mut output);
+        assert_eq!(output.pattern, Some(vec![1, 2, 3, 4, 5, 6, 1, 2]));
     }
 
     #[test]

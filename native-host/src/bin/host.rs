@@ -5,10 +5,11 @@ use std::path::PathBuf;
 #[cfg(windows)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use holodori_native_host::input::{InputSink, cancel_with_deadline, commit_ready};
 use holodori_native_host::keyboard::KeyboardSink;
 use holodori_native_host::metrics::HostMetrics;
 use holodori_native_host::network::{DEFAULT_UDP_PORT, UdpConnection, UdpHost};
@@ -23,6 +24,10 @@ use holodori_native_host::tether_policy::{
 };
 #[cfg(windows)]
 use holodori_native_host::touch::{PROBE_WINDOW_TITLE, TouchInjector, TouchTarget};
+use holodori_native_host::v5::TransportKind;
+use holodori_native_host::v5_host::{
+    HostV5Error, PairCommand, PairEvent, V5Connection, accept_remembered, pair, serve_gameplay,
+};
 
 // Touch mode is Windows-only (it drives Windows Touch injection). On other
 // platforms there is no probe window to attach to, so this is just a stable
@@ -31,10 +36,8 @@ use holodori_native_host::touch::{PROBE_WINDOW_TITLE, TouchInjector, TouchTarget
 const PROBE_WINDOW_TITLE: &str = "Holodori Touch Probe";
 
 const RECEIVE_WINDOW: u32 = 128;
-const SINK_STALL_TIMEOUT: Duration = Duration::from_millis(8);
 const ACTIVE_INPUT_SILENCE_TIMEOUT: Duration = Duration::from_millis(32);
 const IDLE_PEER_SILENCE_TIMEOUT: Duration = Duration::from_secs(2);
-const SINK_CANCEL_TIMEOUT: Duration = Duration::from_millis(8);
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_COMPLETE: AtomicBool = AtomicBool::new(false);
 
@@ -45,6 +48,7 @@ enum HostPhase {
     Connected = 1,
     Recovering = 2,
     Stopping = 3,
+    Pairing = 4,
 }
 
 impl HostPhase {
@@ -54,6 +58,7 @@ impl HostPhase {
             Self::Connected => "HPT_STATUS CONNECTED",
             Self::Recovering => "HPT_STATUS RECOVERING",
             Self::Stopping => "HPT_STATUS STOPPING",
+            Self::Pairing => "HPT_STATUS PAIRING",
         }
     }
 }
@@ -103,6 +108,9 @@ struct Options {
     metrics_file: Option<PathBuf>,
     warning_budget_ms: f64,
     local_only_tether: bool,
+    pair: bool,
+    legacy_v4: bool,
+    transport: Option<TransportKind>,
 }
 
 struct ControlState {
@@ -128,7 +136,9 @@ impl Sink {
             Self::Record => options.lane_keys.len().min(u8::MAX as usize) as u8,
         }
     }
+}
 
+impl InputSink for Sink {
     fn accept(&mut self, frame: &TouchFrame) -> io::Result<()> {
         match self {
             #[cfg(windows)]
@@ -200,10 +210,20 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    if options.pair {
+        let result = run_pairing_mode(&options);
+        SHUTDOWN_COMPLETE.store(true, Ordering::Release);
+        return result;
+    }
+    if !options.legacy_v4 {
+        let result = run_v5_controller(&options);
+        SHUTDOWN_COMPLETE.store(true, Ordering::Release);
+        return result;
+    }
     let mut sink = build_sink(&options)?;
     let lane_count = sink.lane_count(&options);
     let udp = UdpHost::bind(options.udp_port)?;
-    let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms);
+    let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 4);
     #[cfg(windows)]
     let mut tether_policy =
         if options.local_only_tether {
@@ -361,6 +381,249 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
     SHUTDOWN_COMPLETE.store(true, Ordering::Release);
     report_result.map_err(Into::into)
+}
+
+fn run_pairing_mode(options: &Options) -> Result<(), Box<dyn Error>> {
+    let transport = options
+        .transport
+        .ok_or("--transport usb|wifi is required for protocol v5 pairing")?;
+    let commands = install_pair_command_thread()?;
+    let status = StatusReporter::start();
+    status.publish(HostPhase::Pairing);
+    println!(
+        "Holodori native host - protocol v5 pairing over {}",
+        transport.label()
+    );
+    println!("HPT_PAIR WINDOW 60");
+    io::stdout().flush()?;
+    let result = pair(transport, options.udp_port, &commands, |event| {
+        match event {
+            PairEvent::Waiting => println!("HPT_PAIR WAITING"),
+            PairEvent::Pattern(pattern) => println!(
+                "HPT_PAIR PATTERN {}",
+                pattern
+                    .iter()
+                    .map(u8::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            PairEvent::RemoteConfirmed => println!("HPT_PAIR CONFIRMED"),
+            PairEvent::Quality(summary) => println!("HPT_QUALITY {summary}"),
+            PairEvent::Complete => println!("HPT_PAIR COMPLETE"),
+        }
+        let _ = io::stdout().flush();
+    });
+    match result {
+        Ok(()) => Ok(()),
+        Err(HostV5Error::Cancelled) if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) => {
+            status.publish(HostPhase::Stopping);
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
+    let transport = options
+        .transport
+        .ok_or("--transport usb|wifi is required for protocol v5")?;
+    let mut sink = build_sink(options)?;
+    let lane_count = sink.lane_count(options);
+    let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 5);
+    #[cfg(windows)]
+    let mut tether_policy =
+        if options.local_only_tether {
+            Some(TetherRoutePolicy::new().map_err(|error| {
+                format!("could not initialize local-only USB tethering: {error}")
+            })?)
+        } else {
+            None
+        };
+    install_exit_command_thread()?;
+    let status = StatusReporter::start();
+    println!(
+        "Holodori native host - authenticated UDP protocol v5 over {}",
+        transport.label()
+    );
+    println!(
+        "mode={:?}, lanes={}, udp_port={}",
+        options.mode, lane_count, options.udp_port
+    );
+    println!("Press Q then Enter to stop gracefully.");
+    io::stdout().flush()?;
+
+    let mut ordered = OrderedFrames::new();
+    while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        #[cfg(windows)]
+        if let Some(policy) = tether_policy.as_mut() {
+            policy.refresh().map_err(|error| {
+                let hint = if error.kind() == io::ErrorKind::PermissionDenied {
+                    "; run the launcher as administrator"
+                } else {
+                    ""
+                };
+                format!("could not enable local-only USB tethering: {error}{hint}")
+            })?;
+        }
+        if sink.has_active_input()
+            && let Err(error) = cancel_sink_with_deadline(&mut sink, &mut metrics)
+        {
+            eprintln!("the OS still has active injected input: {error}; retrying release");
+            thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        status.publish(HostPhase::Waiting);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut connection = match accept_remembered(transport, options.udp_port, deadline) {
+            Ok(connection) => connection,
+            Err(HostV5Error::TimedOut(_)) => continue,
+            Err(HostV5Error::NotPaired) => {
+                return Err("no paired phone; use Pair before Start".into());
+            }
+            Err(error) => {
+                eprintln!("{error}; retrying authenticated discovery");
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        verify_v5_local_only(&connection, options.local_only_tether)?;
+        #[cfg(windows)]
+        if let Some(policy) = tether_policy.as_mut() {
+            let binding = connection
+                .tether_binding()
+                .ok_or("local-only tethering requires the selected protocol-v5 USB transport")?;
+            policy
+                .protect_peer(connection.peer(), binding)
+                .map_err(|error| {
+                    let hint = if error.kind() == io::ErrorKind::PermissionDenied {
+                        "; run the launcher as administrator"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "could not protect the USB tether route for {}: {error}{hint}",
+                        connection.peer()
+                    )
+                })?;
+        }
+        if let Err(error) = connection.revalidate_interface() {
+            status.publish(HostPhase::Recovering);
+            eprintln!(
+                "selected interface changed after authentication: {error}; retrying fresh IK"
+            );
+            continue;
+        }
+        metrics.begin_connection();
+        status.publish(HostPhase::Connected);
+        println!(
+            "Authenticated v5 link ready from {} (connection {:016x})",
+            connection.peer(),
+            connection.connection_id()
+        );
+        io::stdout().flush()?;
+        if let Err(error) = serve_gameplay(
+            &mut connection,
+            &mut ordered,
+            &mut sink,
+            &mut metrics,
+            lane_count,
+            &SHUTDOWN_REQUESTED,
+        ) {
+            if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                break;
+            }
+            status.publish(HostPhase::Recovering);
+            ordered.require_fresh_session();
+            if let Err(release_error) = cancel_sink_with_deadline(&mut sink, &mut metrics) {
+                eprintln!(
+                    "authenticated link interrupted: {error}; input release is still pending: {release_error}"
+                );
+            } else {
+                eprintln!(
+                    "authenticated link interrupted: {error}; released input and require fresh IK"
+                );
+            }
+        }
+    }
+
+    status.publish(HostPhase::Stopping);
+    let release_result = cancel_sink_with_deadline(&mut sink, &mut metrics);
+    metrics.set_parser_counters(0, 0, 0);
+    let report_result = if metrics.enabled() {
+        let report_path = options
+            .metrics_file
+            .clone()
+            .unwrap_or_else(default_metrics_path);
+        metrics.write_report(&report_path).map(|()| {
+            println!("Metrics written to {}", report_path.display());
+            let _ = io::stdout().flush();
+        })
+    } else {
+        Ok(())
+    };
+    release_result?;
+    #[cfg(windows)]
+    if let Some(policy) = tether_policy.as_mut() {
+        policy.restore()?;
+    }
+    report_result.map_err(Into::into)
+}
+
+fn install_pair_command_thread() -> io::Result<Receiver<PairCommand>> {
+    let (sender, receiver) = channel();
+    thread::Builder::new()
+        .name("v5 pairing command".to_owned())
+        .spawn(move || {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                match line {
+                    Ok(value) if value.trim().eq_ignore_ascii_case("approve") => {
+                        let _ = sender.send(PairCommand::Approve);
+                    }
+                    Ok(value)
+                        if value.trim().eq_ignore_ascii_case("q")
+                            || value.trim().eq_ignore_ascii_case("cancel") =>
+                    {
+                        SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+                        let _ = sender.send(PairCommand::Cancel);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+            let _ = sender.send(PairCommand::Cancel);
+        })?;
+    Ok(receiver)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_v5_local_only(
+    connection: &V5Connection,
+    local_only_tether: bool,
+) -> Result<(), Box<dyn Error>> {
+    if !local_only_tether {
+        return Ok(());
+    }
+    let binding = connection
+        .tether_binding()
+        .ok_or("local-only tethering requires the selected USB transport")?;
+    let (ipv4, ipv6) = binding.default_routes_present()?;
+    if ipv4 || ipv6 {
+        return Err(
+            "local-only routing failed closed because the USB tether owns a default route".into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_v5_local_only(
+    _connection: &V5Connection,
+    _local_only_tether: bool,
+) -> Result<(), Box<dyn Error>> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -552,22 +815,8 @@ fn serve_connection(
     Ok(())
 }
 
-fn idle_peer_timed_out(has_active_input: bool, peer_silence: Duration) -> bool {
-    !has_active_input && peer_silence >= IDLE_PEER_SILENCE_TIMEOUT
-}
-
 fn cancel_sink_with_deadline(sink: &mut Sink, metrics: &mut HostMetrics) -> io::Result<()> {
-    let deadline = Instant::now() + SINK_CANCEL_TIMEOUT;
-    loop {
-        match sink.cancel_all() {
-            Ok(()) => return Ok(()),
-            Err(error) if Instant::now() >= deadline => return Err(error),
-            Err(_) => {
-                metrics.observe_sink_retry();
-                thread::yield_now();
-            }
-        }
-    }
+    cancel_with_deadline(sink, metrics)
 }
 
 fn process_decoded_frame(
@@ -597,56 +846,7 @@ fn process_decoded_frame(
     metrics.observe_received(&frame, arrival, replay);
     ordered.push(frame);
 
-    while let Some(frame) = ordered.next_ready().cloned() {
-        let retry_started = Instant::now();
-        let mut last_error_report = Instant::now() - Duration::from_secs(2);
-        loop {
-            match sink.accept(&frame) {
-                Ok(()) => break,
-                Err(error) => {
-                    metrics.observe_sink_retry();
-                    if last_error_report.elapsed() >= Duration::from_secs(1) {
-                        eprintln!(
-                            "OS sink has not accepted seq {}: {}; withholding ACK and retrying",
-                            frame.sequence, error
-                        );
-                        last_error_report = Instant::now();
-                    }
-                    if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-                        return Ok(());
-                    }
-                    if retry_started.elapsed() >= SINK_STALL_TIMEOUT {
-                        let sink_error = error.to_string();
-                        ordered.require_fresh_session();
-                        let cancellation = cancel_sink_with_deadline(sink, metrics);
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!(
-                                "OS sink stalled for {} ms on sequence {}: {sink_error}; cancellation={cancellation:?}",
-                                SINK_STALL_TIMEOUT.as_millis(),
-                                frame.sequence
-                            ),
-                        )
-                        .into());
-                    }
-                    thread::yield_now();
-                }
-            }
-        }
-        metrics.observe_accepted(&frame, Instant::now());
-        // This commit is the protocol's durability boundary and must execute
-        // in optimized builds. Never hide side effects inside debug_assert!,
-        // which release compilation removes entirely.
-        if !ordered.commit_ready() {
-            return Err(io::Error::other(format!(
-                "could not commit accepted sequence {}",
-                frame.sequence
-            ))
-            .into());
-        }
-        // A valid or duplicate datagram only proves that bytes are arriving.
-        // Refresh active-input liveness exclusively after the ordered frame
-        // has reached the OS sink and crossed the cumulative-ACK boundary.
+    if commit_ready(ordered, sink, metrics, &SHUTDOWN_REQUESTED)? {
         control_state.last_committed_frame = Instant::now();
     }
 
@@ -751,6 +951,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         metrics_file: None,
         warning_budget_ms: 1_000.0 / 120.0,
         local_only_tether: false,
+        pair: false,
+        legacy_v4: false,
+        transport: None,
     };
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -794,6 +997,15 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 }
             }
             "--metrics" => options.metrics = true,
+            "--pair" => options.pair = true,
+            "--legacy-v4" => options.legacy_v4 = true,
+            "--transport" => {
+                let value = arguments.next().ok_or("--transport needs usb or wifi")?;
+                options.transport = Some(
+                    TransportKind::parse(&value)
+                        .ok_or_else(|| format!("unknown transport {value:?}"))?,
+                );
+            }
             "--metrics-file" => {
                 options.metrics = true;
                 options.metrics_file = Some(PathBuf::from(
@@ -828,6 +1040,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 println!(
                     "holodori-native-host [--mode touch|keys|record] \\\n\
                      [--lanes s,d,f,j,k,l] [--target-title TITLE] [--no-probe] \\\n\
+                     --transport usb|wifi [--pair] [--legacy-v4] \
                      [--udp-port 42825] [--metrics] [--local-only-tether] \
                      [--metrics-file PATH] [--warn-ms 8.333]"
                 );
@@ -836,7 +1049,28 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             value => return Err(format!("unknown option {value:?}; use --help").into()),
         }
     }
+    if options.pair && options.legacy_v4 {
+        return Err("--pair cannot be combined with --legacy-v4".into());
+    }
+    if options.legacy_v4 {
+        if options
+            .transport
+            .is_some_and(|transport| transport != TransportKind::Usb)
+        {
+            return Err("protocol v4 is available only over explicit USB transport".into());
+        }
+        options.transport = Some(TransportKind::Usb);
+    } else if options.transport.is_none() {
+        return Err("protocol v5 requires --transport usb or --transport wifi".into());
+    }
+    if options.local_only_tether && options.transport != Some(TransportKind::Usb) {
+        return Err("--local-only-tether requires --transport usb".into());
+    }
     Ok(options)
+}
+
+fn idle_peer_timed_out(has_active_input: bool, peer_silence: Duration) -> bool {
+    !has_active_input && peer_silence >= IDLE_PEER_SILENCE_TIMEOUT
 }
 
 #[cfg(windows)]
@@ -860,10 +1094,11 @@ mod tests {
         assert_eq!(HostPhase::Connected.token(), "HPT_STATUS CONNECTED");
         assert_eq!(HostPhase::Recovering.token(), "HPT_STATUS RECOVERING");
         assert_eq!(HostPhase::Stopping.token(), "HPT_STATUS STOPPING");
+        assert_eq!(HostPhase::Pairing.token(), "HPT_STATUS PAIRING");
     }
 
     #[test]
-    fn idle_timeout_never_replaces_active_committed_progress_watchdog() {
+    fn legacy_idle_timeout_never_replaces_active_progress_watchdog() {
         assert!(!idle_peer_timed_out(
             false,
             IDLE_PEER_SILENCE_TIMEOUT - Duration::from_millis(1),

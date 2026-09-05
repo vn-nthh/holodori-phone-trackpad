@@ -1,31 +1,37 @@
-HOLODORI LOSSLESS TOUCH - USB TETHERING / RNDIS / UDP
-========================================================
+HOLODORI LOSSLESS TOUCH - AUTHENTICATED LOCAL UDP
+=================================================
 
-This experimental bundle uses the phone's normal USB tethering network.
-Windows supplies its inbox RNDIS network driver.
+This bundle defaults to authenticated protocol v5 over an explicitly selected
+USB-tether or Wi-Fi/local-network path. USB uses Android's normal tethering
+network and Windows' inbox RNDIS driver; Wi-Fi requires the phone and PC on the
+same private subnet. Legacy protocol v4 is available only as an explicit,
+unpaired USB migration option.
 
 Install:
-  1. Copy Android\HolodoriUsbTetheredUdp-v4.apk to the phone.
+  1. Copy Android\Doritrack-v5.apk to the phone.
   2. Open the APK on the phone and approve installation from that source.
      If Android reports a signature conflict, uninstall the existing Holodori
      Controller first; this experimental APK is debug-signed.
-  3. On the phone, enable Settings > Network & internet > Hotspot & tethering
-     > USB tethering. The exact labels vary by Android vendor.
-  4. Connect the phone to Windows with one USB data cable and wait for Windows
-     to finish creating the RNDIS/Ethernet adapter.
+  3. For USB, enable Settings > Network & internet > Hotspot & tethering > USB
+     tethering, connect one data cable, and wait for the RNDIS adapter. For
+     Wi-Fi, connect the phone and PC to the same private local subnet.
 
 Start the Windows app:
   1. Double-click HolodoriUsbController.exe.
-  2. Set the lane keys if needed. Protocol-v4 discovery uses UDP port 42825.
-  3. Leave "Save latency report when stopped" checked unless you do not want
+  2. Choose USB or Wi-Fi / local network on both the phone and host.
+  3. Press Pair on both. Replicate all eight numbered host lanes on the phone.
+     Approve on the host only while the real phone says "Pattern matched".
+  4. Set the lane keys if needed. V5 uses UDP port 42825 only on the selected
+     interface.
+  5. Leave "Save latency report when stopped" checked unless you do not want
      a report.
-  4. Optional: check "Stop the PC from using the phone's internet" to remove
-     the phone's temporary internet gateway while Holodori is running. Use
-     "Restart as admin" if Windows needs elevation.
-  5. Press Start.
-  6. Unlock the phone and open the APK.
-  7. Arrange and lock the play zone, then tap, hold, chord, and slide.
-  8. Press Stop in the app when finished. Held input is released safely and
+  6. Optional for USB only: check "Stop the PC from using the phone's internet"
+     to remove the phone's temporary internet gateway while Holodori is
+     running. Use "Restart as admin" if Windows needs elevation.
+  7. Press Start on the host and phone with the same transport selected.
+  8. Arrange and lock the play zone, optionally enable thumb mode, then tap,
+     hold, chord, and slide.
+  9. Press Stop in the app when finished. Held input is released safely and
      the original tether routes are restored.
 
 Portable Windows app:
@@ -46,17 +52,16 @@ Keyboard mode:
   - If Holodori is elevated, run the launcher elevated too.
 
 Connection diagnostics:
-  - "waiting for USB-tethered phone on UDP port 42825" means discovery is
-    listening on the RNDIS adapter.
+  - "Pairing window open" means HPP5 discovery is confined to the selected
+    interface for 60 seconds.
   - If Windows Firewall blocks discovery, permit inbound UDP 42825 for
-    Windows\holodori-native-host.exe on the USB-tethered network only.
-  - "UDP link ready" means the host received the phone's discovery hello.
-  - "Lossless UDP over USB tethering connected" means HPA4 control is active.
-  - HPT4 frames are one UDP datagram each. Immediate redundant HPT4/HPA4 sends,
-    cumulative acknowledgements, and 2 ms replay preserve ordering across a
-    lost or corrupt datagram inside one 120 Hz frame.
-  - The host can join a phone session after a host restart; a cable replug is
-    not required if USB tethering remains enabled.
+    Windows\holodori-native-host.exe only on the selected private interface.
+  - "Phone connected" means Noise IK authenticated the remembered phone and
+    HPT5/HPA5 control is active.
+  - Each immediate copy and 2 ms repair is independently encrypted with a new
+    packet number; cumulative ACK advances only after Windows accepts input.
+  - Wi-Fi pairing reports signal and authenticated path timing. 2.4, 5, and
+    6 GHz are accepted; poor measurements warn but never decide identity.
   - A host read/ACK failure releases injected input before reconnecting. During
     active play the phone abandons a link after 64 ms without cumulative ACK
     progress, starts socket recovery with a 4 ms backoff, and restores
@@ -64,9 +69,8 @@ Connection diagnostics:
   - HolodoriUsbController.exe collects metrics silently in memory when the
     report option is checked. One report is written under Windows\Logs after
     Stop. Nothing is formatted, sorted, or written mid-play.
-  - Protocol-v4 discovery uses fixed UDP port 42825. The 8.333 ms 120 Hz
-    warning budget is applied automatically; normal users do not need a
-    terminal.
+  - V5 and explicit legacy v4 use fixed UDP port 42825. V4 never runs on the
+    Wi-Fi listener. The 8.333 ms 120 Hz warning budget is applied automatically.
 
 Metrics include:
   - mean, max, p50, p90, p99, and p99.9;
@@ -84,10 +88,11 @@ Safety and scope:
   - The separately shipped touch probe uses the Windows Touch API and a
     separate WM_POINTER receiver for diagnostics only; the GUI launches keys
     mode.
-  - Protocol reliability applies within a connected tethering session. During
-    gameplay, 64 ms without cumulative ACK advancement makes the phone drop
-    queued gameplay, start a new session, and send CANCEL so old input is not
-    replayed late. Duplicate controls do not hide an ordering stall.
+  - During gameplay, 64 ms without cumulative ACK advancement makes the phone
+    drop queued gameplay and require fresh Noise IK plus session-start CANCEL,
+    so old input is not replayed late. Duplicate controls do not hide a stall.
 
-See Docs\EXPERIMENTAL_ARCHITECTURE.md and Docs\PROTOCOL_V4.md for details.
+See Docs\EXPERIMENTAL_ARCHITECTURE.md, Docs\PROTOCOL_V5.md, and
+Docs\PROTOCOL_V5_TEST_VECTORS.md for current details. PROTOCOL_V4.md documents
+the explicit legacy migration mode.
 Verify every packaged file against SHA256SUMS.txt.

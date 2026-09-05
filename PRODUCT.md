@@ -24,6 +24,13 @@ Avoid decorative gaming overlays, dense control panels, hidden mode changes, tin
 
 - Keep play unobstructed while preserving an obvious route back to editing.
 - Make every mode and connection state legible at a glance.
+- Ask for USB or Wi-Fi/local network before Pair or Start; never change the
+  active transport silently.
+- Keep the eight-step pairing sequence numbered and usable without color or
+  timing precision. Make final host approval clearly depend on the real phone
+  showing **Pattern matched**.
+- Let thumb users split the lanes into two three-lane clusters while preserving
+  one continuous logical six-lane surface.
 - Prefer forgiving targets and familiar desktop interactions.
 - Keep visual work off the latency-critical input path.
 - Preserve user configuration and recover safely from disconnects.

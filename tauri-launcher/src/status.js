@@ -4,6 +4,7 @@ const PHASES = {
   connected: { label: "Phone connected", tone: "success" },
   recovering: { label: "Connection lost — recovering...", tone: "warning" },
   stopping: { label: "Stopping safely...", tone: "neutral" },
+  pairing: { label: "Pairing window open...", tone: "neutral" },
   "recovery-needs-admin": {
     label: "Administrator access is required to recover USB-tether routes.",
     tone: "error",

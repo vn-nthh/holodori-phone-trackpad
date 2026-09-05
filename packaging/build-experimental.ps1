@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Name = "HolodoriUsbTetheredUdp-v0.4.1",
+    [string]$Name = "Doritrack-protocol-v5-dev",
     [string]$CargoHome = "F:\.cargo",
     [string]$JavaHome = "",
     [string]$AndroidSdk = ""
@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$Version = (Get-Content (Join-Path $ProjectRoot "VERSION") -Raw).Trim()
 $ReleaseRoot = Join-Path $ProjectRoot "release"
 $BundleDir = Join-Path $ReleaseRoot $Name
 $ArchivePath = Join-Path $ReleaseRoot "$Name-windows-x64.zip"
@@ -38,11 +39,27 @@ $env:RUSTFLAGS = "-C target-feature=+crt-static"
 
 Push-Location (Join-Path $ProjectRoot "native-host")
 try {
-    cargo test --all-targets
+    cargo test --locked --all-targets
     if ($LASTEXITCODE -ne 0) {
         throw "Native tests failed."
     }
-    cargo build --release
+    cargo clippy --locked --all-targets -- -D warnings
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native clippy checks failed."
+    }
+    cargo test --locked --release --lib `
+        network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame `
+        -- --ignored --exact
+    if ($LASTEXITCODE -ne 0) {
+        throw "Protocol-v4 loopback recovery check failed."
+    }
+    cargo test --locked --release --lib `
+        v5_host::gameplay_tests::production_loopback_latency `
+        -- --ignored --exact --nocapture --test-threads=1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Protocol-v5 loopback recovery check failed."
+    }
+    cargo build --locked --release
     if ($LASTEXITCODE -ne 0) {
         throw "Native release build failed."
     }
@@ -55,9 +72,9 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
 & (Join-Path $AndroidDir "gradlew.bat") `
     --project-dir $AndroidDir `
     --no-daemon `
-    "-PholodoriVersionName=0.4.1" `
-    "-PholodoriVersionCode=25" `
-    clean assembleRelease
+    "-PholodoriVersionName=$Version" `
+    "-PholodoriVersionCode=26" `
+    clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
 }
@@ -69,11 +86,23 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Tauri dependency install failed."
     }
+    npm test
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri frontend tests failed."
+    }
     npm run build
     if ($LASTEXITCODE -ne 0) {
         throw "Tauri frontend build failed."
     }
-    npx tauri build --no-bundle
+    cargo test --locked --manifest-path src-tauri\Cargo.toml --all-targets
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri tests failed."
+    }
+    cargo clippy --locked --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri clippy checks failed."
+    }
+    npx --no-install tauri build --no-bundle
     if ($LASTEXITCODE -ne 0) {
         throw "Tauri Windows build failed."
     }
@@ -107,13 +136,16 @@ Copy-Item (Join-Path $NativeRelease "holodori-native-host.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-probe.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-smoke.exe") $WindowsDir
 Copy-Item (Join-Path $TauriRelease "holodori-usb-controller.exe") (Join-Path $BundleDir "HolodoriUsbController.exe")
-Copy-Item $Apk (Join-Path $AndroidOutputDir "HolodoriUsbTetheredUdp-v4.apk")
+Copy-Item $Apk (Join-Path $AndroidOutputDir "Doritrack-v5.apk")
 Copy-Item $Apk $StandaloneApkPath
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\README.txt") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-touch.cmd") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-keys.cmd") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "EXPERIMENTAL_ARCHITECTURE.md") $DocsDir
+Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V5.md") $DocsDir
+Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V5_TEST_VECTORS.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V4.md") $DocsDir
+Copy-Item (Join-Path $ProjectRoot "LATENCY_VALIDATION.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "LICENSE") $DocsDir
 
 $Branch = git -C $ProjectRoot branch --show-current
@@ -122,15 +154,16 @@ $TrackedChanges = git -C $ProjectRoot status --porcelain --untracked-files=no
 $Dirty = if ($TrackedChanges) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
-    "android_version_name=0.4.1",
-    "android_version_code=25",
+    "android_version_name=$Version",
+    "android_version_code=26",
     "built_utc=$([DateTime]::UtcNow.ToString('o'))",
     "branch=$Branch",
     "base_commit=$Commit",
     "working_tree_dirty=$Dirty",
-    "transport=usb-tethering-rndis-udp",
+    "transport=explicit-usb-tether-or-local-network-udp",
     "udp_port=42825",
-    "protocol=4",
+    "protocol=5",
+    "legacy_protocol=4-usb-explicit",
     "windows_arch=x86_64",
     "windows_crt=static",
     "windows_launcher=tauri",

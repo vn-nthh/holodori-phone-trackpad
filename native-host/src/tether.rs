@@ -6,7 +6,7 @@
 //! policy to NetworkManager in the desktop launcher.
 
 #[cfg(windows)]
-pub use crate::tether_policy::{TetherBinding, current_tether_binding};
+pub use crate::tether_policy::{TetherBinding, current_tether_binding, tether_ipv4_interfaces};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -161,6 +161,55 @@ mod linux {
             identity,
             validate_runtime: true,
         }))
+    }
+
+    /// IPv4 addresses and interface indices that are safe for a v5 USB
+    /// discovery listener before the peer address is known.
+    pub fn tether_ipv4_interfaces() -> io::Result<Vec<(Ipv4Addr, u32)>> {
+        let devices = linux_tether_devices()?;
+        let mut head = ptr::null_mut();
+        if unsafe { libc::getifaddrs(&mut head) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let addresses = IfAddrs(head);
+        let mut listeners = Vec::new();
+        let mut current = addresses.0;
+        while !current.is_null() {
+            let entry = unsafe { &*current };
+            if !entry.ifa_name.is_null()
+                && !entry.ifa_addr.is_null()
+                && !entry.ifa_netmask.is_null()
+                && entry.ifa_flags & libc::IFF_UP as u32 != 0
+                && entry.ifa_flags & libc::IFF_LOOPBACK as u32 == 0
+            {
+                let name = OsString::from_vec(
+                    unsafe { CStr::from_ptr(entry.ifa_name) }
+                        .to_bytes()
+                        .to_vec(),
+                );
+                let index = unsafe { libc::if_nametoindex(entry.ifa_name) };
+                let local = sockaddr_ip(entry.ifa_addr);
+                let netmask = sockaddr_ip(entry.ifa_netmask);
+                if index != 0
+                    && devices.iter().any(|device| {
+                        device.identity.index == index && device.identity.name == name
+                    })
+                    && let (Some(IpAddr::V4(local)), Some(IpAddr::V4(netmask))) = (local, netmask)
+                    && valid_tether_prefix(
+                        IpAddr::V4(local),
+                        IpAddr::V4(local),
+                        IpAddr::V4(netmask),
+                    )
+                {
+                    let candidate = (local, index);
+                    if !listeners.contains(&candidate) {
+                        listeners.push(candidate);
+                    }
+                }
+            }
+            current = entry.ifa_next;
+        }
+        Ok(listeners)
     }
 
     /// Enumerate present USB network devices accepted by Linux gameplay
@@ -346,12 +395,10 @@ mod linux {
     }
 
     fn is_tether_capable_driver(driver: &std::ffi::OsStr) -> bool {
-        // Fail closed until protocol v5 adds authenticated pairing. Generic
-        // USB Ethernet adapters commonly use cdc_ncm/cdc_ether/cdc_subset;
-        // accepting those drivers would let an ordinary private LAN look like
-        // the trusted phone tether. The project's documented Linux transport
-        // is RNDIS, so compatibility with other USB networking modes is less
-        // important than avoiding that accidental trust expansion.
+        // Fail closed even though v5 authenticates its peer. Generic USB
+        // Ethernet adapters commonly use cdc_ncm/cdc_ether/cdc_subset; treating
+        // those as the explicitly selected phone tether would violate route
+        // confinement. The documented Linux USB transport is RNDIS.
         driver.as_bytes() == b"rndis_host"
     }
 
@@ -567,4 +614,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{LinuxTetherDevice, TetherBinding, current_tether_binding, linux_tether_devices};
+pub use linux::{
+    LinuxTetherDevice, TetherBinding, current_tether_binding, linux_tether_devices,
+    tether_ipv4_interfaces,
+};

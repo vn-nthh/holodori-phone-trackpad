@@ -1,11 +1,16 @@
 # Holodori lossless touch protocol v4
 
+> **Implementation status:** the current release implements this USB-only
+> protocol. [Protocol v5](PROTOCOL_V5.md) supersedes it as the default current
+> source implementation. This document remains the exact reference for the
+> published v0.4.1 build and explicit legacy migration tests.
+
 Protocol v4 is the duplex binary protocol used by the native Windows and Linux
 hosts over Android USB tethering/RNDIS and UDP. Android retains each input
 frame until the host confirms that the selected operating-system sink accepted
 it.
 Version 4 adds stage-separated benchmark timestamps and a duplex clock
-exchange; it is not wire-compatible with protocol v3.
+exchange; it is not wire-compatible with earlier versions.
 
 ## USB-tethered UDP transport
 
@@ -67,8 +72,8 @@ acknowledgement.
 This is network confinement, not cryptographic authentication. CRC-32 detects
 corruption but does not prove identity. Any sender able to reach the host from
 the accepted USB-tether subnet can impersonate the phone and inject input.
-Pairing and authenticated framing require protocol v5 and are intentionally
-outside this version.
+Pairing and authenticated framing are defined by
+[protocol v5](PROTOCOL_V5.md) and are intentionally outside this version.
 
 Each HPT4 frame and HPA4 control record is one UDP datagram. A datagram is
 never concatenated with the next datagram for parsing, and the largest HPT4
@@ -103,8 +108,8 @@ before every send attempt. A retransmission therefore describes the copy that
 actually reached the host rather than retaining the first attempt's time.
 
 Each contact record contains a pointer ID, inside/tip flags, signed normalized
-X/Y coordinates, normalized pressure, and normalized touch-major size. As in
-v3, every record is a complete simultaneous contact snapshot.
+X/Y coordinates, normalized pressure, and normalized touch-major size. Every
+record is a complete simultaneous contact snapshot.
 
 ## Host-to-phone control record
 

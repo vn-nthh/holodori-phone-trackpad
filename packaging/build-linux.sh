@@ -41,7 +41,7 @@ Builds the Linux experimental release bundle under release/<name>/ and
 release/<name>-linux-x64.tar.gz.
 
 Options:
-  -n, --name NAME          Bundle name (default: HolodoriUsbTetheredUdp-v<VERSION>)
+  -n, --name NAME          Bundle name (default: Doritrack-v<VERSION>)
       --android-sdk PATH   Android SDK root, enables the optional APK build.
                             Defaults to $ANDROID_SDK_ROOT or $ANDROID_HOME if set.
       --java-home PATH     JAVA_HOME for the Android/Gradle build.
@@ -58,7 +58,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_ROOT="${PROJECT_ROOT}/release"
 VERSION="$(tr -d '[:space:]' <"${PROJECT_ROOT}/VERSION")"
 
-NAME="HolodoriUsbTetheredUdp-v${VERSION}"
+NAME="Doritrack-v${VERSION}"
 ANDROID_SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
 JAVA_HOME_ARG="${JAVA_HOME:-}"
 
@@ -139,7 +139,8 @@ echo "== Building native-host (release) =="
     cargo fmt --all -- --check
     cargo test --locked --all-targets
     cargo clippy --locked --all-targets -- -D warnings
-    cargo test --locked --lib network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame -- --ignored --exact
+    cargo test --locked --release --lib network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame -- --ignored --exact
+    cargo test --locked --release --lib v5_host::gameplay_tests::production_loopback_latency -- --ignored --exact --nocapture --test-threads=1
     cargo build --locked --release
 )
 
@@ -169,7 +170,7 @@ if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
             JAVA_HOME="${JAVA_HOME_ARG}" ANDROID_HOME="${ANDROID_SDK}" ANDROID_SDK_ROOT="${ANDROID_SDK}" \
                 ./gradlew --no-daemon \
                 -PholodoriVersionName="${VERSION}" \
-                -PholodoriVersionCode=25 \
+                -PholodoriVersionCode=26 \
                 clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
         )
         APK_SRC="${ANDROID_DIR}/app/build/outputs/apk/release/app-release.apk"
@@ -201,13 +202,16 @@ cp "${PROJECT_ROOT}/packaging/experimental/run-keys.sh" "${BUNDLE_DIR}/"
 chmod +x "${LINUX_DIR}/holodori-native-host" "${BUNDLE_DIR}/HolodoriUsbController" "${BUNDLE_DIR}/run-keys.sh"
 cp "${PROJECT_ROOT}/EXPERIMENTAL_ARCHITECTURE.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/LINUX_SETUP.md" "${DOCS_DIR}/"
+cp "${PROJECT_ROOT}/PROTOCOL_V5.md" "${DOCS_DIR}/"
+cp "${PROJECT_ROOT}/PROTOCOL_V5_TEST_VECTORS.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/PROTOCOL_V4.md" "${DOCS_DIR}/"
+cp "${PROJECT_ROOT}/LATENCY_VALIDATION.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/LICENSE" "${DOCS_DIR}/"
 
 if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
     ANDROID_OUTPUT_DIR="${BUNDLE_DIR}/Android"
     mkdir -p "${ANDROID_OUTPUT_DIR}"
-    cp "${APK_SRC}" "${ANDROID_OUTPUT_DIR}/HolodoriUsbTetheredUdp-v4.apk"
+    cp "${APK_SRC}" "${ANDROID_OUTPUT_DIR}/Doritrack-v5.apk"
 fi
 
 BRANCH="$(git -C "${PROJECT_ROOT}" branch --show-current)"
@@ -221,15 +225,16 @@ fi
     echo "name=${NAME}"
     if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
         echo "android_version_name=${VERSION}"
-        echo "android_version_code=25"
+        echo "android_version_code=26"
     fi
     echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "branch=${BRANCH}"
     echo "base_commit=${COMMIT}"
     echo "working_tree_dirty=${DIRTY}"
-    echo "transport=usb-tethering-rndis-udp"
+    echo "transport=explicit-usb-tether-or-local-network-udp"
     echo "udp_port=42825"
-    echo "protocol=4"
+    echo "protocol=5"
+    echo "legacy_protocol=4-usb-explicit"
     echo "linux_arch=x86_64"
     echo "linux_launcher=tauri"
     echo "linux_webview=webkit2gtk-system"
@@ -257,5 +262,5 @@ git -C "${PROJECT_ROOT}" diff --check
 echo "Bundle: ${BUNDLE_DIR}"
 echo "Archive: ${ARCHIVE_PATH}"
 if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
-    echo "Android package: ${ANDROID_OUTPUT_DIR}/HolodoriUsbTetheredUdp-v4.apk"
+    echo "Android package: ${ANDROID_OUTPUT_DIR}/Doritrack-v5.apk"
 fi

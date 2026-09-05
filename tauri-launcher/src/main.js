@@ -9,8 +9,16 @@ import {
 } from "./platform.js";
 
 const form = document.querySelector("#settings-form");
+const transportInputs = Array.from(document.querySelectorAll('input[name="transport"]'));
+const pairButton = document.querySelector("#pair");
+const approvePairingButton = document.querySelector("#approve-pairing");
+const forgetDeviceButton = document.querySelector("#forget-device");
+const pairedState = document.querySelector("#paired-state");
+const pairPattern = document.querySelector("#pair-pattern");
+const quality = document.querySelector("#quality");
 const keySlots = Array.from(document.querySelectorAll(".key-slot"));
 const metricsInput = document.querySelector("#metrics");
+const legacyV4Input = document.querySelector("#legacy-v4");
 const localOnlyTetherInput = document.querySelector("#local-only-tether");
 const adminAction = document.querySelector("#admin-action");
 const adminActionText = document.querySelector("#admin-action-text");
@@ -34,9 +42,16 @@ let activeSlotIndex = 0;
 let stopping = false;
 let recoveryNeedsAdmin = false;
 let hostRunning = false;
+let pairing = false;
+let paired = false;
+let canApprovePairing = false;
 let linuxTetherPolicy;
 let linuxTetherRequested = localOnlyTetherInput.checked;
 let tetherPolicyBusy = false;
+
+function selectedTransport() {
+  return transportInputs.find((input) => input.checked)?.value ?? "usb";
+}
 
 function saveLocalOnlyTetherPreference(value) {
   try {
@@ -54,10 +69,15 @@ function setStatus(message, tone = "neutral", phase = "ready") {
 
 function setRunning(running) {
   hostRunning = running;
+  const wifi = selectedTransport() === "wifi";
   keySlots.forEach((slot) => {
     slot.disabled = running;
   });
+  transportInputs.forEach((input) => {
+    input.disabled = running;
+  });
   metricsInput.disabled = running;
+  legacyV4Input.disabled = running || wifi;
   const linuxProfileUnavailable =
     elevationModel === "network-manager" && !linuxTetherPolicy?.available;
   const linuxPolicyUnresolved =
@@ -66,12 +86,17 @@ function setRunning(running) {
   localOnlyTetherInput.disabled =
     running ||
     tetherPolicyBusy ||
+    wifi ||
     !localOnlyTetherSupported(elevationModel) ||
     linuxProfileUnavailable;
   restartAsAdminButton.disabled = running;
   refreshTetherPolicyButton.disabled = running || tetherPolicyBusy;
+  pairButton.disabled = running;
+  approvePairingButton.disabled = !running || !pairing || !canApprovePairing;
+  forgetDeviceButton.disabled = running || !paired;
   startButton.disabled =
     running ||
+    (!paired && !legacyV4Input.checked) ||
     recoveryNeedsAdmin ||
     tetherPolicyBusy ||
     linuxPolicyUnresolved ||
@@ -79,7 +104,34 @@ function setRunning(running) {
   stopButton.disabled = !running;
 }
 
+function renderPairing(result) {
+  pairing = Boolean(result.pairing);
+  paired = Boolean(result.paired);
+  canApprovePairing = Boolean(result.can_approve);
+  pairedState.textContent = paired ? "Paired" : "Not paired";
+  pairedState.dataset.paired = String(paired);
+  const pattern = Array.isArray(result.pattern) ? result.pattern : [];
+  pairPattern.replaceChildren(
+    ...pattern.map((lane) => {
+      const item = document.createElement("span");
+      item.textContent = String(lane);
+      return item;
+    }),
+  );
+  pairPattern.hidden = pattern.length !== 8;
+  quality.textContent = result.quality || "";
+  quality.hidden = !result.quality;
+}
+
 function updateAdminAction() {
+  if (selectedTransport() === "wifi") {
+    localOnlyTetherInput.checked = false;
+    localOnlyTetherInput.indeterminate = false;
+    localOnlyTetherInput.disabled = true;
+    adminAction.hidden = true;
+    setRunning(hostRunning);
+    return;
+  }
   if (elevationModel !== undefined && !localOnlyTetherSupported(elevationModel)) {
     localOnlyTetherInput.checked = false;
     localOnlyTetherInput.disabled = true;
@@ -120,6 +172,7 @@ function updateAdminAction() {
 function applyHostStatus(result) {
   recoveryNeedsAdmin = Boolean(result.recovery_needs_admin);
   stopping = Boolean(result.stopping);
+  renderPairing(result);
   setRunning(Boolean(result.running));
   const presentation = statusPresentation(result);
   setStatus(presentation.label, presentation.tone, presentation.phase);
@@ -311,6 +364,11 @@ form.addEventListener("submit", async (event) => {
     restartAsAdminButton.focus();
     return;
   }
+  if (!paired && !legacyV4Input.checked) {
+    setStatus("Pair the host and phone before starting protocol v5.", "error");
+    pairButton.focus();
+    return;
+  }
 
   if (elevationModel === undefined) await initElevation();
   if (
@@ -357,6 +415,8 @@ form.addEventListener("submit", async (event) => {
       keys,
       metrics: metricsInput.checked,
       localOnlyTether: localOnlyTether,
+      transport: selectedTransport(),
+      legacyV4: legacyV4Input.checked,
     });
     applyHostStatus(result);
   } catch (error) {
@@ -395,6 +455,59 @@ localOnlyTetherInput.addEventListener("change", async () => {
 
   saveLocalOnlyTetherPreference(localOnlyTetherInput.checked);
   updateAdminAction();
+});
+
+transportInputs.forEach((input) => {
+  input.addEventListener("change", () => {
+    if (selectedTransport() === "wifi") {
+      legacyV4Input.checked = false;
+      localOnlyTetherInput.checked = false;
+    }
+    updateAdminAction();
+    setRunning(hostRunning);
+  });
+});
+
+legacyV4Input.addEventListener("change", () => {
+  setRunning(hostRunning);
+  setStatus(
+    legacyV4Input.checked
+      ? "Legacy v4 selected: unauthenticated USB migration mode."
+      : paired
+        ? "Protocol v5 ready."
+        : "Pair before starting protocol v5.",
+    legacyV4Input.checked ? "warning" : "neutral",
+  );
+});
+
+pairButton.addEventListener("click", async () => {
+  try {
+    setStatus("Opening a 60-second pairing window...");
+    const result = await invoke("begin_pairing", { transport: selectedTransport() });
+    applyHostStatus(result);
+  } catch (error) {
+    setStatus(String(error), "error");
+  }
+});
+
+approvePairingButton.addEventListener("click", async () => {
+  try {
+    approvePairingButton.disabled = true;
+    const result = await invoke("approve_pairing");
+    applyHostStatus(result);
+  } catch (error) {
+    setStatus(String(error), "error");
+    setRunning(hostRunning);
+  }
+});
+
+forgetDeviceButton.addEventListener("click", async () => {
+  try {
+    const result = await invoke("forget_device");
+    applyHostStatus(result);
+  } catch (error) {
+    setStatus(String(error), "error");
+  }
 });
 
 refreshTetherPolicyButton.addEventListener("click", async () => {

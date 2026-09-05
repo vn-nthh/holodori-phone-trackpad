@@ -10,5 +10,5 @@
 mod windows;
 pub use windows::{
     RecoveryOutcome, TetherBinding, TetherRoutePolicy, current_tether_binding,
-    recover_orphaned_policy,
+    recover_orphaned_policy, tether_ipv4_interfaces,
 };

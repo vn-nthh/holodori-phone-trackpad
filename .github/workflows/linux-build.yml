@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [master]
+    tags: ["v*-alpha*"]
   workflow_dispatch:
 
 permissions:
@@ -32,6 +33,9 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: tauri-launcher/package-lock.json
+
+      - name: Update Rust toolchain
+        run: rustup update stable
 
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
@@ -81,10 +85,13 @@ jobs:
         run: cargo clippy --locked --manifest-path native-host/Cargo.toml --all-targets -- -D warnings
 
       - name: Check loopback loss recovery budget
-        run: >-
-          cargo test --locked --manifest-path native-host/Cargo.toml --lib
-          network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame
-          -- --ignored --exact
+        run: |
+          cargo test --locked --release --manifest-path native-host/Cargo.toml --lib \
+            network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame \
+            -- --ignored --exact
+          cargo test --locked --release --manifest-path native-host/Cargo.toml --lib \
+            v5_host::gameplay_tests::production_loopback_latency \
+            -- --ignored --exact --nocapture --test-threads=1
 
       # This step (and every Rust step below it) is NOT redundant with
       # build-linux.sh despite also appearing there: `tauri::generate_context!`
@@ -121,10 +128,12 @@ jobs:
         run: git diff --check HEAD^1 HEAD
 
       - name: Build the Linux release bundle
-        run: packaging/build-linux.sh
+        # The separately downloadable APK comes from the Windows release job.
+        # Avoid distributing a second APK signed with a different runner key.
+        run: ANDROID_HOME= ANDROID_SDK_ROOT= packaging/build-linux.sh
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: HolodoriPhoneTrackpad-linux-${{ github.sha }}
-          path: release/*
+          path: release/*-linux-x64.tar.gz
           if-no-files-found: error

@@ -32,7 +32,7 @@ impl KeySink {
             scan_codes.push(scan_code as u16);
         }
         Ok(Self {
-            inputs: Vec::with_capacity(scan_codes.len() * 4),
+            inputs: Vec::with_capacity(super::max_key_changes(scan_codes.len())),
             scan_codes,
         })
     }
@@ -50,6 +50,32 @@ impl KeySink {
     }
 
     pub(super) fn submit(&mut self, changes: &[KeyChange]) -> io::Result<usize> {
+        self.submit_with(changes, |inputs| {
+            let count = u32::try_from(inputs.len()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "too many keyboard events for SendInput",
+                )
+            })?;
+            let accepted =
+                unsafe { SendInput(count, inputs.as_ptr(), size_of::<INPUT>() as i32) } as usize;
+            if accepted == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(accepted)
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn submit_recorded(&mut self, changes: &[KeyChange]) -> io::Result<usize> {
+        self.submit_with(changes, |inputs| Ok(inputs.len()))
+    }
+
+    fn submit_with(
+        &mut self,
+        changes: &[KeyChange],
+        submit: impl FnOnce(&[INPUT]) -> io::Result<usize>,
+    ) -> io::Result<usize> {
         if changes.is_empty() {
             return Ok(0);
         }
@@ -59,18 +85,7 @@ impl KeySink {
                 .iter()
                 .map(|change| key_input(self.scan_codes[change.lane], change.down)),
         );
-        let count = u32::try_from(self.inputs.len()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "too many keyboard events for one SendInput submission",
-            )
-        })?;
-        let accepted =
-            unsafe { SendInput(count, self.inputs.as_ptr(), size_of::<INPUT>() as i32) } as usize;
-        if accepted == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(accepted)
+        submit(&self.inputs)
     }
 
     #[cfg(test)]
@@ -79,7 +94,7 @@ impl KeySink {
             scan_codes: (1..=lanes)
                 .map(|scan_code| u16::try_from(scan_code).expect("test lane fits u16"))
                 .collect(),
-            inputs: Vec::new(),
+            inputs: Vec::with_capacity(super::max_key_changes(lanes)),
         }
     }
 }

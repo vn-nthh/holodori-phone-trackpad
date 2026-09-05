@@ -203,6 +203,24 @@ pub fn current_tether_snapshot() -> io::Result<TetherSnapshot> {
     Ok(TetherSnapshot { prefixes })
 }
 
+/// IPv4 addresses and interface indices that are safe to expose a v5 USB
+/// discovery listener on before a peer address is known.
+pub fn tether_ipv4_interfaces() -> io::Result<Vec<(Ipv4Addr, u32)>> {
+    let mut listeners = Vec::new();
+    for adapter in tether_adapters()? {
+        for prefix in adapter.prefixes {
+            let IpAddr::V4(address) = prefix.address else {
+                continue;
+            };
+            let candidate = (address, adapter.interface_index);
+            if !listeners.contains(&candidate) {
+                listeners.push(candidate);
+            }
+        }
+    }
+    Ok(listeners)
+}
+
 pub fn current_tether_binding(peer: SocketAddr) -> io::Result<Option<TetherBinding>> {
     let snapshot = current_tether_snapshot()?;
     let Some(interface_index) = snapshot.classify_peer(peer.ip()) else {

@@ -1,16 +1,14 @@
-HOLODORI LOSSLESS TOUCH - USB TETHERING / RNDIS / UDP (LINUX)
-========================================================
+HOLODORI LOSSLESS TOUCH - AUTHENTICATED LOCAL UDP (LINUX)
+=========================================================
 
-This experimental bundle uses the phone's normal USB tethering network. Your
-distribution's kernel and network manager supply the USB network device.
-The current host deliberately accepts only the kernel's rndis_host driver;
-generic USB Ethernet/NCM adapters fail closed because protocol v4 cannot
-authenticate them.
+This bundle defaults to authenticated protocol v5 over explicitly selected USB
+tethering or Wi-Fi/local network. Your distribution supplies the network
+device. USB still accepts only the kernel's rndis_host driver so a generic USB
+Ethernet/NCM adapter cannot masquerade as the chosen phone route.
 
-Protocol v4 has no cryptographic pairing. Treat the accepted USB network as
-trusted and do not expose UDP 42825 to LAN or Wi-Fi. Any device able to reach
-that port from the accepted tether subnet can impersonate a phone and inject
-lane keys. Authenticated pairing is deferred to protocol v5.
+V5 authenticates the paired phone with Noise before Linux uinput is reachable.
+Legacy protocol v4 remains an explicit unpaired USB migration option; treat
+that mode's tether subnet as trusted and never expose it to LAN or Wi-Fi.
 
 Lane keys are delivered through the kernel's uinput virtual keyboard. Keys
 mode is the only mode on Linux; touch mode is Windows-only.
@@ -36,7 +34,7 @@ One-time setup:
        sudo firewall-cmd --reload
 
 Install:
-  1. Copy Android/HolodoriUsbTetheredUdp-v4.apk to the phone (if this bundle
+  1. Copy Android/Doritrack-v5.apk to the phone (if this bundle
      includes an Android build; the experimental build script skips the APK
      when no Android SDK is available).
   2. Open the APK on the phone and approve installation from that source.
@@ -51,10 +49,14 @@ Install:
 
 Start the Linux app:
   1. Run ./HolodoriUsbController from this folder.
-  2. Set the lane keys if needed. Protocol-v4 discovery uses UDP port 42825.
-  3. Leave "Save latency report when stopped" checked unless you do not want
+  2. Choose USB or Wi-Fi / local network on both phone and host. Wi-Fi requires
+     both peers on one private subnet.
+  3. Press Pair on both. Replicate all eight numbered host lanes on the phone,
+     then approve on the host only while the real phone says "Pattern matched".
+  4. Set the lane keys if needed. V5 uses UDP port 42825 on the selected path.
+  5. Leave "Save latency report when stopped" checked unless you do not want
      a report.
-  4. NetworkManager users can enable "Stop the PC from using the phone's
+  6. USB NetworkManager users can enable "Stop the PC from using the phone's
      internet" after connecting exactly one Android RNDIS tether. The app
      sets both never-default properties on that exact active profile; polkit
      may request authorization. NetworkManager 1.44 or newer is required for
@@ -77,13 +79,13 @@ Start the Linux app:
      tethered link from the first command's output.
      The native host's --local-only-tether argument only repeats the read-only
      pre-session route check; it does not configure NetworkManager by itself.
-  5. Press Start. If local-only mode is selected, startup independently
+  7. Press Start on both peers with the same transport. If local-only mode is selected, startup independently
      verifies both NetworkManager profile properties and the kernel routes.
      The input host checks the exact discovered interface again before sending
      its discovery ACK, outside the gameplay frame path.
-  6. Unlock the phone and open the APK.
-  7. Arrange and lock the play zone, then tap, hold, chord, and slide.
-  8. Press Stop in the app when finished. Held input is released safely.
+  8. Arrange and lock the play zone, optionally enable thumb mode, then tap,
+     hold, chord, and slide.
+  9. Press Stop in the app when finished. Held input is released safely.
       The NetworkManager profile setting remains in place until you turn the
       checkbox off or change the profile in NetworkManager.
 
@@ -100,17 +102,16 @@ Keyboard mode:
     Windows-only and are not included in this bundle.
 
 Connection diagnostics:
-  - "waiting for USB-tethered phone on UDP port 42825" means discovery is
-    listening on the tethered adapter.
+  - "Pairing window open" means HPP5 discovery is confined to the selected
+    interface for 60 seconds.
   - If a firewall blocks discovery, allow inbound UDP 42825 on the
     USB-tethered interface (see one-time setup above).
-  - "UDP link ready" means the host received the phone's discovery hello.
-  - "Lossless UDP over USB tethering connected" means HPA4 control is active.
-  - HPT4 frames are one UDP datagram each. Immediate redundant HPT4/HPA4 sends,
-    cumulative acknowledgements, and 2 ms replay preserve ordering across a
-    lost or corrupt datagram inside one 120 Hz frame.
-  - The host can join a phone session after a host restart; a cable replug is
-    not required if USB tethering remains enabled.
+  - "Phone connected" means Noise IK authenticated the remembered phone and
+    HPT5/HPA5 control is active.
+  - Immediate copies and 2 ms repairs use independent packet numbers/nonces;
+    cumulative ACK advances only after Linux uinput accepts the frame.
+  - Wi-Fi pairing reports signal and authenticated path timing. 2.4, 5, and
+    6 GHz are accepted; poor measurements warn but do not decide identity.
   - A host read/ACK failure releases injected input before reconnecting. During
     active play the phone abandons a link after 64 ms without cumulative ACK
     progress, starts socket recovery with a 4 ms backoff, and restores
@@ -119,9 +120,8 @@ Connection diagnostics:
     option is checked. One report is written under
     $XDG_STATE_HOME/holodori/logs (or ~/.local/state/holodori/logs) after
     Stop. Nothing is formatted, sorted, or written mid-play.
-  - Protocol-v4 discovery uses fixed UDP port 42825. The 8.333 ms 120 Hz
-    warning budget is applied automatically; normal users do not need a
-    terminal.
+  - V5 and explicit legacy v4 use fixed UDP port 42825. V4 never runs on the
+    Wi-Fi listener. The 8.333 ms warning budget is applied automatically.
 
 Metrics include:
   - mean, max, p50, p90, p99, and p99.9;
@@ -142,5 +142,7 @@ Safety and scope:
     replayed late. Duplicate controls do not hide an ordering stall.
 
 See Docs/LINUX_SETUP.md for expanded setup and troubleshooting.
-See Docs/EXPERIMENTAL_ARCHITECTURE.md and Docs/PROTOCOL_V4.md for internals.
+See Docs/EXPERIMENTAL_ARCHITECTURE.md, Docs/PROTOCOL_V5.md, and
+Docs/PROTOCOL_V5_TEST_VECTORS.md for current internals. PROTOCOL_V4.md documents
+the explicit legacy migration mode.
 Verify every packaged file against SHA256SUMS.txt.

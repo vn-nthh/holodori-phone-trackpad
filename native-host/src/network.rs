@@ -327,7 +327,7 @@ fn send_redundant(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr) -> io::Res
 }
 
 #[cfg(target_os = "linux")]
-fn enable_receive_interface(socket: &UdpSocket) -> io::Result<()> {
+pub(crate) fn enable_receive_interface(socket: &UdpSocket) -> io::Result<()> {
     let enabled: libc::c_int = 1;
     let result = unsafe {
         libc::setsockopt(
@@ -349,7 +349,7 @@ fn enable_receive_interface(socket: &UdpSocket) -> io::Result<()> {
 static WINDOWS_RECEIVE_MESSAGE: OnceLock<LPFN_WSARECVMSG> = OnceLock::new();
 
 #[cfg(windows)]
-fn enable_receive_interface(socket: &UdpSocket) -> io::Result<()> {
+pub(crate) fn enable_receive_interface(socket: &UdpSocket) -> io::Result<()> {
     let enabled = 1_u32;
     let result = unsafe {
         setsockopt(
@@ -367,12 +367,12 @@ fn enable_receive_interface(socket: &UdpSocket) -> io::Result<()> {
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn enable_receive_interface(_socket: &UdpSocket) -> io::Result<()> {
+pub(crate) fn enable_receive_interface(_socket: &UdpSocket) -> io::Result<()> {
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn receive_datagram(
+pub(crate) fn receive_datagram(
     socket: &UdpSocket,
     buffer: &mut [u8],
 ) -> io::Result<(usize, SocketAddr, Option<u32>)> {
@@ -471,7 +471,7 @@ fn receive_message_pointer(socket: &UdpSocket) -> io::Result<LPFN_WSARECVMSG> {
 }
 
 #[cfg(windows)]
-fn receive_datagram(
+pub(crate) fn receive_datagram(
     socket: &UdpSocket,
     buffer: &mut [u8],
 ) -> io::Result<(usize, SocketAddr, Option<u32>)> {
@@ -569,7 +569,7 @@ fn cmsg_align(length: usize) -> Option<usize> {
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn receive_datagram(
+pub(crate) fn receive_datagram(
     socket: &UdpSocket,
     buffer: &mut [u8],
 ) -> io::Result<(usize, SocketAddr, Option<u32>)> {

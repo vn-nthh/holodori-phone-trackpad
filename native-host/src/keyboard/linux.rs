@@ -64,6 +64,7 @@ type InputEvent = libc::input_event;
 pub(super) struct KeySink {
     fd: RawFd,
     keycodes: Vec<u16>,
+    events: Vec<InputEvent>,
     pending: Option<PendingWrite>,
 }
 
@@ -119,6 +120,7 @@ impl KeySink {
 
         Ok(Self {
             fd,
+            events: Vec::with_capacity(super::max_key_changes(keycodes.len()) * 2),
             keycodes,
             pending: None,
         })
@@ -131,6 +133,11 @@ impl KeySink {
     pub(super) fn submit(&mut self, changes: &[KeyChange]) -> io::Result<usize> {
         let fd = self.fd;
         self.submit_with(changes, |events| write_events(fd, events))
+    }
+
+    #[cfg(test)]
+    pub(super) fn submit_recorded(&mut self, changes: &[KeyChange]) -> io::Result<usize> {
+        self.submit_with(changes, |events| Ok(events.len()))
     }
 
     pub(super) fn discard_pending(&mut self) -> io::Result<()> {
@@ -146,6 +153,7 @@ impl KeySink {
     pub(super) fn for_test(lanes: usize) -> Self {
         Self {
             fd: -1,
+            events: Vec::with_capacity(super::max_key_changes(lanes) * 2),
             keycodes: (1..=lanes)
                 .map(|code| u16::try_from(code).expect("test lane fits u16"))
                 .collect(),
@@ -187,8 +195,9 @@ impl KeySink {
         if remaining.is_empty() {
             return Ok(accepted);
         }
-        let events = encode_changes(&self.keycodes, remaining);
-        let written = match write(&events) {
+        encode_changes(&self.keycodes, remaining, &mut self.events);
+        let events = &self.events;
+        let written = match write(events) {
             Ok(0) if accepted == 0 => return Err(write_zero_error()),
             Ok(0) | Err(_) if accepted != 0 => return Ok(accepted),
             Err(error) => return Err(error),
@@ -210,18 +219,18 @@ impl KeySink {
     where
         F: FnMut(&[InputEvent]) -> io::Result<usize>,
     {
-        let events = match self.pending {
+        let (events, length) = match self.pending {
             None => return Ok(()),
-            Some(PendingWrite::Change(change)) if change.down => [
-                Some(key_event(self.keycodes[change.lane], false)),
-                Some(sync_event()),
-            ],
+            Some(PendingWrite::Change(change)) if change.down => (
+                [key_event(self.keycodes[change.lane], false), sync_event()],
+                2,
+            ),
             Some(PendingWrite::Change(_)) | Some(PendingWrite::CleanupSync) => {
-                [Some(sync_event()), None]
+                ([sync_event(), sync_event()], 1)
             }
         };
-        let events: Vec<_> = events.into_iter().flatten().collect();
-        match write(&events)? {
+        let events = &events[..length];
+        match write(events)? {
             0 => Err(write_zero_error()),
             count if count > events.len() => Err(invalid_event_count(count, events.len())),
             count if count == events.len() => {
@@ -242,13 +251,12 @@ impl KeySink {
     }
 }
 
-fn encode_changes(keycodes: &[u16], changes: &[KeyChange]) -> Vec<InputEvent> {
-    let mut events = Vec::with_capacity(changes.len() * 2);
+fn encode_changes(keycodes: &[u16], changes: &[KeyChange], events: &mut Vec<InputEvent>) {
+    events.clear();
     for change in changes {
         events.push(key_event(keycodes[change.lane], change.down));
         events.push(sync_event());
     }
-    events
 }
 
 fn key_event(code: u16, down: bool) -> InputEvent {

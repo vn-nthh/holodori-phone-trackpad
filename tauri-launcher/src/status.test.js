@@ -10,6 +10,7 @@ test("maps every stable host phase to a label and tone", () => {
     tone: "neutral",
   });
   assert.equal(statusPresentation({ phase: "connected" }).tone, "success");
+  assert.equal(statusPresentation({ phase: "pairing" }).label, "Pairing window open...");
   assert.equal(statusPresentation({ phase: "recovering" }).tone, "warning");
   assert.equal(statusPresentation({ phase: "recovery-needs-admin" }).tone, "error");
   assert.equal(statusPresentation({ phase: "fatal" }).tone, "error");

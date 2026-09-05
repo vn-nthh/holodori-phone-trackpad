@@ -5,8 +5,14 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+blake2 = "0.10.6"
+chacha20poly1305 = "0.10.1"
+getrandom = "0.3.3"
+if-addrs = "0.15.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+snow = { version = "0.10.0", features = ["risky-raw-split"] }
+zeroize = { version = "1.8.2", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
@@ -15,6 +21,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
+    "Win32_Security_Cryptography",
     "Win32_System_LibraryLoader",
     "Win32_System_Console",
     "Win32_System_IO",
@@ -33,6 +40,7 @@ windows-sys = { version = "0.61.2", features = [
 # 0.2.189 is the verified floor for the uinput and getifaddrs APIs used by
 # the Linux input and tether-peer classification paths.
 libc = "0.2.189"
+secret-service = { version = "5.1.0", features = ["rt-tokio-crypto-rust"] }
 
 [lib]
 name = "holodori_native_host"

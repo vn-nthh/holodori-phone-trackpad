@@ -51,6 +51,19 @@ physical play vocabulary:
    complete snapshot.
 8. **Never replay seconds-old gameplay.** Reliability repairs short packet loss;
    it must not turn an outage into late notes after reconnection.
+9. **V5 input is authenticated before it is actionable.** Discovery and an
+   incomplete pairing handshake can never reach an OS input sink. Do not
+   silently downgrade, and never accept v4 gameplay on a Wi-Fi listener. A
+   remote `PAIR_CONFIRM` never replaces the required local host approval.
+10. **An AEAD nonce belongs to one datagram.** In v5, every immediate copy and
+    repair gets a new packet number and nonce even when it carries the same
+    logical frame. Never patch timestamps and re-encrypt under a reused nonce.
+11. **Transport selection is explicit.** Pair and Start operate only on the USB
+    or local-network interface chosen by the user. An interface change is a
+    clean authenticated-session boundary.
+12. **Thumb mode cannot erase touch history.** Transform every historical and
+    current Android sample before framing. A captured contact crossing the
+    center gap stays captured and moves monotonically from lane 3 to lane 4.
 
 ## Latency contract
 
@@ -66,7 +79,7 @@ Changes must preserve these properties:
 - no JSON or per-frame process boundary in the native path;
 - first send is immediate, its redundant copy is immediate, and repair begins
   after 2 ms;
-- every datagram remains below the tethered Ethernet MTU;
+- every datagram remains below the selected local transport's MTU;
 - watchdog and recovery logic observes state without delaying transmission;
 - metrics remain bounded in memory and are written only when play stops.
 
@@ -77,11 +90,16 @@ that frame through the 2 ms replay.
 
 ## Why the architecture looks this way
 
-- **USB tethering/RNDIS:** uses the phone's normal USB cable and Windows inbox
-  networking without custom driver installation.
-- **UDP datagrams:** provide low-overhead atomic framing. Protocol v4 adds the
-  reliability UDP does not: session IDs, sequence numbers, CRC, reorder,
-  deduplication, cumulative ACKs, redundant sends, and replay.
+- **Selected local transport:** USB tethering uses the phone's normal cable and
+  inbox networking without a custom driver. V5 may instead use an explicitly
+  selected same-subnet Wi-Fi/local-network path.
+- **Authenticated UDP datagrams:** provide low-overhead atomic framing. V5 adds
+  Noise-authenticated identities and AEAD while retaining session IDs, logical
+  sequences, reorder, deduplication, cumulative ACKs, redundant sends, and
+  replay. V4 remains the current CRC-protected USB implementation.
+- **First-use lane comparison:** a transcript-bound eight-step, six-lane
+  pattern gives about 20.68 bits with one attempt per Pair click. It is a short
+  authentication string, never an encryption key or logged credential.
 - **Complete contact snapshots:** make multi-touch state unambiguous and allow
   a fresh host to reconstruct a hold without replaying old transitions.
 - **Rust native host:** keeps parsing, ordering, metrics, and User32 submission
@@ -118,11 +136,12 @@ published tag unless the user explicitly authorizes it.
 - `git diff --check`
 - loopback fault injection for corrupt/lost copies and loss of both immediate
   copies, checked against the 8.333 ms budget
-- real phone/cable/PC soak before claiming universal physical latency
+- real phone/cable/PC and phone/router/PC soak before claiming universal
+  physical latency
 
 ## Research basis
 
-Reviewed 2026-08-08:
+Reviewed 2026-09-01:
 
 - [Official hololive Dreams site](https://www.hololive-dreams.com/en) - Rhythm &
   RPG, supported on iOS, Android, and Steam.
@@ -136,5 +155,6 @@ Reviewed 2026-08-08:
   and moving-slide interaction on PC. Treat these control observations as
   community evidence, not an official specification.
 
-The repository's own normative specifications remain
-`EXPERIMENTAL_ARCHITECTURE.md` and `PROTOCOL_V4.md`.
+The repository's normative target specifications are
+`EXPERIMENTAL_ARCHITECTURE.md` and `PROTOCOL_V5.md`. `PROTOCOL_V4.md` remains
+the current implementation and migration reference until v5 code ships.

@@ -10,7 +10,11 @@ Android スマホを、Windows 上の [hololive Dreams (holodori)](https://store
 
 ## ダウンロード
 
-現在のバージョンは **v0.4.1** です。
+安定版は **v0.4.1** です。
+
+**プロトコル V5 の実験版:** [v0.5.0-alpha1](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha1)。
+認証付き USB/Wi-Fi 接続、ペアリング、親指モード、遅延の改善を含みます。
+スマホと PC には、同じ実験版リリースのアプリをインストールしてください。
 
 - [Windows アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-windows-x64.zip)
 - [Android アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-android.apk)
@@ -57,7 +61,7 @@ USB テザリングがスマホと PC のあいだに小さなネットワーク
 
 このツールは通常の Windows 入力を送ります。ゲームのプロセスを開いたり、読んだり、変更したりはしません。
 
-プロトコル v4 には暗号学的なペアリングがまだありません。UDP ポート `42825` を他のネットワークへ公開しないでください。テザリング用サブネット内の別端末は通信を妨害できます。
+プロトコル v4 には暗号学的なペアリングがまだありません。UDP ポート `42825` を他のネットワークへ公開しないでください。テザリング用サブネット内の別端末は通信を妨害できます。認証付きペアリング、USB またはローカルネットワークの明示選択、Wi-Fi 経路診断、親指向けレイアウトはプロトコル v5 に仕様化されていますが、現在のダウンロード版にはまだ実装されていません。
 
 ## Windows のオプション
 
@@ -123,7 +127,7 @@ Windows が管理者権限を求めることがあります。ランチャーが
 cargo test --manifest-path native-host\Cargo.toml --all-targets
 ```
 
-実装の詳細は [アーキテクチャガイド](EXPERIMENTAL_ARCHITECTURE.md) と [プロトコル v4 仕様](PROTOCOL_V4.md) を参照してください。
+現在のソースブランチの実装は [アーキテクチャガイド](EXPERIMENTAL_ARCHITECTURE.md)、[プロトコル v5 仕様](PROTOCOL_V5.md)、[相互運用テストベクター](PROTOCOL_V5_TEST_VECTORS.md) を参照してください。[プロトコル v4 仕様](PROTOCOL_V4.md) は公開済み v0.4.1 と明示的なレガシー USB モードの移行資料です。
 
 ## ライセンス
 

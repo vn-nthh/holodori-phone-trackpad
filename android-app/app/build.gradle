@@ -4,7 +4,7 @@ plugins {
 
 def holodoriVersion = project.findProperty("holodoriVersionName") ?:
         rootProject.file("../VERSION").text.trim()
-def holodoriVersionCode = (project.findProperty("holodoriVersionCode") ?: "7") as int
+def holodoriVersionCode = (project.findProperty("holodoriVersionCode") ?: "26") as int
 
 android {
     namespace "dev.holodori.trackpad"
@@ -16,6 +16,7 @@ android {
         targetSdk 35
         versionCode holodoriVersionCode
         versionName holodoriVersion
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -30,5 +31,7 @@ android {
 
 dependencies {
     implementation "androidx.profileinstaller:profileinstaller:1.4.1"
+    implementation "org.signal.forks:noise-java:0.1.1"
     testImplementation "junit:junit:4.13.2"
+    androidTestImplementation "androidx.test:runner:1.6.2"
 }

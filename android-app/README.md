@@ -1,9 +1,16 @@
 # Android companion app
 
-This module is the phone side of Holodori Phone Trackpad. The experimental
-branch uses acknowledged protocol v4 over the phone's USB tethering/RNDIS
-network. Android's normal USB tethering feature provides the physical USB path;
-the app only needs ordinary network access.
+This module is the phone side of Holodori Phone Trackpad. It defaults to
+authenticated protocol v5 over an explicitly selected USB-tether or
+Wi-Fi/local-network path. First use compares an eight-step six-lane pattern and
+later sessions authenticate the remembered host with Noise IK. Protocol v4
+remains available only through the explicit legacy USB option.
+
+Android's normal USB tethering feature provides the physical USB path; neither
+transport needs USB debugging, root, a custom driver, location, SSID/BSSID
+access, or nearby-network scanning. See
+[`../PROTOCOL_V5.md`](../PROTOCOL_V5.md) and the
+[`../PROTOCOL_V5_TEST_VECTORS.md`](../PROTOCOL_V5_TEST_VECTORS.md) byte vectors.
 
 ## Build
 
@@ -18,22 +25,46 @@ the app only needs ordinary network access.
 4. Install `app/build/outputs/apk/debug/app-debug.apk` through a normal
    download/install flow. Installing the APK does not require USB debugging.
 
-## Connect
+## Pair and connect
 
-1. Open the app on the phone.
-2. Enable Settings > Network & internet > Hotspot & tethering > USB tethering.
-3. Connect one USB data cable to the Windows PC.
-4. Start the native host. The app discovers it on UDP port 42825 and begins
-   sending as soon as the Windows RNDIS adapter is ready.
+1. Choose the same **USB tethering** or **Wi-Fi / local network** transport on
+   the phone and host.
+2. For USB, connect one data cable and enable Android USB tethering. For Wi-Fi,
+   put the phone and PC on the same private subnet.
+3. Press **Pair** on the host and phone. Replicate the host's eight numbered
+   lanes on the phone, confirm **Pattern matched**, then approve locally on the
+   real host.
+4. Press **Start** on both sides with the intended transport. A fresh Noise IK
+   session authenticates before any touch can reach the OS input sink.
 
-Discovery deliberately excludes normal Wi-Fi, cellular, VPN, and upstream
-Ethernet networks. The app accepts an `HPTD` acknowledgement only from a
+Legacy-v4 discovery deliberately excludes normal Wi-Fi, cellular, VPN, and
+upstream Ethernet networks. It accepts an `HPTD` acknowledgement only from a
 selected USB-tether subnet, validates the advertised port, and pins the first
-host socket address for that session. Some OEMs expose tethering as `rndis`,
-`ncm`, `usb`, or an otherwise hidden `eth*` interface; the fallback remains
-conservative so a normal Android network is not selected.
+host socket address for that session. V5 instead confines discovery to the
+transport selected before Pair or Start; its Wi-Fi path must be a physical
+Wi-Fi `Network`, never cellular or a VPN.
 
-## Protocol v4 behavior
+## Protocol v5 behavior
+
+Every touch snapshot is carried by one HPT5 ChaCha20-Poly1305 datagram. Android
+sends two independently encrypted immediate copies; repair begins after 2 ms
+with a fresh packet number and nonce. The host reorders by logical sequence,
+submits each snapshot exactly once, and sends an authenticated cumulative ACK
+only after the OS sink accepts it. A 1,024-packet replay window rejects reused
+packet numbers without allowing a bad tag to consume a window position.
+
+Stationary holds use acknowledged 8 ms full-state heartbeats. A 64 ms pending
+boundary abandons the entire session, performs a fresh IK handshake and
+session-start `CANCEL`, then reconstructs only the latest still-held snapshot.
+Idle sessions exchange authenticated PING/PONG every 500 ms and expire after
+two seconds without a fresh response. Stop sends an authenticated abort before
+closing. Idle controls never extend a held-input or pending-frame watchdog.
+Wi-Fi pairing measures the authenticated path and reports band, signal, delay,
+loss, jitter, and deliberate 2 ms repair completion; the result warns but never
+changes the cryptographic pairing decision. Thumb mode transforms every
+historical and current sample into the same logical six-lane surface.
+
+## Legacy protocol v4 behavior
 
 Phone-to-host frames are variable-size `HPT4` records containing:
 
@@ -67,8 +98,18 @@ a stationary finger is restored in the fresh session without replaying stale
 transitions.
 
 Protocol v4 uses CRC for corruption detection, not authentication. Interface
-and subnet confinement are the current trust boundary; cryptographic pairing
-is deferred to a future wire version.
+and subnet confinement are its trust boundary, so it is USB-only and requires
+an explicit legacy selection.
 
 See [`../PROTOCOL_V4.md`](../PROTOCOL_V4.md) for the byte layout and
-acknowledgement semantics.
+acknowledgement semantics, and [`../PROTOCOL_V5.md`](../PROTOCOL_V5.md) for the
+default authenticated transport.
+
+The JVM tests exercise replay authentication, independent send/receive locks,
+and the production retained-frame scheduler, including burst fairness and the
+2 ms repair deadline. Run them with `./gradlew testDebugUnitTest`.
+`./gradlew connectedDebugAndroidTest` additionally verifies first-use identity
+creation, pairing persistence, reload, and Forget against Android's real
+Keystore. That test uses isolated preferences and a temporary key alias; it
+preserves the installed app's pairing. Its APK can be built without a device
+using `./gradlew assembleDebugAndroidTest`.

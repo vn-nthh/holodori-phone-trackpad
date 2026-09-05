@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Deref;
 
 pub const PROTOCOL_VERSION: u8 = 4;
 pub const FRAME_MAGIC: [u8; 4] = *b"HPT4";
@@ -31,9 +31,9 @@ pub const CONTROL_SIZE: usize = 40;
 pub const DISCOVERY_SIZE: usize = 32;
 pub const MAX_CONTACTS: usize = 16;
 pub const MAX_FRAME_SIZE: usize = FRAME_HEADER_SIZE + MAX_CONTACTS * CONTACT_SIZE + CRC_SIZE;
-const MAX_REORDERED_FRAMES: u64 = 256;
+pub const MAX_REORDERED_FRAMES: usize = 256;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Contact {
     pub pointer_id: u8,
     pub flags: u8,
@@ -41,6 +41,47 @@ pub struct Contact {
     pub y: f32,
     pub pressure: f32,
     pub touch_major: f32,
+}
+
+/// A complete snapshot has a protocol-defined maximum, so it never needs a heap allocation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Contacts {
+    items: [Contact; MAX_CONTACTS],
+    len: usize,
+}
+
+impl Contacts {
+    pub fn push(&mut self, contact: Contact) {
+        self.items[self.len] = contact;
+        self.len += 1;
+    }
+}
+
+impl Deref for Contacts {
+    type Target = [Contact];
+
+    fn deref(&self) -> &Self::Target {
+        &self.items[..self.len]
+    }
+}
+
+impl<'a> IntoIterator for &'a Contacts {
+    type Item = &'a Contact;
+    type IntoIter = std::slice::Iter<'a, Contact>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl FromIterator<Contact> for Contacts {
+    fn from_iter<T: IntoIterator<Item = Contact>>(iter: T) -> Self {
+        let mut contacts = Self::default();
+        for contact in iter {
+            contacts.push(contact);
+        }
+        contacts
+    }
 }
 
 impl Contact {
@@ -65,7 +106,7 @@ pub struct TouchFrame {
     pub action: u8,
     pub action_pointer_id: u8,
     pub flags: u8,
-    pub contacts: Vec<Contact>,
+    pub contacts: Contacts,
 }
 
 impl TouchFrame {
@@ -136,87 +177,15 @@ impl std::error::Error for ProtocolError {}
 
 #[derive(Default)]
 pub struct FrameParser {
-    buffer: Vec<u8>,
     pub discarded_bytes: u64,
     pub connection_discarded_bytes: u64,
     pub invalid_frames: u64,
     incompatible_version: Option<u8>,
-    seeking_connection_start: bool,
 }
 
 impl FrameParser {
     pub fn begin_connection(&mut self) {
-        self.connection_discarded_bytes += self.buffer.len() as u64;
-        self.buffer.clear();
         self.incompatible_version = None;
-        self.seeking_connection_start = true;
-    }
-
-    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Result<TouchFrame, ProtocolError>> {
-        self.buffer.extend_from_slice(bytes);
-        if self.incompatible_version.is_none() {
-            self.incompatible_version = self.buffer.windows(5).find_map(|window| {
-                (window[..3] == *b"HPT"
-                    && window[3].is_ascii_digit()
-                    && window[4] != PROTOCOL_VERSION)
-                    .then_some(window[4])
-            });
-        }
-        let mut frames = Vec::new();
-
-        loop {
-            if self.buffer.len() < FRAME_HEADER_SIZE {
-                break;
-            }
-            if self.buffer[..4] != FRAME_MAGIC {
-                let offset = self.buffer[1..]
-                    .windows(FRAME_MAGIC.len())
-                    .position(|window| window == FRAME_MAGIC)
-                    .map(|position| position + 1);
-                match offset {
-                    Some(offset) => {
-                        self.record_discard(offset);
-                        self.buffer.drain(..offset);
-                    }
-                    None => {
-                        let retained = FRAME_MAGIC.len() - 1;
-                        let discarded = self.buffer.len().saturating_sub(retained);
-                        self.record_discard(discarded);
-                        self.buffer.drain(..discarded);
-                        break;
-                    }
-                }
-                continue;
-            }
-
-            let length = u16::from_le_bytes([self.buffer[6], self.buffer[7]]) as usize;
-            if !(FRAME_HEADER_SIZE + CRC_SIZE..=MAX_FRAME_SIZE).contains(&length) {
-                self.invalid_frames += 1;
-                frames.push(Err(ProtocolError::BadLength(length)));
-                self.buffer.drain(..1);
-                continue;
-            }
-            if self.buffer.len() < length {
-                break;
-            }
-            let candidate: Vec<u8> = self.buffer.drain(..length).collect();
-            let result = decode_frame(&candidate);
-            if result.is_err() {
-                self.invalid_frames += 1;
-            } else {
-                self.seeking_connection_start = false;
-            }
-            frames.push(result);
-        }
-
-        frames
-    }
-
-    /// Parse one complete UDP datagram without allowing a malformed packet to
-    /// contaminate the next datagram. Stream-oriented callers continue to use
-    /// the `feed` method above.
-    pub fn feed_datagram(&mut self, bytes: &[u8]) -> Vec<Result<TouchFrame, ProtocolError>> {
-        vec![self.decode_datagram(bytes)]
     }
 
     /// Decode one UDP datagram without allocating a stream-parser result
@@ -231,22 +200,12 @@ impl FrameParser {
         let result = decode_frame(bytes);
         if result.is_err() {
             self.invalid_frames += 1;
-        } else {
-            self.seeking_connection_start = false;
         }
         result
     }
 
     pub fn take_incompatible_version(&mut self) -> Option<u8> {
         self.incompatible_version.take()
-    }
-
-    fn record_discard(&mut self, count: usize) {
-        if self.seeking_connection_start {
-            self.connection_discarded_bytes += count as u64;
-        } else {
-            self.discarded_bytes += count as u64;
-        }
     }
 }
 
@@ -292,7 +251,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<TouchFrame, ProtocolError> {
         return Err(ProtocolError::BadLength(bytes.len()));
     }
 
-    let mut contacts = Vec::with_capacity(contact_count);
+    let mut contacts = Contacts::default();
     let mut pointer_ids = [false; u8::MAX as usize + 1];
     for index in 0..contact_count {
         let offset = FRAME_HEADER_SIZE + index * CONTACT_SIZE;
@@ -385,7 +344,7 @@ pub fn decode_discovery(bytes: &[u8]) -> Option<DiscoveryMessage> {
 pub struct OrderedFrames {
     session_id: Option<u64>,
     next_sequence: u64,
-    buffered: BTreeMap<u64, TouchFrame>,
+    buffered: Box<[Option<TouchFrame>]>,
     requires_session_start: bool,
 }
 
@@ -394,7 +353,7 @@ impl OrderedFrames {
         Self {
             session_id: None,
             next_sequence: 0,
-            buffered: BTreeMap::new(),
+            buffered: vec![None; MAX_REORDERED_FRAMES].into_boxed_slice(),
             requires_session_start: false,
         }
     }
@@ -402,7 +361,7 @@ impl OrderedFrames {
     pub fn begin_session(&mut self, frame: &TouchFrame) {
         self.session_id = Some(frame.session_id);
         self.next_sequence = frame.sequence;
-        self.buffered.clear();
+        self.buffered.fill(None);
         self.requires_session_start = false;
     }
 
@@ -412,7 +371,7 @@ impl OrderedFrames {
     pub fn require_fresh_session(&mut self) {
         self.session_id = None;
         self.next_sequence = 0;
-        self.buffered.clear();
+        self.buffered.fill(None);
         self.requires_session_start = true;
     }
 
@@ -429,7 +388,9 @@ impl OrderedFrames {
     }
 
     pub fn contains_sequence(&self, sequence: u64) -> bool {
-        self.buffered.contains_key(&sequence)
+        self.buffered[sequence as usize % MAX_REORDERED_FRAMES]
+            .as_ref()
+            .is_some_and(|frame| frame.sequence == sequence)
     }
 
     pub fn push(&mut self, frame: TouchFrame) {
@@ -451,20 +412,28 @@ impl OrderedFrames {
         if frame.sequence < self.next_sequence {
             return;
         }
-        if frame.sequence - self.next_sequence >= MAX_REORDERED_FRAMES {
+        if frame.sequence - self.next_sequence >= MAX_REORDERED_FRAMES as u64 {
             return;
         }
-        self.buffered.entry(frame.sequence).or_insert(frame);
+        let slot = &mut self.buffered[frame.sequence as usize % MAX_REORDERED_FRAMES];
+        if slot.is_none() {
+            *slot = Some(frame);
+        }
     }
 
     pub fn next_ready(&self) -> Option<&TouchFrame> {
-        self.buffered.get(&self.next_sequence)
+        self.buffered[self.next_sequence as usize % MAX_REORDERED_FRAMES]
+            .as_ref()
+            .filter(|frame| frame.sequence == self.next_sequence)
     }
 
     /// Commit only after the OS sink accepted this exact frame. This is the
     /// durability boundary used for the cumulative ACK sent to Android.
     pub fn commit_ready(&mut self) -> bool {
-        if self.buffered.remove(&self.next_sequence).is_none() {
+        if self.buffered[self.next_sequence as usize % MAX_REORDERED_FRAMES]
+            .take()
+            .is_none()
+        {
             return false;
         }
         self.next_sequence = self.next_sequence.wrapping_add(1);
@@ -564,38 +533,10 @@ mod tests {
     }
 
     #[test]
-    fn parser_handles_fragmentation_noise_and_concatenation() {
-        let first = packet(8, 0, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0);
-        let second = packet(8, 1, ACTION_DOWN, FRAME_FLAG_LOCKED, 5_000);
+    fn parser_identifies_an_incompatible_wire_version() {
         let mut parser = FrameParser::default();
-        assert!(parser.feed(b"xy").is_empty());
-        assert!(parser.feed(&first[..17]).is_empty());
-        let mut tail = first[17..].to_vec();
-        tail.extend_from_slice(&second);
-        let decoded = parser.feed(&tail);
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].as_ref().unwrap().sequence, 0);
-        assert_eq!(decoded[1].as_ref().unwrap().sequence, 1);
-        assert_eq!(parser.discarded_bytes, 2);
-    }
-
-    #[test]
-    fn parser_identifies_an_old_wire_version() {
-        let mut parser = FrameParser::default();
-        assert!(parser.feed(b"HPT3\x03").is_empty());
-        assert_eq!(parser.take_incompatible_version(), Some(3));
-    }
-
-    #[test]
-    fn connection_start_resync_is_separate_from_stream_discard() {
-        let bytes = packet(8, 0, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0);
-        let mut parser = FrameParser::default();
-        parser.begin_connection();
-        let mut stream = b"old-tail".to_vec();
-        stream.extend(bytes);
-        assert_eq!(parser.feed(&stream).len(), 1);
-        assert_eq!(parser.connection_discarded_bytes, 8);
-        assert_eq!(parser.discarded_bytes, 0);
+        assert!(parser.decode_datagram(b"HPT4\x05").is_err());
+        assert_eq!(parser.take_incompatible_version(), Some(5));
     }
 
     #[test]
@@ -671,7 +612,7 @@ mod tests {
             decode_frame(&packet(5, 0, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0)).unwrap();
         let too_far = decode_frame(&packet(
             5,
-            MAX_REORDERED_FRAMES + 1,
+            MAX_REORDERED_FRAMES as u64 + 1,
             ACTION_MOVE,
             FRAME_FLAG_LOCKED,
             4_000,
@@ -681,8 +622,39 @@ mod tests {
         ordered.push(start);
         assert!(ordered.commit_ready());
         ordered.push(too_far);
-        assert!(ordered.buffered.is_empty());
+        assert!(ordered.buffered.iter().all(Option::is_none));
         assert_eq!(ordered.expected_sequence(), 1);
+    }
+
+    #[test]
+    fn reordered_bursts_survive_ring_reuse_without_overwriting_a_gap() {
+        let mut ordered = OrderedFrames::new();
+        ordered
+            .push(decode_frame(&packet(5, 0, ACTION_CANCEL, FRAME_FLAG_SESSION_START, 0)).unwrap());
+        assert!(ordered.commit_ready());
+        for round in 0..8 {
+            let first = 1 + round * MAX_REORDERED_FRAMES as u64;
+            let end = first + MAX_REORDERED_FRAMES as u64;
+            for sequence in (first + 1..end).rev() {
+                ordered.push(
+                    decode_frame(&packet(5, sequence, ACTION_MOVE, FRAME_FLAG_LOCKED, 4_000))
+                        .unwrap(),
+                );
+            }
+            ordered.push(
+                decode_frame(&packet(5, end, ACTION_MOVE, FRAME_FLAG_LOCKED, 4_000)).unwrap(),
+            );
+            assert!(ordered.next_ready().is_none());
+            ordered.push(
+                decode_frame(&packet(5, first, ACTION_MOVE, FRAME_FLAG_LOCKED, 4_000)).unwrap(),
+            );
+            for sequence in first..end {
+                assert_eq!(ordered.next_ready().unwrap().sequence, sequence);
+                assert!(ordered.commit_ready());
+            }
+            assert_eq!(ordered.acknowledged_sequence(), Some(end - 1));
+            assert!(ordered.next_ready().is_none());
+        }
     }
 
     #[test]

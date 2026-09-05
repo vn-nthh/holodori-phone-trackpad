@@ -51,6 +51,89 @@ h1 {
   font-weight: 600;
 }
 
+.transport-field {
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.transport-field legend {
+  width: 100%;
+  margin-bottom: 7px;
+}
+
+.transport-choice {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: oklch(76% 0 0);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.transport-choice:has(input:checked) {
+  border-color: var(--focus);
+  color: var(--text);
+}
+
+.transport-choice input { accent-color: var(--focus); }
+
+.pairing {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.pairing-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.paired-state {
+  color: oklch(58% 0 0);
+  font-size: 12px;
+}
+
+.paired-state[data-paired="true"] { color: oklch(78% 0.12 150); }
+
+.pair-pattern {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.pair-pattern span {
+  display: grid;
+  min-height: 31px;
+  place-items: center;
+  border: 1px solid var(--border-hover);
+  border-radius: 6px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.quality {
+  margin: 0;
+  color: oklch(66% 0 0);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.pair-actions { display: flex; gap: 6px; }
+.pair-actions button { min-height: 34px; padding: 6px 8px; font-size: 12px; }
+
 .key-slots {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));

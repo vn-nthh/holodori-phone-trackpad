@@ -107,13 +107,17 @@ can show it.
 ## Start a play session
 
 1. Unpack the Linux bundle.
-2. Install `Android/HolodoriUsbTetheredUdp-v4.apk` on the phone if the bundle
+2. Install `Android/Doritrack-v5.apk` on the phone if the bundle
    includes it. Otherwise use the separately supplied Android APK.
-3. Connect the phone with a USB data cable and enable USB tethering.
-4. Run `./HolodoriUsbController` from the bundle directory.
-5. Choose the lane keys and any network or report options.
-6. Press **Start**, then open the Android app.
-7. Arrange and lock the phone play area.
+3. Run `./HolodoriUsbController` from the bundle directory and open the phone
+   app.
+4. Choose the same **USB tethering** or **Wi-Fi / local network** transport on
+   both. For USB, connect the cable and enable tethering; for Wi-Fi, use one
+   private local subnet.
+5. Press **Pair** on both sides, replicate the eight host lanes on the phone,
+   and approve on the host only while the real phone says **Pattern matched**.
+6. Choose the lane keys and report options, then press **Start** on both sides.
+7. Arrange and lock the phone play area; thumb mode is optional.
 8. Press **Stop** in the controller when finished.
 
 No phone root access, custom kernel driver, or controller elevation is required.
@@ -179,14 +183,16 @@ profile by itself.
 
 ## Supported tether and pairing limits
 
-Protocol v4 does not cryptographically pair the phone and PC. To reduce the
-untrusted surface, the Linux host accepts only Android tether interfaces backed
-by the kernel's `rndis_host` driver. Generic USB Ethernet and NCM adapters are
-rejected. Broader authenticated device support is deferred to protocol v5.
+Protocol v5 authenticates the paired phone before any frame can reach Linux
+`uinput`. Its USB listener still accepts only Android tether interfaces backed
+by the kernel's `rndis_host` driver; generic USB Ethernet and NCM adapters are
+rejected. Wi-Fi/local-network mode is separately selected, confines the socket
+to one unambiguous private interface, and never accepts protocol-v4 gameplay.
 
-Treat the accepted USB network as trusted. Any device that can reach UDP port
-42825 from that tether network could impersonate the phone and inject lane
-keys. Keep the firewall rule limited to the USB-tether interface.
+The explicit legacy-v4 option has no cryptographic pairing. When using it,
+treat the accepted USB network as trusted: another device able to reach UDP
+port 42825 from that tether network could impersonate the phone and inject lane
+keys. Keep any legacy firewall rule limited to the USB-tether interface.
 
 ## Latency reports
 
@@ -251,3 +257,5 @@ also turn the option off, but the PC may then use the phone for internet access.
 
 - [Experimental architecture](EXPERIMENTAL_ARCHITECTURE.md)
 - [Protocol v4 specification](PROTOCOL_V4.md)
+- [Protocol v5 specification](PROTOCOL_V5.md)
+- [Protocol v5 interoperability vectors](PROTOCOL_V5_TEST_VECTORS.md)
