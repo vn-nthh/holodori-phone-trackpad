@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "holodori-usb-controller"
-version = "0.5.0-alpha2"
+version = "0.5.0-alpha3"
 dependencies = [
  "dbus",
  "holodori-native-host",

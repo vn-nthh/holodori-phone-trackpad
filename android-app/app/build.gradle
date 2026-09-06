@@ -4,7 +4,7 @@ plugins {
 
 def holodoriVersion = project.findProperty("holodoriVersionName") ?:
         rootProject.file("../VERSION").text.trim()
-def holodoriVersionCode = (project.findProperty("holodoriVersionCode") ?: "27") as int
+def holodoriVersionCode = (project.findProperty("holodoriVersionCode") ?: "28") as int
 
 android {
     namespace "dev.holodori.trackpad"

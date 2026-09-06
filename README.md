@@ -16,7 +16,7 @@ into lane keys. The default keys are `S D F J K L`.
 
 The stable version is **v0.4.1**.
 
-**Experimental protocol V5:** [v0.5.0-alpha2](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha2)
+**Experimental protocol V5:** [v0.5.0-alpha3](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha3)
 adds authenticated USB/Wi-Fi sessions, pairing, thumb mode, and the latency
 fixes documented in [LATENCY_VALIDATION.md](LATENCY_VALIDATION.md).
 Install the phone and host from the same experimental release.

@@ -995,13 +995,18 @@ fn bind_socket(
     port: u16,
 ) -> Result<(UdpSocket, ListenerInterface), HostV5Error> {
     let listener = select_listener_interface(transport)?;
+    let socket = bind_listener_socket(&listener, port)?;
+    Ok((socket, listener))
+}
+
+fn bind_listener_socket(listener: &ListenerInterface, port: u16) -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))?;
-    confine_socket(&socket, &listener)?;
+    confine_socket(&socket, listener)?;
     enable_receive_interface(&socket)?;
     socket.set_broadcast(true)?;
     socket.set_read_timeout(Some(DISCOVERY_SLICE))?;
     socket.set_write_timeout(Some(WRITE_TIMEOUT))?;
-    Ok((socket, listener))
+    Ok(socket)
 }
 
 fn select_listener_interface(transport: TransportKind) -> Result<ListenerInterface, HostV5Error> {
@@ -1084,8 +1089,9 @@ fn valid_listener_subnet(local: Ipv4Addr, netmask: Ipv4Addr) -> bool {
 
 #[cfg(windows)]
 fn confine_socket(socket: &UdpSocket, listener: &ListenerInterface) -> io::Result<()> {
-    set_windows_ip_option(socket, IP_ADD_IFLIST, listener.index)?;
+    // Windows rejects IP_ADD_IFLIST until the socket's interface list is enabled.
     set_windows_ip_option(socket, IP_IFLIST, 1)?;
+    set_windows_ip_option(socket, IP_ADD_IFLIST, listener.index)?;
     set_windows_ip_option(socket, IP_UNICAST_IF, listener.index.to_be())
 }
 
@@ -1749,6 +1755,33 @@ impl From<credentials::CredentialError> for HostV5Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_listener_socket_options_are_accepted() {
+        let interface = get_if_addrs()
+            .unwrap()
+            .into_iter()
+            .find(|interface| interface.ip() == Ipv4Addr::LOCALHOST && interface.index.is_some())
+            .expect("Windows IPv4 loopback interface");
+        let listener = ListenerInterface {
+            local: Ipv4Addr::LOCALHOST,
+            index: interface.index.unwrap(),
+            name: interface.name,
+        };
+        let socket = bind_listener_socket(&listener, 0).unwrap();
+        let peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        peer.send_to(
+            b"probe",
+            (listener.local, socket.local_addr().unwrap().port()),
+        )
+        .unwrap();
+        let mut buffer = [0; 32];
+        let (count, source, ingress) = receive_datagram(&socket, &mut buffer).unwrap();
+        assert_eq!(&buffer[..count], b"probe");
+        assert_eq!(source, peer.local_addr().unwrap());
+        assert!(listener_accepts_ingress(&listener, ingress));
+    }
 
     fn sequence(start: u8) -> [u8; 32] {
         std::array::from_fn(|index| start.wrapping_add(index as u8))

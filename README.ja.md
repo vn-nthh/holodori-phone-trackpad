@@ -12,7 +12,7 @@ Android スマホを、Windows 上の [hololive Dreams (holodori)](https://store
 
 安定版は **v0.4.1** です。
 
-**プロトコル V5 の実験版:** [v0.5.0-alpha2](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha2)。
+**プロトコル V5 の実験版:** [v0.5.0-alpha3](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha3)。
 認証付き USB/Wi-Fi 接続、ペアリング、親指モード、遅延の改善を含みます。
 スマホと PC には、同じ実験版リリースのアプリをインストールしてください。
 
