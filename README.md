@@ -16,7 +16,7 @@ into lane keys. The default keys are `S D F J K L`.
 
 The stable version is **v0.4.1**.
 
-**Experimental protocol V5:** [v0.5.0-alpha1](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha1)
+**Experimental protocol V5:** [v0.5.0-alpha2](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha2)
 adds authenticated USB/Wi-Fi sessions, pairing, thumb mode, and the latency
 fixes documented in [LATENCY_VALIDATION.md](LATENCY_VALIDATION.md).
 Install the phone and host from the same experimental release.
@@ -119,6 +119,12 @@ phone-to-PC link.
 Windows may ask for administrator access. Use **Restart as admin** when the
 launcher offers it. The app restores the setting when you stop. If the app was
 interrupted, open it again and follow the recovery message before playing.
+
+If the phone is disconnected, Windows route cleanup stays pending while the
+launcher remains usable. Reconnect the phone, enable **USB tethering**, then
+click **Pair** or **Start** to retry recovery. The app keeps the saved settings
+until it can restore the same adapter safely; pending cleanup for an absent
+adapter does not block local-network mode.
 
 On Linux, your desktop may ask for permission to change this network setting.
 The app checks the result before it lets a protected session start. See the

@@ -43,6 +43,10 @@ h1 {
 
 .settings { display: grid; gap: 13px; }
 
+.settings:has(input[name="transport"][value="wifi"]:checked) .usb-only {
+  display: none;
+}
+
 .field { display: grid; gap: 7px; }
 
 .field-label {

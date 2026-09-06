@@ -81,6 +81,7 @@ function setRunning(running) {
   const linuxProfileUnavailable =
     elevationModel === "network-manager" && !linuxTetherPolicy?.available;
   const linuxPolicyUnresolved =
+    !wifi &&
     elevationModel === "network-manager" &&
     networkManagerPolicyUnresolved(linuxTetherPolicy, linuxTetherRequested);
   localOnlyTetherInput.disabled =
@@ -96,9 +97,9 @@ function setRunning(running) {
   forgetDeviceButton.disabled = running || !paired;
   startButton.disabled =
     running ||
-    (!paired && !legacyV4Input.checked) ||
+    (!paired && (wifi || !legacyV4Input.checked)) ||
     recoveryNeedsAdmin ||
-    tetherPolicyBusy ||
+    (!wifi && tetherPolicyBusy) ||
     linuxPolicyUnresolved ||
     elevationModel === undefined;
   stopButton.disabled = !running;
@@ -355,7 +356,9 @@ async function refreshStatus() {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (tetherPolicyBusy) {
+  const transport = selectedTransport();
+  const usb = transport === "usb";
+  if (usb && tetherPolicyBusy) {
     setStatus("Wait for the NetworkManager update to finish.", "error");
     return;
   }
@@ -364,7 +367,7 @@ form.addEventListener("submit", async (event) => {
     restartAsAdminButton.focus();
     return;
   }
-  if (!paired && !legacyV4Input.checked) {
+  if (!paired && !(usb && legacyV4Input.checked)) {
     setStatus("Pair the host and phone before starting protocol v5.", "error");
     pairButton.focus();
     return;
@@ -372,6 +375,7 @@ form.addEventListener("submit", async (event) => {
 
   if (elevationModel === undefined) await initElevation();
   if (
+    usb &&
     elevationModel === "network-manager" &&
     networkManagerPolicyUnresolved(linuxTetherPolicy, linuxTetherRequested)
   ) {
@@ -389,6 +393,7 @@ form.addEventListener("submit", async (event) => {
   const localOnlyTether = localOnlyTetherSelection(
     elevationModel,
     elevationModel === "network-manager" ? linuxTetherRequested : localOnlyTetherInput.checked,
+    transport,
   );
 
   if (localOnlyTether && elevationModel === "launcher") {
@@ -415,8 +420,8 @@ form.addEventListener("submit", async (event) => {
       keys,
       metrics: metricsInput.checked,
       localOnlyTether: localOnlyTether,
-      transport: selectedTransport(),
-      legacyV4: legacyV4Input.checked,
+      transport,
+      legacyV4: usb && legacyV4Input.checked,
     });
     applyHostStatus(result);
   } catch (error) {

@@ -205,6 +205,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             RecoveryOutcome::Restored { snapshots } => {
                 println!("Recovered {snapshots} orphaned USB-tether route settings.");
             }
+            RecoveryOutcome::Deferred { restored, pending } => {
+                println!(
+                    "Recovered {restored} USB-tether route settings; {pending} remain pending until the captured adapter reconnects."
+                );
+            }
             RecoveryOutcome::OwnerStillRunning => {
                 return Err("another local-only tether policy owner is still running".into());
             }

@@ -2,8 +2,8 @@ export function localOnlyTetherSupported(elevationModel) {
   return elevationModel === "launcher" || elevationModel === "network-manager";
 }
 
-export function localOnlyTetherSelection(elevationModel, checked) {
-  return localOnlyTetherSupported(elevationModel) && Boolean(checked);
+export function localOnlyTetherSelection(elevationModel, checked, transport = "usb") {
+  return transport === "usb" && localOnlyTetherSupported(elevationModel) && Boolean(checked);
 }
 
 export function networkManagerCheckboxState(policy, requested = false) {

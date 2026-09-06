@@ -756,12 +756,31 @@ fn parse_status_token(line: &str) -> Option<HostPhase> {
 
 #[cfg(windows)]
 fn ensure_route_recovery(state: &mut HostState) -> Result<(), String> {
-    match recover_orphaned_policy() {
+    apply_route_recovery(state, recover_orphaned_policy())
+}
+
+#[cfg(windows)]
+fn apply_route_recovery(
+    state: &mut HostState,
+    outcome: std::io::Result<RecoveryOutcome>,
+) -> Result<(), String> {
+    match outcome {
         Ok(RecoveryOutcome::NothingToDo | RecoveryOutcome::Restored { .. }) => {
             state.recovery_needs_admin = false;
             if state.phase == HostPhase::RecoveryNeedsAdmin {
                 state.phase = HostPhase::Ready;
                 state.message.clear();
+            }
+            Ok(())
+        }
+        Ok(RecoveryOutcome::Deferred { .. }) => {
+            state.recovery_needs_admin = false;
+            if state.phase == HostPhase::RecoveryNeedsAdmin {
+                state.phase = HostPhase::Ready;
+            }
+            if state.phase == HostPhase::Ready {
+                state.message = "Ready. USB route cleanup is pending. Reconnect the phone, enable USB tethering, then Pair or Start to retry."
+                    .to_owned();
             }
             Ok(())
         }
@@ -1130,5 +1149,43 @@ mod tests {
             user_facing_native_error("route restore failed".to_owned()),
             "route restore failed",
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absent_tether_allows_startup_without_hiding_other_failures() {
+        use super::{apply_route_recovery, HostState, RecoveryOutcome};
+
+        let deferred = RecoveryOutcome::Deferred {
+            restored: 0,
+            pending: 2,
+        };
+        for phase in [HostPhase::Ready, HostPhase::RecoveryNeedsAdmin] {
+            let mut state = HostState {
+                phase,
+                recovery_needs_admin: phase == HostPhase::RecoveryNeedsAdmin,
+                ..Default::default()
+            };
+            apply_route_recovery(&mut state, Ok(deferred)).unwrap();
+            assert_eq!(state.phase, HostPhase::Ready);
+            assert!(!state.recovery_needs_admin);
+            assert!(state.message.contains("cleanup is pending"));
+        }
+
+        let mut state = HostState {
+            phase: HostPhase::Fatal,
+            message: "input sink failed".to_owned(),
+            ..Default::default()
+        };
+        apply_route_recovery(&mut state, Ok(deferred)).unwrap();
+        assert_eq!(state.phase, HostPhase::Fatal);
+        assert_eq!(state.message, "input sink failed");
+
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "restore denied");
+        assert!(apply_route_recovery(&mut state, Err(error)).is_err());
+        assert_eq!(state.phase, HostPhase::RecoveryNeedsAdmin);
+        assert!(state.recovery_needs_admin);
+        assert!(apply_route_recovery(&mut state, Ok(RecoveryOutcome::OwnerStillRunning)).is_err());
+        assert_eq!(state.phase, HostPhase::Fatal);
     }
 }

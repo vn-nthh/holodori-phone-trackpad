@@ -98,6 +98,14 @@ struct PersistedPolicy {
 pub enum RecoveryOutcome {
     NothingToDo,
     Restored { snapshots: usize },
+    Deferred { restored: usize, pending: usize },
+    OwnerStillRunning,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PolicyRecovery {
+    Restored,
+    Deferred,
     OwnerStillRunning,
 }
 
@@ -271,7 +279,9 @@ pub struct TetherRoutePolicy {
 impl TetherRoutePolicy {
     pub fn new() -> io::Result<Self> {
         match recover_orphaned_policy()? {
-            RecoveryOutcome::NothingToDo | RecoveryOutcome::Restored { .. } => Ok(Self {
+            RecoveryOutcome::NothingToDo
+            | RecoveryOutcome::Restored { .. }
+            | RecoveryOutcome::Deferred { .. } => Ok(Self {
                 snapshots: Vec::new(),
             }),
             RecoveryOutcome::OwnerStillRunning => Err(io::Error::new(
@@ -401,6 +411,30 @@ fn capture_family(
 ) -> io::Result<Option<InterfaceSnapshot>> {
     let adapter = require_binding_adapter(binding)?;
     let interface_index = binding.interface_index;
+    // The phone can reconnect after startup recovery was deferred. Finish its
+    // old transaction before capturing flags that may still be policy-owned.
+    let policies = persisted_policies()?
+        .into_iter()
+        .filter(|(_, policy)| {
+            policy.family == family && same_adapter_instance(&policy.adapter, &adapter)
+        })
+        .collect();
+    match recover_policies(policies, recover_policy, remove_policy_value)? {
+        RecoveryOutcome::NothingToDo | RecoveryOutcome::Restored { .. } => {}
+        RecoveryOutcome::Deferred { .. } => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the tether adapter disconnected during recovery; reconnect it before enabling local-only tethering",
+            ));
+        }
+        RecoveryOutcome::OwnerStillRunning => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "another tether route policy owner is still running",
+            ));
+        }
+    }
+    require_binding_adapter(binding)?;
     let Some(interface) = interface_row_for_adapter(&adapter, family)? else {
         return Ok(None);
     };
@@ -1230,25 +1264,36 @@ fn win32_error(operation: &str, result: u32) -> io::Error {
 }
 
 pub fn recover_orphaned_policy() -> io::Result<RecoveryOutcome> {
-    let policies = persisted_policies()?;
+    recover_policies(persisted_policies()?, recover_policy, remove_policy_value)
+}
+
+fn recover_policies(
+    policies: Vec<(String, PersistedPolicy)>,
+    mut recover: impl FnMut(&PersistedPolicy) -> io::Result<PolicyRecovery>,
+    mut remove: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<RecoveryOutcome> {
     if policies.is_empty() {
         return Ok(RecoveryOutcome::NothingToDo);
     }
 
     let mut restored = 0;
+    let mut pending = 0;
     let mut owner_running = false;
     for (name, policy) in policies {
-        if process_owner_is_running(&policy.owner)? {
-            owner_running = true;
-            continue;
+        match recover(&policy)? {
+            PolicyRecovery::Deferred => pending += 1,
+            PolicyRecovery::OwnerStillRunning => owner_running = true,
+            PolicyRecovery::Restored => {
+                remove(&name)?;
+                restored += 1;
+            }
         }
-        recover_policy(&policy)?;
-        remove_policy_value(&name)?;
-        restored += 1;
     }
 
     if owner_running {
         Ok(RecoveryOutcome::OwnerStillRunning)
+    } else if pending > 0 {
+        Ok(RecoveryOutcome::Deferred { restored, pending })
     } else if restored > 0 {
         Ok(RecoveryOutcome::Restored {
             snapshots: restored,
@@ -1258,15 +1303,13 @@ pub fn recover_orphaned_policy() -> io::Result<RecoveryOutcome> {
     }
 }
 
-fn recover_policy(policy: &PersistedPolicy) -> io::Result<()> {
+/// Defer an absent adapter/family before probing its old owner. Its PID may
+/// now belong to an inaccessible system process, which is no reason to block
+/// startup while there is no adapter to restore. Present adapters still
+/// require a confirmed dead owner before any mutation.
+fn recover_policy(policy: &PersistedPolicy) -> io::Result<PolicyRecovery> {
     let Some((adapter, gateways)) = adapter_details_for_identity(&policy.adapter)? else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "captured tether adapter {} is absent; reconnect it to finish route recovery",
-                policy.adapter.interface_index,
-            ),
-        ));
+        return Ok(PolicyRecovery::Deferred);
     };
     // Recovery is bound to the durable GUID/LUID/MAC identity, not today's
     // display-name heuristic. Otherwise tightening adapter selection could
@@ -1274,14 +1317,11 @@ fn recover_policy(policy: &PersistedPolicy) -> io::Result<()> {
     // unrestored. Only new mutations must pass `is_tether_adapter`.
     let family = policy.family as ADDRESS_FAMILY;
     let Some(_interface) = interface_row_for_adapter(&adapter, family)? else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "captured tether interface {} has no address-family row; reconnect it to finish route recovery",
-                adapter.interface_index,
-            ),
-        ));
+        return Ok(PolicyRecovery::Deferred);
     };
+    if process_owner_is_running(&policy.owner)? {
+        return Ok(PolicyRecovery::OwnerStillRunning);
+    }
     let current_routes = default_routes_for_adapter(&adapter, family)?;
     let original_rows = policy
         .routes
@@ -1330,7 +1370,7 @@ fn recover_policy(policy: &PersistedPolicy) -> io::Result<()> {
     }
 
     restore_owned_interface_flag(&adapter, family, policy.original_disable_default_routes)?;
-    Ok(())
+    Ok(PolicyRecovery::Restored)
 }
 
 fn same_adapter_instance(expected: &AdapterIdentity, actual: &AdapterIdentity) -> bool {
@@ -1660,7 +1700,6 @@ fn process_owner_is_running(owner: &ProcessOwner) -> io::Result<bool> {
         let error = io::Error::last_os_error();
         return match error.raw_os_error().map(|value| value as u32) {
             Some(ERROR_INVALID_PARAMETER) | Some(ERROR_NOT_FOUND) => Ok(false),
-            Some(ERROR_ACCESS_DENIED) => Ok(true),
             _ => Err(error),
         };
     }
@@ -1937,12 +1976,13 @@ unsafe fn ansi_string(pointer: windows_sys::core::PSTR) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterIdentity, IPV4, IPV6, PersistedPolicy, PersistedRoute, ProcessOwner, TetherBinding,
-        TetherPrefix, TetherSnapshot, captured_gateway_is_available, decode_policy, encode_policy,
+        AdapterIdentity, IPV4, IPV6, PersistedPolicy, PersistedRoute, PolicyRecovery, ProcessOwner,
+        RecoveryOutcome, TetherBinding, TetherPrefix, TetherSnapshot,
+        captured_gateway_is_available, current_process_owner, decode_policy, encode_policy,
         interface_identity_matches, is_tether_adapter, missing_original_indices,
-        prepare_interface_row_for_set, restore_route_row, rollback_suffix, same_adapter_instance,
-        same_multiset, same_prefix, should_restore_owned_flag, sockaddr_inet_ip,
-        valid_tether_prefix,
+        prepare_interface_row_for_set, recover_policies, recover_policy, restore_route_row,
+        rollback_suffix, same_adapter_instance, same_multiset, same_prefix,
+        should_restore_owned_flag, sockaddr_inet_ip, valid_tether_prefix,
     };
     use std::io;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -2148,6 +2188,120 @@ mod tests {
             decode_policy(&corrupted, "test").unwrap_err().kind(),
             std::io::ErrorKind::InvalidData,
         );
+    }
+
+    #[test]
+    fn disconnected_recovery_retains_its_journal_and_continues_other_recovery() {
+        let disconnected = sample_policy();
+        let mut connected = sample_policy();
+        connected.adapter.luid += 1;
+        let mut removed = Vec::new();
+        let outcome = recover_policies(
+            vec![
+                ("disconnected".to_owned(), disconnected.clone()),
+                ("connected".to_owned(), connected),
+            ],
+            |policy| {
+                Ok(if policy.adapter.luid == disconnected.adapter.luid {
+                    PolicyRecovery::Deferred
+                } else {
+                    PolicyRecovery::Restored
+                })
+            },
+            |name| {
+                removed.push(name.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            RecoveryOutcome::Deferred {
+                restored: 1,
+                pending: 1
+            }
+        );
+        assert_eq!(removed, ["connected"]);
+
+        let outcome = recover_policies(
+            vec![("disconnected".to_owned(), disconnected)],
+            |_| Ok(PolicyRecovery::Restored),
+            |name| {
+                removed.push(name.to_owned());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, RecoveryOutcome::Restored { snapshots: 1 });
+        assert_eq!(removed, ["connected", "disconnected"]);
+    }
+
+    #[test]
+    fn absent_adapter_is_deferred_even_when_the_recorded_owner_is_alive() {
+        let mut policy = sample_policy();
+        policy.owner = current_process_owner().unwrap();
+        assert_eq!(recover_policy(&policy).unwrap(), PolicyRecovery::Deferred);
+    }
+
+    #[test]
+    fn deferred_recovery_does_not_hide_a_live_owner_or_restoration_errors() {
+        let mut live = sample_policy();
+        live.owner.pid += 1;
+        let outcome = recover_policies(
+            vec![
+                ("disconnected".to_owned(), sample_policy()),
+                ("live".to_owned(), live.clone()),
+            ],
+            |policy| {
+                Ok(if policy.owner.pid == live.owner.pid {
+                    PolicyRecovery::OwnerStillRunning
+                } else {
+                    PolicyRecovery::Deferred
+                })
+            },
+            |_| panic!("pending or live journal must not be deleted"),
+        )
+        .unwrap();
+        assert_eq!(outcome, RecoveryOutcome::OwnerStillRunning);
+
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::InvalidData,
+        ] {
+            let mut attempts = 0;
+            let error = recover_policies(
+                vec![
+                    ("disconnected".to_owned(), sample_policy()),
+                    ("failed".to_owned(), sample_policy()),
+                ],
+                |_| {
+                    attempts += 1;
+                    if attempts == 1 {
+                        Ok(PolicyRecovery::Deferred)
+                    } else {
+                        Err(io::Error::new(kind, "restore failed"))
+                    }
+                },
+                |_| panic!("pending or failed journal must not be deleted"),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert_eq!(attempts, 2);
+        }
+        let error = recover_policies(
+            vec![("restored".to_owned(), sample_policy())],
+            |_| Ok(PolicyRecovery::Restored),
+            |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "remove failed",
+                ))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

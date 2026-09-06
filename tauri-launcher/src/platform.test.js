@@ -37,6 +37,13 @@ test("keeps a pending NetworkManager policy checked so one click turns it off", 
   );
 });
 
+test("never forwards USB tether policy for Wi-Fi, including a saved Linux request", () => {
+  for (const model of ["launcher", "network-manager"]) {
+    assert.equal(localOnlyTetherSelection(model, true, "wifi"), false);
+    assert.equal(localOnlyTetherSelection(model, true, "usb"), true);
+  }
+});
+
 test("keeps a requested policy latched while the tether is unavailable", () => {
   assert.deepEqual(
     networkManagerCheckboxState(

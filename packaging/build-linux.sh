@@ -170,7 +170,7 @@ if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
             JAVA_HOME="${JAVA_HOME_ARG}" ANDROID_HOME="${ANDROID_SDK}" ANDROID_SDK_ROOT="${ANDROID_SDK}" \
                 ./gradlew --no-daemon \
                 -PholodoriVersionName="${VERSION}" \
-                -PholodoriVersionCode=26 \
+                -PholodoriVersionCode=27 \
                 clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
         )
         APK_SRC="${ANDROID_DIR}/app/build/outputs/apk/release/app-release.apk"
@@ -225,7 +225,7 @@ fi
     echo "name=${NAME}"
     if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
         echo "android_version_name=${VERSION}"
-        echo "android_version_code=26"
+        echo "android_version_code=27"
     fi
     echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "branch=${BRANCH}"
