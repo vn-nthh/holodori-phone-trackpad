@@ -225,7 +225,7 @@ fi
     echo "name=${NAME}"
     if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
         echo "android_version_name=${VERSION}"
-        echo "android_version_code=27"
+        echo "android_version_code=28"
     fi
     echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "branch=${BRANCH}"
