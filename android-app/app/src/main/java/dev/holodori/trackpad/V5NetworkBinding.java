@@ -6,6 +6,7 @@ import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.os.Build;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -19,8 +20,11 @@ import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /** One explicitly selected Android USB-tether or physical Wi-Fi UDP path. */
@@ -133,6 +137,7 @@ final class V5NetworkBinding implements AutoCloseable {
             }
             Candidate usb = findUsbCandidate(connectivityManager);
             return usb != null
+                    && Objects.equals(androidNetwork, usb.androidNetwork)
                     && interfaceName.equals(usb.interfaceName)
                     && localFingerprint.equals(usb.localFingerprint);
         } catch (RuntimeException | SocketException ignored) {
@@ -218,13 +223,14 @@ final class V5NetworkBinding implements AutoCloseable {
         );
         boolean success = false;
         try {
+            if (candidate.androidNetwork != null) candidate.androidNetwork.bindSocket(socket);
             socket.setBroadcast(true);
             socket.setSoTimeout(4);
             success = true;
             return new V5NetworkBinding(
                     manager,
                     V5Protocol.TransportKind.USB,
-                    null,
+                    candidate.androidNetwork,
                     candidate.interfaceName,
                     candidate.localFingerprint,
                     candidate.subnets,
@@ -262,6 +268,7 @@ final class V5NetworkBinding implements AutoCloseable {
     private static Candidate findUsbCandidate(ConnectivityManager manager)
             throws SocketException {
         Set<String> androidInterfaces = new HashSet<>();
+        Map<String, Network> usbNetworks = new HashMap<>();
         boolean snapshotComplete = true;
         try {
             Network[] networks = manager.getAllNetworks();
@@ -277,12 +284,27 @@ final class V5NetworkBinding implements AutoCloseable {
                     String name = DiscoveryPolicy.normalizeInterfaceName(
                             properties.getInterfaceName()
                     );
-                    if (!name.isEmpty()) androidInterfaces.add(name);
+                    if (name.isEmpty()) {
+                        snapshotComplete = false;
+                        continue;
+                    }
+                    NetworkCapabilities capabilities = manager.getNetworkCapabilities(network);
+                    // Android 15+ can expose the tether's downstream interface as
+                    // a local Network. It is not an upstream interface to exclude.
+                    if (isUsbTetherNetwork(capabilities)) {
+                        Network previous = usbNetworks.put(name, network);
+                        if (previous != null && !previous.equals(network)) {
+                            androidInterfaces.add(name);
+                        }
+                    } else {
+                        androidInterfaces.add(name);
+                    }
                 }
             }
         } catch (RuntimeException ignored) {
             snapshotComplete = false;
             androidInterfaces.clear();
+            usbNetworks.clear();
         }
 
         int bestPriority = 0;
@@ -291,14 +313,17 @@ final class V5NetworkBinding implements AutoCloseable {
         while (interfaces != null && interfaces.hasMoreElements()) {
             NetworkInterface network = interfaces.nextElement();
             if (!network.isUp() || network.isLoopback()) continue;
-            int priority = DiscoveryPolicy.candidatePriority(
+            String name = DiscoveryPolicy.normalizeInterfaceName(network.getName());
+            Network usbNetwork = usbNetworks.get(name);
+            int priority = usbCandidatePriority(
                     network.getName(),
                     network.getDisplayName(),
                     androidInterfaces,
-                    snapshotComplete
+                    snapshotComplete,
+                    usbNetwork != null
             );
             if (priority == 0 || priority < bestPriority) continue;
-            Candidate candidate = candidateFromInterface(network);
+            Candidate candidate = candidateFromInterface(network, usbNetwork);
             if (candidate == null) continue;
             if (priority > bestPriority) {
                 candidates.clear();
@@ -311,7 +336,35 @@ final class V5NetworkBinding implements AutoCloseable {
         return candidates.size() == 1 ? candidates.get(0) : null;
     }
 
-    private static Candidate candidateFromInterface(NetworkInterface network) {
+    private static boolean isUsbTetherNetwork(NetworkCapabilities capabilities) {
+        // LOCAL_NETWORK distinguishes tethering from reverse USB Internet access.
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM
+                && capabilities != null
+                && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_USB)
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_LOCAL_NETWORK)
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+                && !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET);
+    }
+
+    static int usbCandidatePriority(
+            String name,
+            String displayName,
+            Set<String> upstreamInterfaces,
+            boolean snapshotComplete,
+            boolean androidUsbTether
+    ) {
+        if (upstreamInterfaces.contains(DiscoveryPolicy.normalizeInterfaceName(name))) return 0;
+        return androidUsbTether ? 4 : DiscoveryPolicy.candidatePriority(
+                name, displayName, upstreamInterfaces, snapshotComplete);
+    }
+
+    private static Candidate candidateFromInterface(
+            NetworkInterface network,
+            Network androidNetwork
+    ) {
         ArrayList<DiscoveryPolicy.Ipv4Subnet> subnets = new ArrayList<>();
         ArrayList<InetAddress> broadcasts = new ArrayList<>();
         ArrayList<String> fingerprint = new ArrayList<>();
@@ -334,6 +387,7 @@ final class V5NetworkBinding implements AutoCloseable {
         if (subnets.isEmpty() || bindAddress == null) return null;
         Collections.sort(fingerprint);
         return new Candidate(
+                androidNetwork,
                 network.getName(),
                 bindAddress,
                 fingerprint,
@@ -387,6 +441,7 @@ final class V5NetworkBinding implements AutoCloseable {
     }
 
     private static final class Candidate {
+        final Network androidNetwork;
         final String interfaceName;
         final InetAddress bindAddress;
         final List<String> localFingerprint;
@@ -394,12 +449,14 @@ final class V5NetworkBinding implements AutoCloseable {
         final List<InetAddress> broadcasts;
 
         Candidate(
+                Network androidNetwork,
                 String interfaceName,
                 InetAddress bindAddress,
                 List<String> localFingerprint,
                 List<DiscoveryPolicy.Ipv4Subnet> subnets,
                 List<InetAddress> broadcasts
         ) {
+            this.androidNetwork = androidNetwork;
             this.interfaceName = interfaceName;
             this.bindAddress = bindAddress;
             this.localFingerprint = localFingerprint;

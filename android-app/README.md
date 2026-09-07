@@ -44,6 +44,15 @@ host socket address for that session. V5 instead confines discovery to the
 transport selected before Pair or Start; its Wi-Fi path must be a physical
 Wi-Fi `Network`, never cellular or a VPN.
 
+On Android 15 and newer, v5 also recognizes USB tethering exposed as a
+`TRANSPORT_USB` / `NET_CAPABILITY_LOCAL_NETWORK` network and binds the socket
+to that exact Android `Network`. Older devices retain the USB interface
+fallback. An upstream USB network or a VPN is not a tether candidate, and a
+replacement USB `Network` ends the session even if its address stays the same.
+Previously the app excluded these newer downstream networks along with
+upstream networks, which could return Pair immediately to its inactive state
+despite USB tethering being enabled.
+
 ## Protocol v5 behavior
 
 Every touch snapshot is carried by one HPT5 ChaCha20-Poly1305 datagram. Android
