@@ -27,6 +27,19 @@ physical play vocabulary:
 - a chord is simultaneous state with independent finger ownership;
 - a lift or cancellation must release the corresponding Windows state.
 
+## Current usage baseline
+
+**Keyboard mode is the current real-world usage path.** Treat gameplay bug
+reports and validation as keyboard-mode issues unless the user explicitly says
+otherwise; do not repeatedly ask which input mode they use. Windows touch
+injection is a proof of concept, not the current gameplay baseline.
+
+For rapid taps and slide-to-tap transitions, distinguish ordered OS submission
+from game-observed input. Passing host event-order tests alone does not prove
+that the game recognizes closely spaced releases and presses. Reports can
+involve either the same finger or different fingers; do not assume overlapping
+ownership of one lane explains every missed tap.
+
 ## Non-negotiable gameplay invariants
 
 1. **A stationary hold is active input, not idleness.** Do not use lack of

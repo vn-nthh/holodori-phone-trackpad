@@ -313,6 +313,18 @@ fn plan_into(
     // continuous instead of exposing pointer-iteration order as an UP/DOWN.
     changes
         .retain(|change| state.lane_holds[change.lane] == 0 || next.lane_holds[change.lane] == 0);
+
+    // A distinct finger-down is a press even when another finger owns the
+    // lane. Do not synthesize an UP: the existing hold must remain asserted.
+    // MOVE/heartbeat snapshots and submission retries must not repeat it.
+    let pointer = usize::from(frame.action_pointer_id);
+    if frame.action == crate::protocol::ACTION_DOWN
+        && state.pointer_lanes[pointer].is_none()
+        && let Some(lane) = next.pointer_lanes[pointer]
+        && state.lane_holds[lane] > 0
+    {
+        changes.push(KeyChange { lane, down: true });
+    }
 }
 
 fn apply_contact(
@@ -600,6 +612,234 @@ pub(crate) mod tests {
             assert_eq!(sink.state.lane_holds, [0, 0, 0, 0]);
             assert_eq!(sink.pressed, [false, false, false, false]);
         }
+    }
+
+    #[test]
+    fn slide_lift_then_immediate_tap_reuses_pointer_without_losing_press() {
+        let mut sink = held_sink(6, &[(0, 0)]);
+        let mut emitted = Vec::new();
+        for frame in [
+            frame(
+                2,
+                ACTION_MOVE,
+                0,
+                FRAME_FLAG_LOCKED,
+                vec![contact(0, CONTACT_FLAG_TIP, 0.4)],
+            ),
+            frame(
+                3,
+                crate::protocol::ACTION_UP,
+                0,
+                FRAME_FLAG_LOCKED,
+                vec![contact(0, 0, 0.4)],
+            ),
+            frame(
+                4,
+                ACTION_DOWN,
+                0,
+                FRAME_FLAG_LOCKED,
+                vec![contact(0, CONTACT_FLAG_TIP, 0.4)],
+            ),
+        ] {
+            sink.accept_with(&frame, |_, changes| {
+                emitted.extend(decode_inputs(changes));
+                Ok(changes.len())
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            emitted,
+            [
+                (1, true),
+                (0, false),
+                (2, true),
+                (1, false),
+                (2, false),
+                (2, true),
+            ]
+        );
+        assert_eq!(sink.state.lane_holds, [0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rapid_slide_lift_tap_survives_reordering_for_each_lane_and_finger() {
+        use crate::input::{InputSink, commit_ready};
+        use crate::metrics::HostMetrics;
+        use crate::protocol::{ACTION_UP, OrderedFrames};
+        use std::sync::atomic::AtomicBool;
+
+        struct Recorder {
+            sink: ManuallyDrop<KeyboardSink>,
+            changes: Vec<(usize, bool)>,
+        }
+        impl InputSink for Recorder {
+            fn accept(&mut self, frame: &TouchFrame) -> io::Result<()> {
+                self.sink.accept_with(frame, |_, changes| {
+                    self.changes.extend(decode_inputs(changes));
+                    Ok(changes.len())
+                })
+            }
+            fn has_active_input(&self) -> bool {
+                self.sink.has_active_input()
+            }
+            fn cancel_all(&mut self) -> io::Result<()> {
+                self.sink.cancel_recorded()
+            }
+        }
+
+        for tap_pointer in [0, 1] {
+            for tap_lane in 0..6 {
+                for delivery in [[0, 1, 2, 3], [2, 3, 1, 0 /* repaired slide arrives last */]] {
+                    let x = (tap_lane as f32 + 0.5) / 6.0;
+                    let mut frames = [
+                        frame(
+                            2,
+                            ACTION_MOVE,
+                            0,
+                            FRAME_FLAG_LOCKED,
+                            vec![contact(0, CONTACT_FLAG_TIP, 0.4)],
+                        ),
+                        frame(3, ACTION_UP, 0, FRAME_FLAG_LOCKED, vec![contact(0, 0, 0.4)]),
+                        frame(
+                            4,
+                            ACTION_DOWN,
+                            tap_pointer,
+                            FRAME_FLAG_LOCKED,
+                            vec![contact(tap_pointer, CONTACT_FLAG_TIP, x)],
+                        ),
+                        frame(
+                            5,
+                            ACTION_UP,
+                            tap_pointer,
+                            FRAME_FLAG_LOCKED,
+                            vec![contact(tap_pointer, 0, x)],
+                        ),
+                    ];
+                    for (index, frame) in frames.iter_mut().enumerate() {
+                        frame.phone_event_nanos = (index as u64 + 1) * 1_000_000;
+                    }
+                    let mut ordered = OrderedFrames::new();
+                    ordered.begin_session(&frames[0]);
+                    let mut recorder = Recorder {
+                        sink: held_sink(6, &[(0, 0)]),
+                        changes: Vec::new(),
+                    };
+                    let mut metrics = HostMetrics::new(false, 8.333, 5);
+                    for index in delivery {
+                        ordered.push(frames[index].clone());
+                        // An immediate redundant copy must not repeat a press.
+                        ordered.push(frames[index].clone());
+                        commit_ready(
+                            &mut ordered,
+                            &mut recorder,
+                            &mut metrics,
+                            &AtomicBool::new(false),
+                        )
+                        .unwrap();
+                    }
+                    assert_eq!(
+                        recorder.changes,
+                        [
+                            (1, true),
+                            (0, false),
+                            (2, true),
+                            (1, false),
+                            (2, false),
+                            (tap_lane, true),
+                            (tap_lane, false),
+                        ],
+                        "pointer={tap_pointer}, lane={tap_lane}, delivery={delivery:?}"
+                    );
+                    assert_eq!(ordered.acknowledged_sequence(), Some(5));
+                    assert!(!recorder.has_active_input());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tap_overlapping_slide_endpoint_keeps_key_held_until_both_lift() {
+        let mut sink = held_sink(6, &[(0, 2)]);
+        let mut emitted = Vec::new();
+        for frame in [
+            frame(
+                2,
+                ACTION_DOWN,
+                1,
+                FRAME_FLAG_LOCKED,
+                vec![
+                    contact(0, CONTACT_FLAG_TIP, 0.4),
+                    contact(1, CONTACT_FLAG_TIP, 0.4),
+                ],
+            ),
+            frame(
+                3,
+                crate::protocol::ACTION_UP,
+                0,
+                FRAME_FLAG_LOCKED,
+                vec![contact(0, 0, 0.4), contact(1, CONTACT_FLAG_TIP, 0.4)],
+            ),
+            frame(
+                4,
+                crate::protocol::ACTION_UP,
+                1,
+                FRAME_FLAG_LOCKED,
+                vec![contact(1, 0, 0.4)],
+            ),
+        ] {
+            sink.accept_with(&frame, |_, changes| {
+                emitted.extend(decode_inputs(changes));
+                Ok(changes.len())
+            })
+            .unwrap();
+        }
+        assert_eq!(emitted, [(2, true), (2, false)]);
+        assert!(!sink.has_active_input());
+    }
+
+    #[test]
+    fn overlapping_tap_retries_once_and_lifting_tapper_preserves_slide() {
+        let mut sink = held_sink(6, &[(0, 2)]);
+        let mut tap = frame(
+            2,
+            ACTION_DOWN,
+            1,
+            FRAME_FLAG_LOCKED,
+            vec![
+                contact(0, CONTACT_FLAG_TIP, 0.4),
+                contact(1, CONTACT_FLAG_TIP, 0.4),
+            ],
+        );
+        assert!(
+            sink.accept_with(&tap, |_, changes| {
+                assert_changes(changes, &[(2, true)]);
+                Ok(0)
+            })
+            .is_err()
+        );
+        let mut emitted = Vec::new();
+        sink.accept_with(&tap, |_, changes| {
+            emitted.extend(decode_inputs(changes));
+            Ok(changes.len())
+        })
+        .unwrap();
+        assert_eq!(emitted, [(2, true)]);
+        assert_eq!(sink.state.lane_holds[2], 2);
+        for action in [ACTION_DOWN, ACTION_MOVE, ACTION_HEARTBEAT] {
+            tap.sequence += 1;
+            tap.action = action;
+            sink.accept_with(&tap, |_, _| panic!("snapshot repeated tap"))
+                .unwrap();
+        }
+        tap.sequence += 1;
+        tap.action = crate::protocol::ACTION_UP;
+        tap.contacts = vec![contact(0, CONTACT_FLAG_TIP, 0.4), contact(1, 0, 0.4)]
+            .into_iter()
+            .collect();
+        sink.accept_with(&tap, |_, _| panic!("tapper released slide"))
+            .unwrap();
+        assert_eq!(sink.state.lane_holds[2], 1);
+        assert!(sink.pressed[2]);
     }
 
     #[test]
