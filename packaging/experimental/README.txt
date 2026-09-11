@@ -27,7 +27,7 @@ Start the Windows app:
      a report.
   6. Optional for USB only: check "Stop the PC from using the phone's internet"
      to remove the phone's temporary internet gateway while Holodori is
-     running. Use "Restart as admin" if Windows needs elevation.
+     running. The launcher already runs as administrator on Windows.
   7. Press Start on the host and phone with the same transport selected.
   8. Arrange and lock the play zone, optionally enable thumb mode, then tap,
      hold, chord, and slide.

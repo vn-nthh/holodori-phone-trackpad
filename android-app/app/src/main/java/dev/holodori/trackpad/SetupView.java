@@ -1,13 +1,19 @@
 package dev.holodori.trackpad;
 
+import android.content.ActivityNotFoundException;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
+import android.text.SpannableString;
 import android.text.TextUtils;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.UnderlineSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -86,10 +92,12 @@ final class SetupView extends FrameLayout {
     private final Button pairButton;
     private final Button cancelPairButton;
     private final PairingLaneView lanes;
+    private final TextView pairTetherLink;
 
     // Ready
     private final TransportArtView readyArt;
     private final TextView transportBadge;
+    private final TextView readyTetherLink;
     private final Button startButton;
 
     // Preferences
@@ -191,8 +199,10 @@ final class SetupView extends FrameLayout {
         cancelPairButton = quietButton("Cancel");
         pairActions.addView(pairButton, buttonParams());
         pairActions.addView(cancelPairButton, buttonParams());
+        pairTetherLink = tetherLink();
         pairColumn.addView(pairLead, wrap());
         pairColumn.addView(pairDetail, spaced(wrap(), 0, 6, 0, 0));
+        pairColumn.addView(pairTetherLink, spaced(wrap(), 0, 4, 0, 0));
         pairColumn.addView(pairActions, spaced(wrap(), 0, 18, 0, 0));
         intro.addView(pairColumn, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 6f));
         pairIntro = intro;
@@ -252,6 +262,8 @@ final class SetupView extends FrameLayout {
         );
         badgeParams.topMargin = dp(8);
         readyColumn.addView(transportBadge, badgeParams);
+        readyTetherLink = tetherLink();
+        readyColumn.addView(readyTetherLink, spaced(wrap(), 0, 10, 0, 0));
         LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(
                 LayoutParams.MATCH_PARENT, dp(56)
         );
@@ -557,6 +569,8 @@ final class SetupView extends FrameLayout {
         pairButton.setVisibility(pairing ? GONE : VISIBLE);
         pairButton.setText(pairStage == PairStage.FAILED ? "Try again" : "Pair");
         cancelPairButton.setVisibility(pairing ? VISIBLE : GONE);
+        pairTetherLink.setVisibility(usb ? VISIBLE : GONE);
+        readyTetherLink.setVisibility(usb ? VISIBLE : GONE);
 
         // Ready
         readyArt.setTransport(transport, true);
@@ -633,6 +647,41 @@ final class SetupView extends FrameLayout {
             render();
         });
         return card;
+    }
+
+    /** "USB tethering must be on. Open settings" with the last two words as a link. */
+    private TextView tetherLink() {
+        String lead = "USB tethering must be on. ";
+        String action = "Open settings";
+        SpannableString label = new SpannableString(lead + action);
+        label.setSpan(new UnderlineSpan(), lead.length(), label.length(), 0);
+        label.setSpan(new ForegroundColorSpan(Palette.TEXT), lead.length(), label.length(), 0);
+        TextView link = text("", 13, Palette.MUTED);
+        link.setText(label);
+        link.setPadding(0, dp(6), 0, dp(6));
+        link.setBackground(Palette.ripple(getContext(), Palette.BG, 0, 8));
+        link.setClickable(true);
+        link.setFocusable(true);
+        link.setOnClickListener(view -> openTetherSettings());
+        return link;
+    }
+
+    /** Opens the tethering page; falls back to broader settings pages when an OEM hides it. */
+    private void openTetherSettings() {
+        String[] actions = {
+                "android.settings.TETHER_SETTINGS",
+                Settings.ACTION_WIRELESS_SETTINGS,
+                Settings.ACTION_SETTINGS,
+        };
+        for (String action : actions) {
+            try {
+                getContext().startActivity(new Intent(action));
+                return;
+            } catch (ActivityNotFoundException ignored) {
+                // Try the next, broader page.
+            }
+        }
+        showToast("Open Settings and turn on USB tethering.");
     }
 
     private LinearLayout.LayoutParams cardParams() {

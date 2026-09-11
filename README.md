@@ -107,8 +107,9 @@ implementation now present in this branch.
 Select each key box and press the letter or number you want to use. The default
 layout is `S D F J K L`.
 
-Test custom keys in Notepad before opening the game. If the game is running as
-administrator, run the controller as administrator too.
+Test custom keys in Notepad before opening the game. On Windows the launcher
+always asks for administrator access when it opens, so it can send keys to a
+game that runs as administrator.
 
 ### Stop the PC from using the phone's internet
 
@@ -116,9 +117,8 @@ USB tethering can make the PC use the phone as an internet connection. Turn on
 **Stop the PC from using the phone's internet** if you only want the local
 phone-to-PC link.
 
-Windows may ask for administrator access. Use **Restart as admin** when the
-launcher offers it. The app restores the setting when you stop. If the app was
-interrupted, open it again and follow the recovery message before playing.
+The app restores the setting when you stop. If the app was interrupted, open it
+again and follow the recovery message before playing.
 
 If the phone is disconnected, Windows route cleanup stays pending while the
 launcher remains usable. Reconnect the phone, enable **USB tethering**, then
@@ -179,7 +179,8 @@ policy messages.
 
 ### Keys work outside the game but not inside it
 
-If the game runs as administrator, restart the controller as administrator.
+The launcher runs as administrator on Windows for exactly this case. If you
+declined the elevation prompt, close the launcher and open it again.
 
 ### The Android app will not install
 

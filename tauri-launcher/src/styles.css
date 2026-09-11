@@ -333,7 +333,10 @@ button.link:hover:not(:disabled) { background: transparent; color: var(--muted);
   padding: 2px 2px 8px;
 }
 
-.pref { display: grid; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+/* One divider above every row except the first; the USB-only wrapper is
+   transparent to this rule, so hiding it on Wi-Fi never leaves a stray line. */
+.pref { display: grid; gap: 8px; padding: 10px 0; border-top: 1px solid var(--border); }
+.prefs-body > .pref:first-child { border-top: 0; }
 
 .pref-row {
   display: flex;
@@ -357,8 +360,6 @@ button.link:hover:not(:disabled) { background: transparent; color: var(--muted);
   line-height: 1.35;
 }
 
-.usb-only .pref-row { border-bottom-color: transparent; }
-.usb-only + .pref-row { border-top: 1px solid var(--border); }
 .app[data-transport="wifi"] .usb-only { display: none; }
 
 .prefs-footer {
