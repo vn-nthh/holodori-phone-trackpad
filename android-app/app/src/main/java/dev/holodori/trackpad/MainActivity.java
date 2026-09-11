@@ -63,6 +63,7 @@ public final class MainActivity extends Activity implements
             showSetup();
             return;
         }
+        if (setupView != null && setupView.handleBack()) return;
         super.onBackPressed();
     }
 
@@ -93,7 +94,7 @@ public final class MainActivity extends Activity implements
     @Override
     public void onPairRequested(SetupView.Selection selection) {
         stopCurrent();
-        setupView.setPairingStatus("Starting one fresh 60-second pairing attempt");
+        setupView.startPairing();
         V5Transport v5 = new V5Transport(this, this, selection.transport);
         transport = v5;
         v5.startPairing(pairingListenerFor(v5));
@@ -132,12 +133,9 @@ public final class MainActivity extends Activity implements
         try {
             new CredentialStore(this).forgetDevice();
             setupView.setPaired(false);
-            setupView.finishPairing(
-                    false,
-                    "Phone-side host record forgotten. Forget the phone on the host too."
-            );
+            setupView.showToast("Forgotten. Forget this phone on your PC too.");
         } catch (CredentialStore.CredentialException error) {
-            setupView.finishPairing(false, error.getMessage());
+            setupView.showToast(error.getMessage());
         }
     }
 
@@ -155,7 +153,7 @@ public final class MainActivity extends Activity implements
             if (!playing || trackpadView == null || transport == null) return;
             boolean transportRunning = transport.isRunning();
             boolean liveConnection = connected && transportRunning;
-            trackpadView.setConnectionStatus(liveConnection, message);
+            trackpadView.setConnectionStatus(liveConnection, playStatus(liveConnection, message));
             if (liveConnection) {
                 cancelReconnect();
                 reconnectDelayMillis = RECONNECT_MIN_MILLIS;
@@ -163,6 +161,16 @@ public final class MainActivity extends Activity implements
                 scheduleReconnect();
             }
         });
+    }
+
+    /** Short status line for the pad; transport diagnostics stay in the log. */
+    private static String playStatus(boolean connected, String message) {
+        if (connected) return "Connected";
+        if (message == null) return "Looking for your PC…";
+        if (message.startsWith("Searching for")) return "Looking for your PC…";
+        if (message.contains("lost") || message.contains("interrupted")) return "Reconnecting…";
+        if (message.startsWith("Pair this phone")) return "Pair this phone first.";
+        return message;
     }
 
     @Override
@@ -204,10 +212,7 @@ public final class MainActivity extends Activity implements
             public void onPairingComplete() {
                 update(() -> {
                     transport = null;
-                    setupView.finishPairing(
-                            true,
-                            "Pairing complete. Start is now available."
-                    );
+                    setupView.finishPairing(true, null);
                 });
             }
 

@@ -1047,9 +1047,11 @@ fn style_windows_titlebar(window: &tauri::WebviewWindow) {
         let _ = SetClassLongPtrW(hwnd, GCLP_HICON, 0);
         let _ = SetClassLongPtrW(hwnd, GCLP_HICONSM, 0);
 
-        // Match the native caption and border to the blackout app surface.
+        // Match the native caption and border to the app's ink surface
+        // (#14161C from styles.css, as a 0x00BBGGRR COLORREF). The caption
+        // title is empty, so its text colour only needs to stay unobtrusive.
         let dark_mode: i32 = 1;
-        let black: u32 = 0;
+        let ink: u32 = 0x001C_1614;
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
@@ -1059,19 +1061,19 @@ fn style_windows_titlebar(window: &tauri::WebviewWindow) {
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_CAPTION_COLOR as u32,
-            &black as *const _ as *const c_void,
+            &ink as *const _ as *const c_void,
             size_of::<u32>() as u32,
         );
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR as u32,
-            &black as *const _ as *const c_void,
+            &ink as *const _ as *const c_void,
             size_of::<u32>() as u32,
         );
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_TEXT_COLOR as u32,
-            &black as *const _ as *const c_void,
+            &ink as *const _ as *const c_void,
             size_of::<u32>() as u32,
         );
         let _ = SetWindowPos(

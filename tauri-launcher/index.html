@@ -3,86 +3,128 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>doritrack</title>
+    <title>Doritrack</title>
   </head>
   <body>
-    <main class="shell" aria-labelledby="app-title">
-      <header class="header">
-        <h1 id="app-title">doritrack</h1>
+    <main id="app" class="app" data-screen="connect" aria-labelledby="app-title">
+      <header class="bar">
+        <button id="back" class="icon-button" type="button" aria-label="Back" hidden>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" /></svg>
+        </button>
+        <h1 id="app-title" class="title">Doritrack</h1>
+        <button id="prefs-open" class="icon-button" type="button" aria-label="Preferences" aria-controls="prefs" aria-expanded="false">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <circle cx="10" cy="10" r="2.6" />
+            <path d="M10 2.5v2.3M10 15.2v2.3M2.5 10h2.3M15.2 10h2.3M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6" />
+          </svg>
+        </button>
       </header>
 
-      <form id="settings-form" class="settings">
-        <fieldset class="transport-field">
-          <legend class="field-label">Connection</legend>
-          <label class="transport-choice">
-            <input type="radio" name="transport" value="usb" checked />
-            <span>USB</span>
-          </label>
-          <label class="transport-choice">
-            <input type="radio" name="transport" value="wifi" />
-            <span>Wi-Fi / local network</span>
-          </label>
-        </fieldset>
-
-        <section class="pairing" aria-labelledby="pairing-label">
-          <div class="pairing-heading">
-            <span id="pairing-label" class="field-label">Secure pairing</span>
-            <span id="paired-state" class="paired-state">Not paired</span>
-          </div>
-          <div id="pair-pattern" class="pair-pattern" aria-label="Pairing lane pattern" hidden></div>
-          <p id="quality" class="quality" hidden></p>
-          <div class="pair-actions">
-            <button id="pair" type="button">Pair</button>
-            <button id="approve-pairing" class="primary" type="button" disabled>Approve pairing</button>
-            <button id="forget-device" type="button" disabled>Forget device</button>
-          </div>
-        </section>
-
-        <div class="field">
-          <span id="keys-label" class="field-label">Keys</span>
-          <div id="key-slots" class="key-slots" role="group" aria-labelledby="keys-label">
-            <input class="key-slot" type="text" value="s" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 1 key" autofocus />
-            <input class="key-slot" type="text" value="d" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 2 key" />
-            <input class="key-slot" type="text" value="f" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 3 key" />
-            <input class="key-slot" type="text" value="j" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 4 key" />
-            <input class="key-slot" type="text" value="k" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 5 key" />
-            <input class="key-slot" type="text" value="l" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 6 key" />
-          </div>
+      <section class="screen" data-screen="connect" aria-labelledby="connect-lead">
+        <p id="connect-lead" class="lead">How is your phone connected?</p>
+        <div class="transport-cards">
+          <button class="transport-card" type="button" data-transport="usb">
+            <span class="card-art" data-art="usb"></span>
+            <span class="card-label">USB cable</span>
+          </button>
+          <button class="transport-card" type="button" data-transport="wifi">
+            <span class="card-art" data-art="wifi"></span>
+            <span class="card-label">Wi-Fi</span>
+          </button>
         </div>
+      </section>
 
-        <label class="check-row">
-          <input id="metrics" type="checkbox" />
-          <span>Save latency report when stopped</span>
-        </label>
-
-        <label class="check-row usb-only">
-          <input id="legacy-v4" type="checkbox" />
-          <span>Legacy protocol v4 (USB only)</span>
-        </label>
-
-        <div class="tether-options usb-only">
-          <label class="check-row check-row-feature">
-            <input id="local-only-tether" type="checkbox" disabled />
-            <span>Stop the PC from using the phone's internet</span>
-          </label>
-          <div id="admin-action" class="admin-action" hidden>
-            <span id="admin-action-text">Needs admin elevation.</span>
-            <button id="restart-as-admin" class="secondary-action" type="button">
-              Restart as admin
-            </button>
-            <button id="refresh-tether-policy" class="secondary-action" type="button" hidden>
-              Check tether
-            </button>
-          </div>
-        </div>
-
-        <p id="status" class="status" role="status" aria-live="polite" aria-atomic="true" data-phase="ready" data-tone="neutral">Ready</p>
-
+      <section class="screen" data-screen="pair" aria-labelledby="pair-lead">
+        <div class="art" data-art="stage"></div>
+        <p id="pair-lead" class="lead">Open Doritrack on your phone, then pair.</p>
+        <ol id="pair-pattern" class="pattern" aria-label="Lanes to tap on the phone, in order" hidden></ol>
+        <p id="pair-hint" class="hint" hidden></p>
         <div class="actions">
-          <button id="start" class="primary" type="submit" disabled>Start</button>
-          <button id="stop" type="button" disabled>Stop</button>
+          <button id="pair" class="primary" type="button">Pair</button>
+          <button id="approve-pairing" class="primary" type="button" hidden>Approve</button>
+          <button id="cancel-pairing" type="button" hidden>Cancel</button>
         </div>
-      </form>
+      </section>
+
+      <section class="screen" data-screen="ready" aria-labelledby="ready-lead">
+        <div class="art" data-art="stage"></div>
+        <p id="ready-lead" class="lead">Ready.</p>
+        <button id="transport-badge" class="badge" type="button">
+          <span id="transport-name">USB</span>
+          <span class="badge-action">Change</span>
+        </button>
+        <div class="actions">
+          <button id="start" class="primary" type="button">Start</button>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="play" aria-labelledby="play-lead">
+        <div class="art" data-art="stage"></div>
+        <p id="play-lead" class="lead" role="status" aria-live="polite">Waiting for your phone.</p>
+        <div class="actions">
+          <button id="stop" type="button">Stop</button>
+        </div>
+      </section>
+
+      <div id="notice" class="notice" role="alert" hidden>
+        <span id="notice-text"></span>
+        <button id="restart-as-admin" class="link" type="button" hidden>Restart as admin</button>
+        <button id="notice-dismiss" class="link" type="button" aria-label="Dismiss">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg>
+        </button>
+      </div>
+
+      <aside id="prefs" class="prefs" aria-labelledby="prefs-title" hidden>
+        <header class="bar">
+          <button id="prefs-close" class="icon-button" type="button" aria-label="Close preferences">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" /></svg>
+          </button>
+          <h2 id="prefs-title" class="title">Preferences</h2>
+        </header>
+
+        <form id="prefs-form" class="prefs-body">
+          <div class="pref">
+            <span id="keys-label" class="pref-label">Keys</span>
+            <div class="key-slots" role="group" aria-labelledby="keys-label">
+              <input class="key-slot" type="text" value="s" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 1 key" />
+              <input class="key-slot" type="text" value="d" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 2 key" />
+              <input class="key-slot" type="text" value="f" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 3 key" />
+              <input class="key-slot" type="text" value="j" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 4 key" />
+              <input class="key-slot" type="text" value="k" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 5 key" />
+              <input class="key-slot" type="text" value="l" maxlength="1" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="Lane 6 key" />
+            </div>
+          </div>
+
+          <label class="pref pref-row">
+            <span class="pref-label">Save a latency report when stopping</span>
+            <input id="metrics" class="switch" type="checkbox" />
+          </label>
+
+          <div class="usb-only">
+            <label class="pref pref-row">
+              <span class="pref-label">Don't use the phone's internet</span>
+              <input id="local-only-tether" class="switch" type="checkbox" />
+            </label>
+            <div id="admin-action" class="pref-note" hidden>
+              <span id="admin-action-text"></span>
+              <button id="prefs-restart-as-admin" class="link" type="button" hidden>Restart as admin</button>
+              <button id="refresh-tether-policy" class="link" type="button" hidden>Check again</button>
+            </div>
+          </div>
+
+          <label class="pref pref-row usb-only">
+            <span class="pref-label">Protocol v4<small>No pairing. USB only.</small></span>
+            <input id="legacy-v4" class="switch" type="checkbox" />
+          </label>
+
+          <div id="paired-pref" class="pref pref-row" hidden>
+            <span class="pref-label">Paired phone</span>
+            <button id="forget-device" class="quiet" type="button">Forget</button>
+          </div>
+        </form>
+
+        <p class="prefs-footer">Unofficial companion for hololive Dreams. <span id="version"></span></p>
+      </aside>
     </main>
     <script type="module" src="/src/main.js"></script>
   </body>

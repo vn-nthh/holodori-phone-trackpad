@@ -2,7 +2,6 @@ package dev.holodori.trackpad;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.Paint;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
@@ -16,11 +15,13 @@ final class PairingLaneView extends View {
         void onPatternEntered(int[] lanes);
     }
 
-    private static final int BACKGROUND = Color.rgb(9, 10, 18);
-    private static final int SURFACE = Color.rgb(20, 29, 43);
-    private static final int ACCENT = Color.rgb(66, 217, 245);
-    private static final int MUTED = Color.rgb(108, 137, 145);
-    private static final int TEXT = Color.rgb(215, 244, 247);
+    private static final int BACKGROUND = Palette.BG;
+    private static final int SURFACE = Palette.SURFACE_2;
+    private static final int OUTLINE = Palette.BORDER_STRONG;
+    private static final int ACCENT = Palette.ACCENT;
+    private static final int ON_ACCENT = Palette.ON_ACCENT;
+    private static final int MUTED = Palette.MUTED;
+    private static final int TEXT = Palette.TEXT;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final int[] entered = new int[8];
     private boolean thumbMode;
@@ -79,19 +80,27 @@ final class PairingLaneView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        float top = dp(24);
-        float bottom = getHeight() - dp(34);
+        float top = dp(6);
+        float bottom = getHeight() - dp(30);
         float width = getWidth();
         for (int lane = 1; lane <= 6; lane++) {
-            float left = width * laneStart(lane);
-            float right = width * laneEnd(lane);
+            float left = width * laneStart(lane) + dp(3);
+            float right = width * laneEnd(lane) - dp(3);
+            boolean active = lane == activeLane;
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(lane == activeLane ? ACCENT : SURFACE);
-            canvas.drawRoundRect(left + dp(2), top, right - dp(2), bottom, dp(8), dp(8), paint);
+            paint.setColor(active ? ACCENT : SURFACE);
+            canvas.drawRoundRect(left, top, right, bottom, dp(10), dp(10), paint);
+            if (!active) {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(dp(1));
+                paint.setColor(OUTLINE);
+                canvas.drawRoundRect(left, top, right, bottom, dp(10), dp(10), paint);
+                paint.setStyle(Paint.Style.FILL);
+            }
             paint.setTextAlign(Paint.Align.CENTER);
-            paint.setTextSize(dp(22));
+            paint.setTextSize(dp(24));
             paint.setFakeBoldText(true);
-            paint.setColor(lane == activeLane ? BACKGROUND : TEXT);
+            paint.setColor(active ? ON_ACCENT : TEXT);
             canvas.drawText(
                     Integer.toString(lane),
                     (left + right) / 2f,
@@ -100,13 +109,13 @@ final class PairingLaneView extends View {
             );
         }
         paint.setFakeBoldText(false);
-        paint.setTextSize(dp(12));
+        paint.setTextSize(dp(13));
         paint.setTextAlign(Paint.Align.CENTER);
-        paint.setColor(accepting ? ACCENT : MUTED);
+        paint.setColor(accepting ? TEXT : MUTED);
         String status = accepting
-                ? "Step " + (count + 1) + " of 8 — press and release one lane"
-                : (count == 8 ? "8 of 8 entered" : "Waiting for secure comparison");
-        canvas.drawText(status, width / 2f, getHeight() - dp(10), paint);
+                ? "Step " + (count + 1) + " of 8"
+                : (count == 8 ? "8 of 8" : "");
+        canvas.drawText(status, width / 2f, getHeight() - dp(9), paint);
     }
 
     @Override

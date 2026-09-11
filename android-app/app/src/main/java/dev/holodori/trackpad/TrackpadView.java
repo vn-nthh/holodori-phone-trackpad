@@ -15,12 +15,12 @@ import android.view.View;
 import java.util.Arrays;
 
 final class TrackpadView extends View {
-    private static final int BACKGROUND = Color.rgb(9, 10, 18);
-    private static final int SURFACE = Color.rgb(15, 20, 31);
-    private static final int ACCENT = Color.rgb(66, 217, 245);
-    private static final int TEXT = Color.rgb(215, 244, 247);
-    private static final int MUTED = Color.rgb(108, 137, 145);
-    private static final int CONNECTED = Color.rgb(111, 230, 139);
+    private static final int BACKGROUND = Palette.BG;
+    private static final int SURFACE = Palette.SURFACE;
+    private static final int ACCENT = Palette.ACCENT;
+    private static final int TEXT = Palette.TEXT;
+    private static final int MUTED = Palette.MUTED;
+    private static final int CONNECTED = Palette.TEXT;
     private static final int HANDLE_SIZE_DP = 56;
     private static final int HANDLE_NONE = 0;
     private static final int HANDLE_TOP_LEFT = 1;
@@ -71,7 +71,7 @@ final class TrackpadView extends View {
     private int laneCount = 6;
     private boolean locked;
     private boolean connected;
-    private String status = "Connect the USB cable";
+    private String status = "Looking for your PC…";
     private int lockPointerId = -1;
     private float transformCenterX;
     private float transformCenterY;
@@ -253,7 +253,7 @@ final class TrackpadView extends View {
             paint.setTextSize(dp(13));
             paint.setColor(MUTED);
             canvas.drawText(
-                    "Corners: resize / rotate  •  Sides: stretch one axis  •  Drag zone: move",
+                    "Drag or resize the pad, then tap the lock to play.",
                     width / 2,
                     height - dp(22),
                     paint
