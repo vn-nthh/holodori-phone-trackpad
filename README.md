@@ -14,24 +14,27 @@ into lane keys. The default keys are `S D F J K L`.
 
 ## Download
 
-The stable version is **v0.4.1**.
+The stable version is **v0.5.0**, with authenticated USB/Wi-Fi sessions,
+pairing, thumb mode, and new Android and PC icons.
+Install the phone and host from the same release.
 
-**Experimental protocol V5:** [v0.5.0-alpha4](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0-alpha4)
-adds authenticated USB/Wi-Fi sessions, pairing, thumb mode, and the latency
-fixes documented in [LATENCY_VALIDATION.md](LATENCY_VALIDATION.md).
-Install the phone and host from the same experimental release.
-
-- [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-windows-x64.zip)
+- [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-windows-x64.zip)
 - Linux app: a ready-made download is not available yet. See the
   [Linux setup guide](LINUX_SETUP.md) if you want to build and use it now.
-- [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.4.1/HolodoriUsbTetheredUdp-v0.4.1-android.apk)
-- [Release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.4.1)
+- [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-android.apk)
+- [Release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0)
+
+**Upgrading from an alpha or v0.4.1:** the Android app now uses a persistent
+private release key. Uninstall the old APK once, install v0.5.0, and pair again.
+Uninstalling clears the phone app's settings and pairing. Future releases using
+this key can update normally.
 
 You need:
 
 - a Windows 10 or 11 PC, or a Linux PC;
-- an Android phone with USB tethering;
-- one USB data cable.
+- an Android phone;
+- USB tethering and a USB data cable, or both devices on the same private local
+  network with the phone connected over Wi-Fi.
 
 ## Quick start
 
@@ -39,14 +42,18 @@ You need:
 
 1. Download and unzip the Windows app.
 2. Install the Android app on the phone.
-3. Connect the phone to the PC with a USB data cable.
-4. Turn on **USB tethering** in the phone's settings.
-5. Open `HolodoriUsbController.exe` on Windows.
-6. Change the six lane keys if needed, then press **Start**.
-7. Open the Android app.
-8. Move, resize, or rotate the play area, then lock it.
-9. Start the game and play.
-10. Press **Stop** in the Windows app when finished.
+3. For USB, connect a data cable and enable **USB tethering** in the phone's
+   settings. For Wi-Fi, connect both devices to the same private local network.
+4. Open `HolodoriUsbController.exe`, accept the administrator prompt, and open
+   Doritrack on the phone.
+5. Select the same connection type on both devices.
+6. On first use, press **Pair** on both devices. Tap the host's eight numbered
+   lanes on the phone in order, confirm **Pattern matched**, then click
+   **Approve** on the PC. Later sessions remember this pairing.
+7. Change the six lane keys in **Preferences** if needed, then press **Start**
+   on both devices.
+8. Arrange and lock the phone's play area, or select thumb mode, then play.
+9. Press **Stop** when finished.
 
 ### Linux
 
@@ -54,13 +61,13 @@ Linux needs a small amount of one-time setup before the first play session.
 Follow the [Linux setup guide](LINUX_SETUP.md), then:
 
 1. Unpack the Linux bundle and install the Android app on the phone.
-2. Connect the phone with a USB data cable.
-3. Turn on **USB tethering** in the phone's settings.
-4. Open `HolodoriUsbController` from the bundle folder.
-5. Change the six lane keys if needed, then press **Start**.
-6. Open the Android app and arrange the play area.
-7. Start the game and play.
-8. Press **Stop** in the controller when finished.
+2. Connect by USB tethering or the same private local network.
+3. Open `HolodoriUsbController` from the bundle folder and open the phone app.
+4. Select the same connection type and complete the first-use **Pair** flow
+   described above, including local **Approve** on the PC.
+5. Change lane keys if needed, press **Start** on both devices, and arrange the
+   phone's play area.
+6. Start the game and play. Press **Stop** when finished.
 
 The name and location of the USB tethering setting depend on the phone. It is
 usually under **Network**, **Connections**, **Hotspot**, or **Tethering**.
@@ -75,11 +82,13 @@ usually under **Network**, **Connections**, **Hotspot**, or **Tethering**.
 - A disconnect releases held keys instead of leaving them stuck.
 - Lane keys can be changed in the app.
 
-## How the USB connection works
+## How the connection works
 
 USB tethering creates a private cable connection between the phone and PC. The
 Android app sends your touches through that connection, so no USB debugging,
 phone root access, or special USB driver is needed.
+Alternatively, select Wi-Fi to use the same private local network. Pair and
+Start use only the connection type you select.
 
 The controller is designed to keep taps, holds, slides, and chords in the right
 order. If the connection breaks, it releases held keys and avoids playing old
@@ -88,17 +97,17 @@ touches after reconnection.
 The tool sends normal keyboard input to the PC. It does not open, read, or
 change the game process.
 
-The current version does not yet pair the phone and PC with a code. Use it only
-on a trusted PC. If your firewall asks, allow the controller only on the phone's
-USB connection—not on home or public Wi-Fi. Authenticated pairing, explicit
-USB or local-network selection, Wi-Fi path checks, and thumb mode are specified
-for protocol v5 but are not implemented in the current download.
+Protocol V5 authenticates the paired devices and encrypts input. The first-use
+lane pattern must match, and pairing requires approval on the PC. Allow the
+controller through the firewall on your selected USB or private local network.
+Use a trusted PC and keep the UDP listener off public networks. Legacy protocol
+v4 is available only through the explicit USB option and has no authenticated
+pairing.
 
 Developers can read the [architecture guide](EXPERIMENTAL_ARCHITECTURE.md) and
-[current protocol v4 specification](PROTOCOL_V4.md) for the shipping transport,
-or the [protocol v5 specification](PROTOCOL_V5.md) and
-[interoperability vectors](PROTOCOL_V5_TEST_VECTORS.md) for the authenticated
-implementation now present in this branch.
+[protocol v5 specification](PROTOCOL_V5.md) and
+[interoperability vectors](PROTOCOL_V5_TEST_VECTORS.md) for the shipping transport.
+The [protocol v4 specification](PROTOCOL_V4.md) documents the legacy USB mode.
 
 ## Controller options
 
@@ -159,7 +168,10 @@ account on the PC control over keyboard input.
 - Make sure the cable supports data, not charging only.
 - Turn USB tethering off and on again.
 - Wait for the PC to show a new USB network connection.
-- Press **Start** before opening the phone app.
+- Select the same transport on both devices, complete pairing, and press
+  **Start** on both.
+- For Wi-Fi, use the same private subnet and check that the router allows
+  devices to communicate with each other.
 - On Windows, allow the controller when Windows Firewall asks.
 - Close any second copy of the controller.
 - On Linux, follow the connection checks in the
@@ -184,8 +196,9 @@ declined the elevation prompt, close the launcher and open it again.
 
 ### The Android app will not install
 
-An older test build may use a different signing key. Uninstall the old
-Holodori controller app, then install the new Android app.
+Older releases use a different signing key. Uninstall the old Holodori
+controller app once, install v0.5.0, then pair again. This clears the phone
+app's settings and pairing.
 
 ## For developers
 
@@ -194,6 +207,8 @@ launcher. The protocol is designed around an 8.333 ms frame budget for 120 Hz
 play, but real results still depend on the phone, cable, and PC.
 
 Build the release bundle from PowerShell:
+
+Set up the [Android release signing key](packaging/ANDROID_SIGNING.md) first.
 
 ```powershell
 .\packaging\build-experimental.ps1 `

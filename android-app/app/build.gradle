@@ -4,7 +4,25 @@ plugins {
 
 def holodoriVersion = project.findProperty("holodoriVersionName") ?:
         rootProject.file("../VERSION").text.trim()
-def holodoriVersionCode = (project.findProperty("holodoriVersionCode") ?: "33") as int
+def holodoriVersionCode = (project.findProperty("holodoriVersionCode") ?: "34") as int
+
+// Local secrets stay in the ignored .signing directory. CI uses environment variables.
+def signingProperties = new Properties()
+def signingPropertiesFile = rootProject.file("../.signing/android-release.properties")
+if (signingPropertiesFile.isFile()) {
+    signingPropertiesFile.withInputStream { signingProperties.load(it) }
+}
+def releaseSigning = [
+        storeFile: "DORITRACK_KEYSTORE",
+        storePassword: "DORITRACK_STORE_PASSWORD",
+        keyAlias: "DORITRACK_KEY_ALIAS",
+        keyPassword: "DORITRACK_KEY_PASSWORD"
+].collectEntries { property, variable ->
+    [(property): System.getenv(variable) ?: signingProperties.getProperty(property)]
+}
+if (releaseSigning.values().any { it } && !releaseSigning.values().every { it }) {
+    throw new GradleException("Incomplete release signing settings. See packaging/ANDROID_SIGNING.md.")
+}
 
 android {
     namespace "dev.holodori.trackpad"
@@ -19,9 +37,22 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (releaseSigning.storeFile) {
+            release {
+                storeFile rootProject.file(releaseSigning.storeFile)
+                storePassword releaseSigning.storePassword
+                keyAlias releaseSigning.keyAlias
+                keyPassword releaseSigning.keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig signingConfigs.debug
+            if (releaseSigning.storeFile) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled true
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"),
                     "proguard-rules.pro"
@@ -34,4 +65,23 @@ dependencies {
     implementation "org.signal.forks:noise-java:0.1.1"
     testImplementation "junit:junit:4.13.2"
     androidTestImplementation "androidx.test:runner:1.6.2"
+}
+
+// CI can still compile/lint unsigned releases without access to private keys.
+// Distribution scripts must request this check before packaging an APK.
+tasks.register("requireReleaseSigning") {
+    doLast {
+        if (!releaseSigning.storeFile) {
+            throw new GradleException("A private release key is required. See packaging/ANDROID_SIGNING.md.")
+        }
+        def keyStore = java.security.KeyStore.getInstance(
+                rootProject.file(releaseSigning.storeFile),
+                releaseSigning.storePassword.toCharArray())
+        def certificate = keyStore.getCertificate(releaseSigning.keyAlias)
+        if (!keyStore.isKeyEntry(releaseSigning.keyAlias) || certificate == null ||
+                certificate.subjectX500Principal.name.contains("CN=Android Debug")) {
+            throw new GradleException("Release signing requires a private, non-debug key.")
+        }
+        certificate.checkValidity()
+    }
 }

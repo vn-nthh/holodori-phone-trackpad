@@ -25,6 +25,11 @@ access, or nearby-network scanning. See
 4. Install `app/build/outputs/apk/debug/app-debug.apk` through a normal
    download/install flow. Installing the APK does not require USB debugging.
 
+For a signed release APK, use `.\packaging\build-signed-apk.ps1` from the
+repository root. See [release signing and key backup](../packaging/ANDROID_SIGNING.md)
+for first-time setup and GitHub Actions secrets. Release builds without signing
+settings are unsigned; debug builds continue to use the normal debug key.
+
 ## Pair and connect
 
 1. Choose the same **USB tethering** or **Wi-Fi / local network** transport on

@@ -11,7 +11,7 @@ Install:
   1. Copy Android\Doritrack-v5.apk to the phone.
   2. Open the APK on the phone and approve installation from that source.
      If Android reports a signature conflict, uninstall the existing Holodori
-     Controller first; this experimental APK is debug-signed.
+     Controller first; release APKs use a private key, not the debug key.
   3. For USB, enable Settings > Network & internet > Hotspot & tethering > USB
      tethering, connect one data cable, and wait for the RNDIS adapter. For
      Wi-Fi, connect the phone and PC to the same private local subnet.

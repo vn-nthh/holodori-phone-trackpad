@@ -170,8 +170,8 @@ if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
             JAVA_HOME="${JAVA_HOME_ARG}" ANDROID_HOME="${ANDROID_SDK}" ANDROID_SDK_ROOT="${ANDROID_SDK}" \
                 ./gradlew --no-daemon \
                 -PholodoriVersionName="${VERSION}" \
-                -PholodoriVersionCode=33 \
-                clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
+                -PholodoriVersionCode=34 \
+                requireReleaseSigning clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
         )
         APK_SRC="${ANDROID_DIR}/app/build/outputs/apk/release/app-release.apk"
         if [[ ! -f "${APK_SRC}" ]]; then
@@ -225,7 +225,7 @@ fi
     echo "name=${NAME}"
     if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
         echo "android_version_name=${VERSION}"
-        echo "android_version_code=33"
+        echo "android_version_code=34"
     fi
     echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "branch=${BRANCH}"
@@ -239,7 +239,7 @@ fi
     echo "linux_launcher=tauri"
     echo "linux_webview=webkit2gtk-system"
     if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
-        echo "android_signing=debug-key experimental"
+        echo "android_signing=private-release-key"
     fi
 } >"${BUNDLE_DIR}/BUILD-INFO.txt"
 

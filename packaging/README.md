@@ -1,5 +1,9 @@
 # Packaging protocol-v5 builds
 
+Set up the persistent [Android release signing key](ANDROID_SIGNING.md) before
+building a distributable APK or bundle. `build-signed-apk.ps1 -InitializeKey`
+creates the local key once and validates a signed APK; subsequent builds reuse it.
+
 Build release bundles with `build-experimental.ps1` as documented in the root
 README. Keep the native host, Tauri launcher, and APK from the same source
 revision: Noise identities, discovery confinement, interoperability vectors,

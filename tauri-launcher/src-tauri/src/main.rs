@@ -1024,9 +1024,8 @@ fn style_windows_titlebar(window: &tauri::WebviewWindow) {
         DWMWA_USE_IMMERSIVE_DARK_MODE,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SendMessageW, SetClassLongPtrW, SetWindowLongPtrW, SetWindowPos,
-        GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, ICON_BIG, ICON_SMALL, SWP_FRAMECHANGED, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, WM_SETICON, WS_EX_DLGMODALFRAME,
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_DLGMODALFRAME,
     };
 
     let Ok(hwnd) = window.hwnd() else {
@@ -1040,12 +1039,7 @@ fn style_windows_titlebar(window: &tauri::WebviewWindow) {
         let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_DLGMODALFRAME as isize);
 
-        // Remove the executable icon from both caption slots without
-        // removing the native minimize/maximize/close actions.
-        let _ = SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, 0);
-        let _ = SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, 0);
-        let _ = SetClassLongPtrW(hwnd, GCLP_HICON, 0);
-        let _ = SetClassLongPtrW(hwnd, GCLP_HICONSM, 0);
+        // Retain the bundled window/class icons for the taskbar and Alt+Tab.
 
         // Match the native caption and border to the app's ink surface
         // (#14161C from styles.css, as a 0x00BBGGRR COLORREF). The caption

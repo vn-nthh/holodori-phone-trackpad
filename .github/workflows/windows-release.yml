@@ -28,8 +28,24 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Restore Android release key
+        shell: pwsh
+        env:
+          KEYSTORE_BASE64: ${{ secrets.DORITRACK_KEYSTORE_BASE64 }}
+        run: |
+          if (-not $env:KEYSTORE_BASE64) {
+            throw "Set DORITRACK signing secrets first; see packaging/ANDROID_SIGNING.md."
+          }
+          $keyPath = Join-Path $env:RUNNER_TEMP "doritrack-release.p12"
+          [IO.File]::WriteAllBytes($keyPath, [Convert]::FromBase64String($env:KEYSTORE_BASE64))
+          "DORITRACK_KEYSTORE=$keyPath" >> $env:GITHUB_ENV
+
       - name: Build release bundle
         shell: pwsh
+        env:
+          DORITRACK_STORE_PASSWORD: ${{ secrets.DORITRACK_STORE_PASSWORD }}
+          DORITRACK_KEY_ALIAS: ${{ secrets.DORITRACK_KEY_ALIAS }}
+          DORITRACK_KEY_PASSWORD: ${{ secrets.DORITRACK_KEY_PASSWORD }}
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
           $releaseName = if ($env:GITHUB_REF_TYPE -eq "tag") {
@@ -43,12 +59,28 @@ jobs:
             -JavaHome $env:JAVA_HOME `
             -AndroidSdk $env:ANDROID_HOME
 
+      - name: Remove temporary Android release key
+        if: always()
+        shell: pwsh
+        run: |
+          $keyPath = Join-Path $env:RUNNER_TEMP "doritrack-release.p12"
+          if (Test-Path -LiteralPath $keyPath) {
+            Remove-Item -LiteralPath $keyPath
+          }
+
+      - name: Build Microsoft Store installer
+        if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+        shell: pwsh
+        run: |
+          .\packaging\build-microsoft-store.ps1 -Name "Doritrack-$env:GITHUB_REF_NAME"
+
       - uses: actions/upload-artifact@v4
         with:
           name: HolodoriPhoneTrackpad-${{ github.sha }}
           path: |
             release/*.zip
             release/*.apk
+            release/*.exe
           if-no-files-found: error
 
       - name: Publish GitHub release

@@ -9,4 +9,4 @@ if defined JAVA_HOME (
   set JAVA_EXE=java.exe
 )
 "%JAVA_EXE%" -classpath "%CLASSPATH%" org.gradle.wrapper.GradleWrapperMain %*
-endlocal
+endlocal & exit /b %ERRORLEVEL%

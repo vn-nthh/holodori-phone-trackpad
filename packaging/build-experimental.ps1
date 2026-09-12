@@ -73,8 +73,8 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
     --project-dir $AndroidDir `
     --no-daemon `
     "-PholodoriVersionName=$Version" `
-    "-PholodoriVersionCode=33" `
-    clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
+    "-PholodoriVersionCode=34" `
+    requireReleaseSigning clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
 }
@@ -155,7 +155,7 @@ $Dirty = if ($TrackedChanges) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
     "android_version_name=$Version",
-    "android_version_code=33",
+    "android_version_code=34",
     "built_utc=$([DateTime]::UtcNow.ToString('o'))",
     "branch=$Branch",
     "base_commit=$Commit",
@@ -168,7 +168,7 @@ $BuildInfo = @(
     "windows_crt=static",
     "windows_launcher=tauri",
     "windows_webview2=system-runtime",
-    "android_signing=debug-key experimental"
+    "android_signing=private-release-key"
 )
 $BuildInfo | Set-Content -Encoding UTF8 (Join-Path $BundleDir "BUILD-INFO.txt")
 
