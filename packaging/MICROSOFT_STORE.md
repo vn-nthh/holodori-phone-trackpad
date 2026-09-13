@@ -1,56 +1,145 @@
-# Microsoft Store (stable Windows app)
+# Microsoft Store: MSIX
 
-GitHub releases stay the portable zip + APK flow, including alphas as
-prereleases. The Microsoft Store listing is a separate EXE installer and
-**only ships stable `x.y.z` versions**.
+MSIX is the Windows Store packaging standard. Microsoft signs the package for
+free after certification and distributes updates through the Store. No purchased
+code-signing certificate is needed for this submission route. See Microsoft's
+[signing FAQ](https://learn.microsoft.com/en-us/windows/apps/publish/faq/get-started-with-the-microsoft-store).
 
-Do not convert the portable zip into an installer. Do not submit alpha tags.
+GitHub continues to offer a Windows-only portable ZIP and a separate Android
+APK, starting with v0.5.1-alpha2. Install phone and host from the same release.
+The unsigned MSIX is a developer submission artifact, not a public GitHub
+installer. Store signing does not sign the separate portable executables.
 
-## What this repository automates
+## Package contents and behavior
 
-On a stable `vX.Y.Z` tag, Windows CI builds
-`release/Doritrack-vX.Y.Z-windows-x64-setup.exe` after the normal bundle and
-attaches it to that GitHub release. The installer is:
+`build-microsoft-store.ps1` uses the Windows SDK's MakeAppx tool to package the
+checksum-verified Windows bundle. It includes the launcher, native host under
+`Windows/`, existing app icons, license, and build information. No Android APK,
+touch probe, installer stub, or development certificate is included.
 
-- NSIS, silent with `/S`
-- current-user (no admin required to install)
-- WebView2 **offline** (Store rejects downloaders)
-- self-contained with `Windows/holodori-native-host.exe` next to the launcher
+The installed app's taskbar and Start menu icons use `PC Logo Taskbar.png`.
+The package logo uses the separate `PC Logo - App Store.png` artwork. In Partner
+Center's **Store listings > Store logos**, upload
+[`assets/icons/store-listing-300.png`](../assets/icons/store-listing-300.png) as
+the **1:1 App tile icon (300 x 300 pixels)**. Microsoft prioritizes that image
+over the package image on Store pages. See Microsoft's
+[Store image requirements](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/screenshots-and-images)
+and the [icon regeneration instructions](../assets/icons/README.md).
 
-Locally, after a successful `packaging/build-experimental.ps1` on a stable
-`VERSION`:
+The package targets x64 Windows 10 version 2004 (build 19041) and later, including
+Windows 11. It retains the launcher's `requireAdministrator` manifest and
+declares `runFullTrust` and `allowElevation`. This preserves elevated-game input
+and USB-tether route recovery; it does not redesign the input path or remove
+features to make packaging pass.
+
+**Store publication depends on capability approval.** Microsoft requires advance
+contact at `reportapp@microsoft.com` with justification for `allowElevation`.
+Successful MakeAppx validation is not Store certification. See Microsoft's
+[capability reference](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/app-capability-declarations).
+
+Suggested certification explanation: Doritrack is an unofficial Android phone
+controller. Its Rust host submits ordinary Windows keyboard input, including
+when the target game is elevated. The optional local-only USB mode temporarily
+changes routes on the discovered tether adapter and restores them on Stop or
+crash recovery. The app uses no custom driver, game-process hooks, or game-memory
+access. Include the phone setup instructions and demonstrate safe release on
+disconnect. Do not claim Microsoft has approved these capabilities in advance.
+
+## WebView2
+
+The launcher uses the system Evergreen WebView2 Runtime, as the portable build
+does. The MSIX declares `Microsoft.WebView2` as an external dependency for
+Microsoft App Installer. That declaration is ignored by Store, PowerShell,
+and other installation mechanisms; it is not a guarantee that those routes
+install WebView2. Keep WebView2 listed as a prerequisite and verify it on clean
+Store test machines. If absent, install the
+[Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/).
+See Microsoft's [external dependency rules](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-win32dependencies-externaldependency).
+
+## Build and validate before reserving the Store name
+
+Install the Windows SDK including `MakeAppx.exe`, plus the normal project build
+tools and Android release signing setup. From the repository root:
 
 ```powershell
-.\packaging\build-microsoft-store.ps1
+$version = (Get-Content VERSION -Raw).Trim()
+.\packaging\build-experimental.ps1 -Name "Doritrack-v$version"
+.\packaging\build-microsoft-store.ps1 -Development
 ```
 
-The setup.exe on a GitHub release URL must never be replaced. Bump the version
-and create a new tag instead.
+Use `-BundlePath <validated-bundle-directory>` if the bundle has another name.
+`-Name <unique-name>` selects a fresh MSIX output directory; builds refuse to
+overwrite an existing one. Neither command changes VERSION or published tags.
 
-## Partner Center (once)
+Development mode always uses `Doritrack.PackagingTest`, publisher
+`CN=Doritrack Packaging Test`, and a visibly marked app name. It accepts alpha
+versions and overrides any production identity environment variables. Its output
+is under `build/msix/<name>-msix-test/`, ending in `-msix-test-unsigned.msix`.
+Never submit this identity to Partner Center.
 
-1. Enroll at [Microsoft Partner Center](https://partner.microsoft.com/dashboard).
-2. Apps and games → **New product** → **EXE or MSI app**.
-3. Reserve a unique name (for example `Doritrack`).
-4. Fill properties, age ratings, and the Store listing.
-5. Packages page for the first stable tag:
+For a machine already configured for Windows developer mode, register the
+generated loose layout with `Add-AppxPackage -Register <layout/AppxManifest.xml>`
+and launch its Start menu entry. This avoids purchasing or trusting a certificate.
+The package's normal administrator prompt still applies. Remove only the
+`Doritrack.PackagingTest` registration when testing is finished. An unsigned MSIX
+cannot be installed by ordinary double-click; sideloading a packed MSIX requires
+appropriate signing and trust even when the eventual Store signing is free.
 
-   | Field | Value |
+Run the Windows App Certification Kit and test the installed package's launch,
+pairing, Stop, report folder, USB route recovery, update, and uninstall on Windows
+10/11 before submission. MakeAppx validates package structure; it does not test
+those behaviors or physical input latency. The checks in `AGENTS.md` still apply.
+
+## Production identity and submissions
+
+1. Reserve the app name as an **MSIX app** in Partner Center.
+2. Copy the exact Product identity values into these GitHub Actions repository
+   variables (they are identifiers, not signing secrets):
+
+   | Repository variable | Partner Center field |
    | --- | --- |
-   | Package URL | `https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/vX.Y.Z/Doritrack-vX.Y.Z-windows-x64-setup.exe` |
-   | Architecture | `x64` |
-   | Installer parameters | `/S` |
-   | App type | `EXE` |
+   | `DORITRACK_MSIX_PACKAGE_NAME` | Package/Identity/Name |
+   | `DORITRACK_MSIX_PUBLISHER` | Package/Identity/Publisher, including `CN=` |
+   | `DORITRACK_MSIX_PUBLISHER_DISPLAY_NAME` | Publisher display name |
 
-6. Notes for certification: the installer is current-user and silent; the
-   installed app then requests administrator once at launch so it can inject
-   keys into an elevated game and recover USB-tether routes. There is no custom
-   driver. Local-only USB tethering may change routes on the phone's RNDIS
-   adapter and restores them on Stop.
+3. Request the required capability review and complete the listing.
+4. On a stable `vX.Y.Z` tag, CI builds the production MSIX and retains it in the
+   `Doritrack-MSIX-submission-<commit>` Actions artifact. Download that artifact
+   and upload the MSIX directly to Partner Center's Packages page. No installer
+   URL or `/S` argument is used. Microsoft signs it after certification.
 
-Later stables are a **new submission** with the new versioned GitHub URL. Leave
-alphas on GitHub only.
+Locally, the same values can be passed with `-PackageName`, `-Publisher`, and
+`-PublisherDisplayName`, or set as the environment variables above. Then run
+`build-microsoft-store.ps1` without `-Development` after the matching stable
+bundle has passed validation. Missing identity or an alpha VERSION fails the
+production build instead of creating a falsely labeled Store submission.
 
-A Windows code-signing certificate is recommended, not required for the first
-listing. Store MSIX packaging is not used: this app's release binary embeds
-`requireAdministrator`, which a Store MSIX cannot preserve.
+Production output is under `build/msix/<name>-store/` with an
+`-store-unsigned.msix` suffix and SHA-256 sidecar. CI keeps MSIX artifacts separate
+from the ZIP/APK assets published on GitHub. Branch and alpha CI builds validate
+the test identity; only stable tags use the production identity.
+
+MSIX version numbers use `(app major + 1).minor.patch.0`: app `0.5.1` maps to
+package `1.5.1.0`, and app `1.0.0` maps to package `2.0.0.0`. The app still displays
+its original version. This keeps the first component nonzero, the Store-reserved
+fourth component zero, and upgrades increasing across the 0.x to 1.x transition.
+Alpha suffixes are ignored only for test-identity packages. See Microsoft's
+[package requirements](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/app-package-requirements).
+
+## Debug and latency reports
+
+After Stop, use **Settings > Open report folder** in either distribution:
+
+- Portable: `%LOCALAPPDATA%\Doritrack\Logs`.
+- MSIX: `%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs`.
+
+The host queries its actual Windows package identity; the folder does not contain
+the package version or depend on the installation directory. Reports survive
+updates. MSIX reset/uninstall can remove package data, so copy reports elsewhere
+before either operation if they need to be retained. Local data belongs to the
+account running the app, including when UAC uses another account's credentials.
+
+Old portable reports remain under `Windows\Logs` in their old extracted folders.
+`--metrics-file PATH` still overrides the default. The app keeps metrics in memory
+and writes reports after Stop; report browsing is disabled while the controller
+is running.

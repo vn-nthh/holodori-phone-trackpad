@@ -4,7 +4,7 @@ plugins {
 
 def holodoriVersion = project.findProperty("holodoriVersionName") ?:
         rootProject.file("../VERSION").text.trim()
-def holodoriVersionCode = (project.findProperty("holodoriVersionCode") ?: "35") as int
+def holodoriVersionCode = (project.findProperty("holodoriVersionCode") ?: "36") as int
 
 // Local secrets stay in the ignored .signing directory. CI uses environment variables.
 def signingProperties = new Properties()

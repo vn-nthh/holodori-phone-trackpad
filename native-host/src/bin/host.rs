@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use holodori_native_host::input::{InputSink, cancel_with_deadline, commit_ready};
 use holodori_native_host::keyboard::KeyboardSink;
-use holodori_native_host::metrics::HostMetrics;
+use holodori_native_host::metrics::{HostMetrics, log_directory};
 use holodori_native_host::network::{DEFAULT_UDP_PORT, UdpConnection, UdpHost};
 use holodori_native_host::platform;
 use holodori_native_host::protocol::{
@@ -371,11 +371,16 @@ fn run() -> Result<(), Box<dyn Error>> {
         parser.connection_discarded_bytes,
     );
     let report_result = if metrics.enabled() {
-        let report_path = options.metrics_file.unwrap_or_else(default_metrics_path);
-        metrics.write_report(&report_path).map(|()| {
-            println!("Metrics written to {}", report_path.display());
-            let _ = io::stdout().flush();
-        })
+        options
+            .metrics_file
+            .map(Ok)
+            .unwrap_or_else(default_metrics_path)
+            .and_then(|report_path| {
+                metrics.write_report(&report_path)?;
+                println!("Metrics written to {}", report_path.display());
+                let _ = io::stdout().flush();
+                Ok(())
+            })
     } else {
         Ok(())
     };
@@ -555,14 +560,17 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
     let release_result = cancel_sink_with_deadline(&mut sink, &mut metrics);
     metrics.set_parser_counters(0, 0, 0);
     let report_result = if metrics.enabled() {
-        let report_path = options
+        options
             .metrics_file
             .clone()
-            .unwrap_or_else(default_metrics_path);
-        metrics.write_report(&report_path).map(|()| {
-            println!("Metrics written to {}", report_path.display());
-            let _ = io::stdout().flush();
-        })
+            .map(Ok)
+            .unwrap_or_else(default_metrics_path)
+            .and_then(|report_path| {
+                metrics.write_report(&report_path)?;
+                println!("Metrics written to {}", report_path.display());
+                let _ = io::stdout().flush();
+                Ok(())
+            })
     } else {
         Ok(())
     };
@@ -699,40 +707,12 @@ fn install_exit_command_thread() -> io::Result<()> {
         .map(|_| ())
 }
 
-fn default_metrics_path() -> PathBuf {
+fn default_metrics_path() -> io::Result<PathBuf> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    metrics_log_directory().join(format!("holodori-metrics-{timestamp}.txt"))
-}
-
-#[cfg(windows)]
-fn metrics_log_directory() -> PathBuf {
-    env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Logs")
-}
-
-#[cfg(not(windows))]
-fn metrics_log_directory() -> PathBuf {
-    // Writing next to the binary (the Windows convention) is wrong on Linux:
-    // the binary directory is often read-only (e.g. /usr/bin) and is not
-    // where per-user runtime state belongs. Follow the XDG base directory
-    // spec instead. `write_report` creates this directory if it is missing.
-    if let Ok(state_home) = env::var("XDG_STATE_HOME")
-        && !state_home.is_empty()
-    {
-        return PathBuf::from(state_home).join("holodori").join("logs");
-    }
-    let home = env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    PathBuf::from(home)
-        .join(".local")
-        .join("state")
-        .join("holodori")
-        .join("logs")
+    Ok(log_directory()?.join(format!("holodori-metrics-{timestamp}.txt")))
 }
 
 fn serve_connection(

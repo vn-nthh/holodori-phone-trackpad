@@ -68,11 +68,24 @@ jobs:
             Remove-Item -LiteralPath $keyPath
           }
 
-      - name: Build Microsoft Store installer
-        if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+      - name: Build Microsoft Store MSIX
         shell: pwsh
+        env:
+          DORITRACK_MSIX_PACKAGE_NAME: ${{ vars.DORITRACK_MSIX_PACKAGE_NAME }}
+          DORITRACK_MSIX_PUBLISHER: ${{ vars.DORITRACK_MSIX_PUBLISHER }}
+          DORITRACK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.DORITRACK_MSIX_PUBLISHER_DISPLAY_NAME }}
         run: |
-          .\packaging\build-microsoft-store.ps1 -Name "Doritrack-$env:GITHUB_REF_NAME"
+          $version = (Get-Content VERSION -Raw).Trim()
+          $development = $env:GITHUB_REF_TYPE -ne "tag" -or $version.Contains("-")
+          .\packaging\build-microsoft-store.ps1 -Development:$development
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Doritrack-MSIX-submission-${{ github.sha }}
+          path: |
+            build/msix/**/*.msix
+            build/msix/**/*.msix.sha256
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
         with:
@@ -80,7 +93,6 @@ jobs:
           path: |
             release/*.zip
             release/*.apk
-            release/*.exe
           if-no-files-found: error
 
       - name: Publish GitHub release
@@ -91,12 +103,11 @@ jobs:
         run: |
           $notesFile = Join-Path "packaging\release-notes" "$env:GITHUB_REF_NAME.md"
           $isPrerelease = $env:GITHUB_REF_NAME -like "*-alpha*"
+          $assets = Get-ChildItem "release" -File |
+            Where-Object { $_.Extension -in @(".zip", ".apk") } |
+            ForEach-Object FullName
           if ($isPrerelease) {
-            $assets = Get-ChildItem "release" -File |
-              Where-Object { $_.Extension -in @(".zip", ".apk") } |
-              ForEach-Object FullName
             gh release create $env:GITHUB_REF_NAME $assets --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file $notesFile --prerelease
           } else {
-            $assets = Get-ChildItem "release" -File | ForEach-Object FullName
             gh release create $env:GITHUB_REF_NAME $assets --title "Holodori Phone Trackpad $env:GITHUB_REF_NAME" --notes-file $notesFile
           }

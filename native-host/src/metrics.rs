@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::protocol::{ACTION_HEARTBEAT, MAX_REORDERED_FRAMES, TouchFrame};
@@ -8,6 +8,74 @@ use crate::protocol::{ACTION_HEARTBEAT, MAX_REORDERED_FRAMES, TouchFrame};
 const HISTOGRAM_BIN_NANOS: f64 = 4_000.0;
 const HISTOGRAM_BINS: usize = 131_072;
 const NANOS_PER_MILLI: f64 = 1_000_000.0;
+
+/// Resolve report storage only during setup or after Stop, never per frame.
+#[cfg(windows)]
+pub fn log_directory() -> io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{APPMODEL_ERROR_NO_PACKAGE, ERROR_SUCCESS};
+    use windows_sys::Win32::Storage::Packaging::Appx::{
+        GetCurrentPackageFamilyName, PACKAGE_FAMILY_NAME_MAX_LENGTH,
+    };
+
+    let mut buffer = [0_u16; PACKAGE_FAMILY_NAME_MAX_LENGTH as usize + 1];
+    let mut length = buffer.len() as u32;
+    // The buffer is sized to the documented maximum, including its terminator.
+    let result = unsafe { GetCurrentPackageFamilyName(&mut length, buffer.as_mut_ptr()) };
+    let family = match result {
+        APPMODEL_ERROR_NO_PACKAGE => None,
+        ERROR_SUCCESS if length > 1 && length as usize <= buffer.len() => {
+            Some(OsString::from_wide(&buffer[..length as usize - 1]))
+        }
+        ERROR_SUCCESS => return Err(io::Error::other("invalid Windows package family name")),
+        code => return Err(io::Error::from_raw_os_error(code as i32)),
+    };
+    windows_log_directory(std::env::var_os("LOCALAPPDATA"), family.as_deref())
+}
+
+#[cfg(windows)]
+fn windows_log_directory(
+    base: Option<std::ffi::OsString>,
+    package_family: Option<&std::ffi::OsStr>,
+) -> io::Result<PathBuf> {
+    let base = base
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "LOCALAPPDATA is unavailable or not absolute; use --metrics-file PATH",
+            )
+        })?;
+    // Explicit package storage avoids relying on MSIX's redirection behavior,
+    // which differs between elevated and unelevated desktop processes.
+    Ok(match package_family {
+        Some(family) => base
+            .join("Packages")
+            .join(family)
+            .join("LocalState")
+            .join("Logs"),
+        None => base.join("Doritrack").join("Logs"),
+    })
+}
+
+#[cfg(not(windows))]
+pub fn log_directory() -> io::Result<PathBuf> {
+    // Keep the existing XDG location for Linux users.
+    if let Ok(state_home) = std::env::var("XDG_STATE_HOME")
+        && !state_home.is_empty()
+    {
+        return Ok(PathBuf::from(state_home).join("holodori").join("logs"));
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("state")
+        .join("holodori")
+        .join("logs"))
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Snapshot {
@@ -655,6 +723,40 @@ fn write_snapshot(writer: &mut impl Write, label: &str, value: Snapshot) -> io::
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn reports_use_user_storage_for_portable_and_msix_without_versioned_paths() {
+        use super::windows_log_directory;
+        use std::ffi::OsStr;
+        use std::io::ErrorKind;
+        use std::path::Path;
+
+        for invalid in [
+            None,
+            Some("".into()),
+            Some("relative".into()),
+            Some(r"\rooted".into()),
+        ] {
+            assert_eq!(
+                windows_log_directory(invalid, None).unwrap_err().kind(),
+                ErrorKind::NotFound
+            );
+        }
+        let base = Path::new(r"C:\Users\プレイヤー One\AppData\Local");
+        assert_eq!(
+            windows_log_directory(Some(base.into()), None).unwrap(),
+            base.join("Doritrack").join("Logs")
+        );
+        let family = OsStr::new("Doritrack.PackagingTest_123456789abcd");
+        assert_eq!(
+            windows_log_directory(Some(base.into()), Some(family)).unwrap(),
+            base.join("Packages")
+                .join(family)
+                .join("LocalState")
+                .join("Logs")
+        );
+    }
+
     use super::*;
 
     #[test]

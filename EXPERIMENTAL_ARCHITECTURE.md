@@ -301,11 +301,15 @@ clock origins.
 Pass `--metrics` to collect bounded in-memory samples. No metrics are formatted,
 sorted, printed, or written while input is active. Press Q then Enter, Ctrl+C,
 or close the console to request graceful shutdown; the host then writes one
-timestamped file under `Windows\Logs` on Windows or
+timestamped file under `%LOCALAPPDATA%\Doritrack\Logs` for portable Windows,
+`%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs` for Store MSIX, or
 `$XDG_STATE_HOME/holodori/logs` (falling back to
 `~/.local/state/holodori/logs`) on Linux. `--metrics-file PATH` selects an
 explicit destination and `--warn-ms MS` changes the default 8.333 ms final
-warning budget.
+warning budget. The launcher uses the same path resolver for its
+**Open report folder** action, available after Stop. MSIX uses the runtime
+package family name so updates preserve the report path; reset/uninstall may
+remove package data.
 
 The report contains mean, max, p50, p90, p99, and p99.9 values for current-event
 to-host-input estimated latency, Android current input dispatch, Android historical

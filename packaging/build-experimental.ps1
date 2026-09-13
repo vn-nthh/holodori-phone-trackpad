@@ -73,7 +73,7 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
     --project-dir $AndroidDir `
     --no-daemon `
     "-PholodoriVersionName=$Version" `
-    "-PholodoriVersionCode=34" `
+    "-PholodoriVersionCode=36" `
     requireReleaseSigning clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
@@ -122,11 +122,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $WindowsDir = Join-Path $BundleDir "Windows"
-$AndroidOutputDir = Join-Path $BundleDir "Android"
 $DocsDir = Join-Path $BundleDir "Docs"
 New-Item -ItemType Directory -Path @(
     $WindowsDir,
-    $AndroidOutputDir,
     $DocsDir
 ) | Out-Null
 
@@ -136,7 +134,6 @@ Copy-Item (Join-Path $NativeRelease "holodori-native-host.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-probe.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-smoke.exe") $WindowsDir
 Copy-Item (Join-Path $TauriRelease "holodori-usb-controller.exe") (Join-Path $BundleDir "HolodoriUsbController.exe")
-Copy-Item $Apk (Join-Path $AndroidOutputDir "Doritrack-v5.apk")
 Copy-Item $Apk $StandaloneApkPath
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\README.txt") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-touch.cmd") $BundleDir
@@ -168,6 +165,7 @@ $BuildInfo = @(
     "windows_crt=static",
     "windows_launcher=tauri",
     "windows_webview2=system-runtime",
+    "android_package=$Name-android.apk",
     "android_signing=private-release-key"
 )
 $BuildInfo | Set-Content -Encoding UTF8 (Join-Path $BundleDir "BUILD-INFO.txt")

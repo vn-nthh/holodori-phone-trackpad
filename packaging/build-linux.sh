@@ -170,7 +170,7 @@ if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
             JAVA_HOME="${JAVA_HOME_ARG}" ANDROID_HOME="${ANDROID_SDK}" ANDROID_SDK_ROOT="${ANDROID_SDK}" \
                 ./gradlew --no-daemon \
                 -PholodoriVersionName="${VERSION}" \
-                -PholodoriVersionCode=34 \
+                -PholodoriVersionCode=36 \
                 requireReleaseSigning clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
         )
         APK_SRC="${ANDROID_DIR}/app/build/outputs/apk/release/app-release.apk"

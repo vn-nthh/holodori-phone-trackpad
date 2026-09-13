@@ -18,6 +18,11 @@ The stable version is **v0.5.0**, with authenticated USB/Wi-Fi sessions,
 pairing, thumb mode, and new Android and PC icons.
 Install the phone and host from the same release.
 
+Starting with v0.5.1-alpha2, the portable Windows ZIP contains only the Windows
+app and its supporting files. Download the Android APK separately from the same
+release. Microsoft Store distribution uses MSIX with Microsoft's free package
+signing after certification; see the [Store packaging guide](packaging/MICROSOFT_STORE.md).
+
 - [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-windows-x64.zip)
 - Linux app: a ready-made download is not available yet. See the
   [Linux setup guide](LINUX_SETUP.md) if you want to build and use it now.
@@ -147,8 +152,13 @@ press Start again.
 
 ### Save latency report when stopped
 
-Leave this checked if you want a report after playing. Reports are saved under
-`Windows\Logs` on Windows. Linux locations are listed in the
+Leave this checked if you want a report after playing. After **Stop**, use
+**Settings > Open report folder**. Starting with v0.5.1-alpha2, portable Windows
+reports use `%LOCALAPPDATA%\Doritrack\Logs`; Store MSIX reports use
+`%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs`.
+Reports survive app updates. Copy Store reports elsewhere before an app reset or
+uninstall if you want to keep them. Older releases keep their reports under
+`Windows\Logs` in the extracted folder. Linux locations are listed in the
 [Linux setup guide](LINUX_SETUP.md#latency-reports). The app writes the report
 only after you press **Stop**, not while you are playing.
 
