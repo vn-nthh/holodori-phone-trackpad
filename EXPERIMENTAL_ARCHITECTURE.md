@@ -270,6 +270,15 @@ uses independent cipher locks for send and receive, reusable control buffers,
 and a retained-frame ring with deadline waits and fair 2 ms repairs. Network
 interface checks run on watchdog workers, outside gameplay send/receive work.
 
+V5 sends two ACK copies when ordered OS acceptance advances, and one immediate
+ACK when a logical duplicate or ordering hole leaves progress unchanged. This
+reduces redundant feedback without delaying ACKs or changing phone repair timing.
+Android 10+ Wi-Fi bindings request a low-latency Wi-Fi lock during pairing and
+play, including rests, and release it with the binding. USB does not acquire it.
+The Windows native host requests HighQoS to disable execution-speed throttling
+alongside its existing high input priority. These startup requests are best
+effort; no busy polling, affinity pinning, or system-wide power changes are used.
+
 An absolute promise that every phone is faster than every physical keyboard is
 not physically testable or universally true: phone touch scan rate and USB
 controller scheduling vary. The enforceable target for this branch is:
@@ -326,4 +335,5 @@ gradlew.bat assembleRelease
 ```
 
 On the phone, enable USB tethering before launching the host. The app uses
-normal `INTERNET` and `ACCESS_NETWORK_STATE` permissions only.
+normal `INTERNET`, `ACCESS_NETWORK_STATE`, and `ACCESS_WIFI_STATE` permissions,
+plus `WAKE_LOCK` for the v5 Wi-Fi low-latency request.

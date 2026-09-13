@@ -103,10 +103,8 @@ pub fn install_shutdown_handler(
     Ok(())
 }
 
-/// Best-effort attempt to raise this process's/thread's scheduling priority
-/// so input injection is not delayed behind unrelated desktop work. Never
-/// fails outright; a denial is common (e.g. no elevated privileges) and must
-/// not block the tool from running.
+/// Best-effort input priority and HighQoS for the windowless host process.
+/// Failure must not prevent play; these are scheduling requests, not guarantees.
 #[cfg(windows)]
 pub fn raise_input_priority() {
     use windows_sys::Win32::System::Threading::{
@@ -118,6 +116,37 @@ pub fn raise_input_priority() {
     if !process_ok || !thread_ok {
         eprintln!("warning: Windows did not grant the requested high input priority");
     }
+    if let Err(error) = request_high_qos() {
+        eprintln!("warning: Windows did not grant input HighQoS: {error}");
+    }
+}
+
+#[cfg(windows)]
+fn request_high_qos() -> io::Result<()> {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+        ProcessPowerThrottling, SetProcessInformation,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // Opt out of execution-speed throttling without changing timer policy,
+    // affinity, or the user's system-wide power configuration.
+    let ok = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            std::ptr::from_ref(&state).cast(),
+            std::mem::size_of_val(&state) as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -136,5 +165,48 @@ pub fn raise_input_priority() {
         if !matches!(error.raw_os_error(), Some(libc::EACCES) | Some(libc::EPERM)) {
             eprintln!("warning: the OS did not grant the requested high input priority: {error}");
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn high_qos_is_applied_to_the_host_process() {
+        const CHILD: &str = "DORITRACK_HIGH_QOS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Process-wide priority must not affect other parallel tests.
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "platform::tests::high_qos_is_applied_to_the_host_process",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, GetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+            ProcessPowerThrottling,
+        };
+        super::raise_input_priority();
+        let mut state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ..Default::default()
+        };
+        let ok = unsafe {
+            GetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                std::ptr::from_mut(&mut state).cast(),
+                std::mem::size_of_val(&state) as u32,
+            )
+        };
+        assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+        assert_ne!(state.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0);
+        assert_eq!(state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0);
     }
 }

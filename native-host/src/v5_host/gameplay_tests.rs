@@ -206,6 +206,64 @@ fn real_receive_loop_reorders_deduplicates_and_commits_before_ack() {
 }
 
 #[test]
+fn ack_copies_follow_committed_progress_including_ordering_holes() {
+    let (connection, mut phone) = pair();
+    let worker = start(connection, MeasuredSink::new(phone.epoch));
+    phone.touch(0, ACTION_CANCEL);
+    phone.touch(0, ACTION_CANCEL); // Re-encrypted session-start duplicate.
+    phone.touch(2, ACTION_UP); // Buffered behind missing sequence one.
+    phone.touch(2, ACTION_UP); // Buffered duplicate still makes no progress.
+    phone.touch(1, ACTION_DOWN); // Commits both one and two.
+    phone.touch(2, ACTION_UP);
+    phone.abort();
+    let (sink, _) = worker.join().unwrap();
+    assert_eq!(sink.sequences, [0, 1, 2]);
+    assert!(!sink.has_active_input());
+
+    // The host has finished sending. Drain the real encrypted datagrams and
+    // check their count, cumulative IDs, and nonce/replay validity together.
+    phone.socket.set_nonblocking(true).unwrap();
+    let mut acknowledgements = Vec::new();
+    loop {
+        let length = match phone.socket.recv(&mut phone.bytes) {
+            Ok(length) => length,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("ACK receive failed: {error}"),
+        };
+        let header = phone
+            .cipher
+            .open_in_place(Direction::HostToPhone, &mut phone.bytes[..length])
+            .unwrap();
+        if header.message_type == HOST_ACK {
+            acknowledgements.push(header.logical_id);
+        }
+    }
+    assert_eq!(acknowledgements, [0, 0, 0, 0, 0, 2, 2, 2]);
+}
+
+#[test]
+fn lost_ack_pairs_recover_on_replay_without_reinjecting_input() {
+    let (connection, mut phone) = pair();
+    let worker = start(connection, MeasuredSink::new(phone.epoch));
+    for (sequence, action) in [(0, ACTION_CANCEL), (1, ACTION_DOWN)] {
+        phone.touch(sequence, action);
+        // Discard both ACKs as if neither reached Android's retained queue.
+        phone.ack(sequence).unwrap();
+        phone.ack(sequence).unwrap();
+        // A fresh packet number carrying the same logical frame repairs that
+        // lost feedback, including the initial CANCEL boundary and a held key.
+        phone.touch(sequence, action);
+        phone.ack(sequence).unwrap();
+    }
+    phone.touch(2, ACTION_UP);
+    phone.ack(2).unwrap();
+    phone.abort();
+    let (sink, _) = worker.join().unwrap();
+    assert_eq!(sink.sequences, [0, 1, 2]);
+    assert!(!sink.has_active_input());
+}
+
+#[test]
 fn sink_failure_withholds_ack_and_releases_held_keys() {
     let (connection, mut phone) = pair();
     let mut sink = MeasuredSink::new(phone.epoch);

@@ -439,12 +439,17 @@ V5 keeps the v4 delivery semantics after authentication:
   in order, and deduplicates repairs.
 - The phone sends the first copy immediately, a separately encrypted redundant
   copy immediately, and starts repair after 2 ms when cumulative progress does
-  not cover the frame. Host controls use the same two-copy rule. An overdue
-  repair gets a turn between new immediate pairs, so a burst of new samples
+  not cover the frame. An overdue repair gets a turn between new immediate
+  pairs, so a burst of new samples
   cannot starve the missing sequence. The writer waits for queue notifications
   or the next repair/heartbeat deadline instead of polling every millisecond.
 - The host advances its cumulative ACK only after the selected Windows or Linux
-  sink accepts the complete ordered frame.
+  sink accepts the complete ordered frame. Each advancement sends two immediate,
+  independently encrypted ACK copies. A valid logical duplicate or future frame
+  behind an ordering hole sends one immediate ACK with the unchanged cumulative
+  sequence, so lost feedback can recover without another redundant pair. ACKs
+  are never delayed to collect more frames. Initial HELLO and PONG responses
+  retain two copies; HELLO repairs remain single-copy.
 - An 8 ms acknowledged full-state heartbeat sustains active stationary
   contacts. Idle sessions do not manufacture touch frames.
 - A 64 ms oldest-pending or no-ACK-progress boundary makes Android abandon the
@@ -469,6 +474,15 @@ to these values requires loopback fault injection and real phone/PC evidence
 against the 8.333 ms target.
 
 ## Wi-Fi path measurement
+
+On Android 10 and newer, each selected Wi-Fi binding requests a
+`WIFI_MODE_FULL_LOW_LATENCY` lock for both Pair and Start. The binding owns the
+lock through rests and releases it on close, replacement, or failed setup.
+This uses `WAKE_LOCK`; Android activates the low-latency policy only while the
+app is foreground, the screen is on, and the phone is connected to an AP.
+Older Android versions and USB keep their existing radio behavior. An unavailable
+lock is reported in the Android log and does not prevent connection. Hardware
+latency improvements still require measurement on the actual phone and AP.
 
 Wi-Fi signal strength is useful diagnosis, not proof of identity and not a
 compatibility gate. During the human lane-entry interval, the apps run a

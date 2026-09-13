@@ -533,7 +533,8 @@ fn process_gameplay_frame(
     metrics.observe_received(&frame, arrival, replay);
     ordered.push(frame);
 
-    if commit_ready(ordered, sink, metrics, stopping)? {
+    let progressed = commit_ready(ordered, sink, metrics, stopping)?;
+    if progressed {
         control.last_committed_frame = Instant::now();
         control.last_idle_activity = control.last_committed_frame;
     }
@@ -546,14 +547,27 @@ fn process_gameplay_frame(
     }
     let acknowledged = ordered.acknowledged_sequence();
     let ack_started = Instant::now();
-    connection.send_control(
-        HOST_ACK,
-        session_id,
-        acknowledged,
-        RECEIVE_WINDOW,
-        control.lane_count,
-        || metrics.clock_nanos(Instant::now()),
-    )?;
+    if progressed {
+        connection.send_control(
+            HOST_ACK,
+            session_id,
+            acknowledged,
+            RECEIVE_WINDOW,
+            control.lane_count,
+            || metrics.clock_nanos(Instant::now()),
+        )?;
+    } else {
+        // A logical duplicate or ordering hole still needs an immediate ACK
+        // to recover lost feedback, but does not need another redundant pair.
+        connection.send_control_once(
+            HOST_ACK,
+            session_id,
+            acknowledged,
+            RECEIVE_WINDOW,
+            control.lane_count,
+            metrics.clock_nanos(Instant::now()),
+        )?;
+    }
     metrics.observe_ack_write(ack_started.elapsed());
     Ok(())
 }
