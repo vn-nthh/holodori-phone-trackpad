@@ -1,0 +1,59 @@
+Doritrack diagnostic report schema=2 protocol=5 transport=synthetic-wifi duration_s=0.024
+environment=synthetic fixture; no physical latency claim; QoS/thermal/driver unavailable
+diagnostic_drop_span_ns=None
+environment_at_stop=os=windows process_priority_readback=32 input_thread_priority_readback=0 qos_query_ok=true qos_control_mask=0 qos_state_mask=0 thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified
+budget_ns=8333333 diagnostic_records_dropped=0 incidents=3 omitted_incident_triggers=0
+coverage=host-observed frames only; join Android report to account for frames never received. Any omitted evidence or queue loss makes forensic coverage incomplete.
+latency=OS submission, not game-observed input. No one-way point estimate. Local lower bounds exclude unknown forward transit. Duplex residual includes both directions and endpoint scheduling; never divide by two.
+clock=echo validity <=2s; relative drift allowance 1000ppm is an assumption, not calibration; MotionEvent precision may be 1ms on Android <34.
+parser_invalid=0 parser_discarded_bytes=0 parser_boundary_bytes=0
+ack_progress_submissions=1000
+clock_exchange_missing_or_invalid=2
+connections=1
+current_frames_observed=938
+failed_boundaries=1
+future_unique_frames=1
+gameplay_budget_definite_fail=2
+gameplay_os_accepted=1000
+gameplay_uncommitted_at_boundary=1
+gameplay_within_budget_under_clock_assumption=998
+historical_frames_observed=63
+logical_duplicate_datagrams=1000
+observed_uncommitted_at_boundary=1
+ordering_holes=1
+os_accepted=1002
+os_failed=1
+release_attempts=1
+reused_control_echo_excluded_from_reverse_distribution=1
+sink_retries=300
+unique_heartbeats=1
+unique_logical_frames_observed=1003
+histogram=integer nanoseconds; 32 subdivisions/octave; full u64 range; inclusive quantile bounds; exact maximum and strict budget exceed counts; no warmup exclusion
+android_callback_to_winning_attempt_ns: n=1001 invalid=0 over_budget=0 mean_ns=102117 max_ns=2120000 p50=Some([98304, 100351]) p90=Some([98304, 100351]) p99=Some([98304, 100351]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+android_current_dispatch_ns: n=938 invalid=0 over_budget=0 mean_ns=199893 max_ns=200000 p50=Some([196608, 200000]) p90=Some([196608, 200000]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+android_historical_dispatch_ns: n=63 invalid=0 over_budget=1 mean_ns=517460 max_ns=20200000 p50=Some([196608, 200703]) p90=Some([196608, 200703]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+clock_offset_interval_width_ns: n=1001 invalid=0 over_budget=0 mean_ns=802009 max_ns=810004 p50=Some([786432, 802815]) p90=Some([786432, 802815]) p99=Some([786432, 802815]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+current_event_to_sink_local_lower_bound_ns: n=937 invalid=0 over_budget=0 mean_ns=5087 max_ns=3399700 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+current_event_to_sink_lower_ns: n=937 invalid=0 over_budget=1 mean_ns=15733 max_ns=11342678 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+current_event_to_sink_upper_ns: n=937 invalid=0 over_budget=1 mean_ns=1168436 max_ns=13157322 p50=Some([1146880, 1179647]) p90=Some([1146880, 1179647]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+duplex_exchange_residual_upper_ns: n=1001 invalid=0 over_budget=1 mean_ns=811996 max_ns=10806002 p50=Some([786432, 802815]) p90=Some([786432, 802815]) p99=Some([786432, 802815]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+forward_transit_lower_bound_ns: n=1001 invalid=0 over_budget=1 mean_ns=9965 max_ns=9974998 p50=Some([0, 0]) p90=Some([0, 0]) p99=Some([0, 0]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+forward_transit_upper_bound_ns: n=1001 invalid=0 over_budget=1 mean_ns=810975 max_ns=10785002 p50=Some([786432, 802815]) p90=Some([786432, 802815]) p99=Some([786432, 802815]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+historical_event_to_sink_local_lower_bound_ns: n=63 invalid=0 over_budget=1 mean_ns=306820 max_ns=19329700 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+historical_event_to_sink_lower_ns: n=63 invalid=0 over_budget=1 mean_ns=306820 max_ns=19329700 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+historical_event_to_sink_upper_ns: n=63 invalid=0 over_budget=1 mean_ns=1469078 max_ns=21171301 p50=Some([1146880, 1179647]) p90=Some([1146880, 1179647]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+host_ack_submission_ns: n=1000 invalid=0 over_budget=0 mean_ns=10000 max_ns=10000 p50=Some([9984, 10000]) p90=Some([9984, 10000]) p99=Some([9984, 10000]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+host_receive_to_ready_ns: n=1003 invalid=0 over_budget=0 mean_ns=24017 max_ns=4070000 p50=Some([19968, 20479]) p90=Some([19968, 20479]) p99=Some([19968, 20479]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+host_receive_to_sink_outcome_ns: n=1003 invalid=0 over_budget=0 mean_ns=61964 max_ns=8000000 p50=Some([49152, 50175]) p90=Some([49152, 50175]) p99=Some([49152, 50175]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+ordering_hole_until_commit_ns: n=1 invalid=0 over_budget=0 mean_ns=4100000 max_ns=4100000 p50=Some([4063232, 4100000]) p90=Some([4063232, 4100000]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+reverse_control_lower_bound_ns: n=1000 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=Some([0, 0]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+reverse_control_upper_bound_ns: n=1000 invalid=0 over_budget=0 mean_ns=801001 max_ns=801001 p50=Some([786432, 801001]) p90=Some([786432, 801001]) p99=Some([786432, 801001]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+sink_attempts_including_planning_ns: n=1003 invalid=0 over_budget=0 mean_ns=37946 max_ns=7980000 p50=Some([29696, 30207]) p90=Some([29696, 30207]) p99=Some([29696, 30207]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+unique_gameplay_cadence_excess_ns: n=998 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+unique_gameplay_receive_interval_ns: n=1000 invalid=0 over_budget=1 mean_ns=8000000 max_ns=16000000 p50=Some([7995392, 8126463]) p90=Some([7995392, 8126463]) p99=Some([7995392, 8126463]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+incident=1 at_ns=4008000000 last_anomaly_ns=4012050000 frames=[7, 501]..[7, 500] affected_observations=2 recovery_to_os_commit_ns=Some(4100000) causes={"bounded_event_to_sink_budget_violation", "forward_transport_or_endpoint_stall_bounded", "protocol_ordering_hole_loss_or_reorder"} evidence=153 omitted=0 post_context_complete=true
+  affected_frame_keys={[7, 500], [7, 501]} omitted_keys=0 fresh_session_commit_ns=None reconstructed_snapshot_ns=None
+incident=2 at_ns=5600000000 last_anomaly_ns=5600050000 frames=[7, 700]..[7, 700] affected_observations=1 recovery_to_os_commit_ns=Some(50000) causes={"android_dispatch_budget", "bounded_event_to_sink_budget_violation", "event_to_sink_definite_budget_violation"} evidence=146 omitted=0 post_context_complete=true
+  affected_frame_keys={[7, 700]} omitted_keys=0 fresh_session_commit_ns=None reconstructed_snapshot_ns=None
+incident=3 at_ns=8016000000 last_anomaly_ns=8016100000 frames=[7, 1001]..[7, 1001] affected_observations=1 recovery_to_os_commit_ns=Some(72150000) causes={"os_sink_failure", "os_sink_retry", "protocol_observed_frame_abandoned", "session_failure_boundary"} evidence=137 omitted=0 post_context_complete=true
+  affected_frame_keys={[7, 1001]} omitted_keys=0 fresh_session_commit_ns=Some(8088150000) reconstructed_snapshot_ns=Some(8096150000)

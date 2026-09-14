@@ -6,6 +6,53 @@
 use std::io;
 use std::sync::atomic::AtomicBool;
 
+/// Setup/stop-time readback. A successful request is not proof of scheduler,
+/// driver, AP QoS, or physical latency. No environmental queries per input.
+#[cfg(windows)]
+pub fn diagnostic_environment() -> String {
+    use windows_sys::Win32::System::Threading::*;
+    let mut state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ..Default::default()
+    };
+    let ok = unsafe {
+        GetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            std::ptr::from_mut(&mut state).cast(),
+            std::mem::size_of_val(&state) as u32,
+        )
+    };
+    let priority = unsafe { GetPriorityClass(GetCurrentProcess()) };
+    let thread = unsafe { GetThreadPriority(GetCurrentThread()) };
+    format!(
+        "os=windows process_priority_readback={priority} input_thread_priority_readback={thread} qos_query_ok={} qos_control_mask={} qos_state_mask={} thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified",
+        ok != 0,
+        state.ControlMask,
+        state.StateMask
+    )
+}
+
+#[cfg(not(windows))]
+pub fn diagnostic_environment() -> String {
+    format!(
+        "os={} priority_readback=unavailable thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified",
+        std::env::consts::OS
+    )
+}
+
+pub fn lower_diagnostic_priority() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::*;
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+}
+
 /// Installs a shutdown signal handler.
 ///
 /// `requested` is set as soon as a shutdown signal arrives; the main loop
@@ -206,7 +253,13 @@ mod tests {
             )
         };
         assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
-        assert_ne!(state.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0);
-        assert_eq!(state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED, 0);
+        assert_ne!(
+            state.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            0
+        );
+        assert_eq!(
+            state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            0
+        );
     }
 }

@@ -10,6 +10,7 @@ import com.southernstorm.noise.protocol.CipherStatePair;
 import com.southernstorm.noise.protocol.HandshakeState;
 
 import java.io.IOException;
+import java.io.File;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
@@ -23,6 +24,8 @@ import dev.holodori.trackpad.V5SendQueue.Frame;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLongArray;
 
 /** Authenticated protocol-v5 transport for pairing and lossless touch input. */
 final class V5Transport implements TouchTransport {
@@ -77,6 +80,7 @@ final class V5Transport implements TouchTransport {
     private final float[] retainedPressure = new float[TouchSample.MAX_CONTACTS];
     private final float[] retainedTouchMajor = new float[TouchSample.MAX_CONTACTS];
     private final boolean[] retainedTouching = new boolean[TouchSample.MAX_CONTACTS];
+    private final PressureFilter pressureFilter;
 
     private volatile int generation;
     private volatile boolean running;
@@ -107,6 +111,11 @@ final class V5Transport implements TouchTransport {
     private int activeContactCount;
     private int retainedContactCount;
     private boolean queueOverflowed;
+    private final DiagnosticRecorder diagnostics;
+    private final AtomicInteger diagnosticProducers = new AtomicInteger();
+    private final AtomicLongArray diagnosticControlDrops = new AtomicLongArray(3);
+    private Thread diagnosticThread;
+    private volatile boolean diagnosticStop;
 
     V5Transport(
             Context context,
@@ -119,7 +128,11 @@ final class V5Transport implements TouchTransport {
         this.listener = listener;
         this.transport = transport;
         credentials = new CredentialStore(this.context);
+        pressureFilter = PressureFilter.load(
+                this.context.getSharedPreferences("trackpad", Context.MODE_PRIVATE));
         wifiManager = (WifiManager) this.context.getSystemService(Context.WIFI_SERVICE);
+        diagnostics = this.context.getSharedPreferences("trackpad", Context.MODE_PRIVATE)
+                .getBoolean("diagnostics", false) ? new DiagnosticRecorder() : null;
     }
 
     boolean startPairing(PairingListener callback) {
@@ -154,7 +167,7 @@ final class V5Transport implements TouchTransport {
 
     @Override
     public boolean open() {
-        close();
+        closeInternal(0, false);
         try {
             if (!credentials.isPaired()) {
                 listener.onConnectionChanged(false, "Pair this phone before Start");
@@ -166,6 +179,7 @@ final class V5Transport implements TouchTransport {
         }
 
         CountDownLatch writerReady = new CountDownLatch(1);
+        startDiagnostics();
         synchronized (queueLock) {
             resetSessionStateLocked();
         }
@@ -173,17 +187,18 @@ final class V5Transport implements TouchTransport {
             running = true;
             int sessionGeneration = ++generation;
             controlThread = new Thread(
-                    () -> controlLoop(sessionGeneration),
+                    () -> diagnosticProducer(() -> controlLoop(sessionGeneration)),
                     "UDP5 handshake and acknowledgements"
             );
             writerThread = new Thread(
-                    () -> writerLoop(sessionGeneration, writerReady),
+                    () -> diagnosticProducer(() -> writerLoop(sessionGeneration, writerReady)),
                     "UDP5 touch writer"
             );
             watchdogThread = new Thread(
-                    () -> watchdogLoop(sessionGeneration),
+                    () -> diagnosticProducer(() -> watchdogLoop(sessionGeneration)),
                     "UDP5 liveness watchdog"
             );
+            if (diagnostics != null) diagnosticProducers.addAndGet(3);
             controlThread.start();
             writerThread.start();
             watchdogThread.start();
@@ -191,13 +206,13 @@ final class V5Transport implements TouchTransport {
         try {
             if (!writerReady.await(WRITER_READY_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
                     || !running) {
-                close();
+                closeInternal(0, false);
                 listener.onConnectionChanged(false, "V5 writer did not become ready");
                 return false;
             }
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            close();
+            closeInternal(0, false);
             listener.onConnectionChanged(false, "V5 connection interrupted");
             return false;
         }
@@ -237,6 +252,7 @@ final class V5Transport implements TouchTransport {
         }
         synchronized (queueLock) {
             boolean wasActiveDataPath = hasActiveDataPathLocked();
+            pressureFilter.update(action, actionPointerId, contactCount, pointerIds, pressure, touching);
             activeContactCount = countActiveContacts(touching, contactCount);
             retainContactsLocked(
                     contactCount,
@@ -249,7 +265,12 @@ final class V5Transport implements TouchTransport {
             );
             // Handshake and sequence-zero CANCEL form a hard boundary. Keep
             // only the latest snapshot until the host commits that boundary.
-            if (!running || !sessionStarted) return;
+            if (!running || !sessionStarted) {
+                if (diagnostics != null) diagnostics.queue.offer(DiagnosticRecorder.NOT_QUEUED,
+                        callbackNanos, sessionId, -1, eventNanos, historical ? 1 : 0,
+                        1, 0, 0, 0, 0, 0);
+                return;
+            }
             enqueueFrameLocked(
                     action,
                     actionPointerId,
@@ -292,6 +313,9 @@ final class V5Transport implements TouchTransport {
             // a clean authenticated-session failure and the retained snapshot
             // is reconstructed only after a fresh IK + sequence-zero CANCEL.
             queueOverflowed = true;
+            if (diagnostics != null) diagnostics.queue.offer(DiagnosticRecorder.NOT_QUEUED,
+                    callbackNanos, sessionId, -1, eventNanos, historical ? 1 : 0,
+                    2, unacknowledged.size(), hostWindow, 0, 0, 0);
             queueLock.notifyAll();
             return;
         }
@@ -312,6 +336,9 @@ final class V5Transport implements TouchTransport {
         if (sessionStart) frameFlags |= TouchSample.FRAME_FLAG_SESSION_START;
         if (historical) frameFlags |= TouchSample.FRAME_FLAG_HISTORICAL;
         packet.put((byte) frameFlags);
+        if (diagnostics != null) diagnostics.queue.offer(DiagnosticRecorder.QUEUED,
+                pending.queuedNanos, sessionId, sequence, eventNanos, callbackNanos,
+                diagnosticFlags(action, sessionStart, historical), unacknowledged.size(), hostWindow, 0, 0, 0);
         for (int index = 0; index < contactCount; index++) {
             float localX = x[index];
             float localY = y[index];
@@ -319,6 +346,7 @@ final class V5Transport implements TouchTransport {
                     && localY >= 0f && localY <= 1f;
             int contactFlags = inside ? TouchSample.CONTACT_FLAG_INSIDE : 0;
             if (touching[index]) contactFlags |= TouchSample.CONTACT_FLAG_TIP;
+            contactFlags |= pressureFilter.contactFlags(pointerIds[index], touching[index]);
             packet.put((byte) (pointerIds[index] & 0xFF));
             packet.put((byte) contactFlags);
             packet.putShort((short) clampFixed(localX));
@@ -494,9 +522,14 @@ final class V5Transport implements TouchTransport {
             header.receivedNanos = System.nanoTime();
             sessionChannel.openInto(bytes, incoming.getLength(), header, plaintext);
             return true;
-        } catch (V5Protocol.AuthenticationException | V5Protocol.ReplayException ignored) {
+        } catch (V5Protocol.AuthenticationException ignored) {
+            if (diagnostics != null) diagnosticControlDrops.incrementAndGet(0);
+            return false;
+        } catch (V5Protocol.ReplayException ignored) {
+            if (diagnostics != null) diagnosticControlDrops.incrementAndGet(1);
             return false;
         } catch (V5Protocol.ProtocolException ignored) {
+            if (diagnostics != null) diagnosticControlDrops.incrementAndGet(2);
             // Header corruption is unauthenticated until AEAD succeeds. Drop it
             // silently and never let hostile traffic sustain liveness.
             return false;
@@ -566,7 +599,7 @@ final class V5Transport implements TouchTransport {
                 if (!hostReady || header.sessionId != sessionId) {
                     throw new IOException("ACK belongs to the wrong V5 session");
                 }
-                if (acknowledgeLocked(header.logicalId)) {
+                if (acknowledgeLocked(header.logicalId, receiveNanos, hostSendNanos)) {
                     lastAcknowledgementProgressNanos = receiveNanos;
                     lastIdleResponseNanos = receiveNanos;
                     if (!sessionStarted
@@ -612,6 +645,8 @@ final class V5Transport implements TouchTransport {
         ByteBuffer attempt = ByteBuffer.wrap(attemptPayload).order(ByteOrder.LITTLE_ENDIAN);
         byte[] sendBuffer = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
         DatagramPacket outgoing = new DatagramPacket(sendBuffer, 0);
+        boolean recordWriter = diagnostics != null && diagnostics.writer.claimed.compareAndSet(false, true);
+        if (diagnostics != null && !recordWriter) diagnostics.writerCoverageUnavailable++;
         try {
             while (isGameplayActive(sessionGeneration)) {
                 V5NetworkBinding sessionBinding;
@@ -620,6 +655,7 @@ final class V5Transport implements TouchTransport {
                 int messageType;
                 long frameSession;
                 long sequence;
+                long queuedNanos = 0, ordinal = 0, repairLate = 0, selectedAt = 0;
                 synchronized (queueLock) {
                     if (!isGameplayActive(sessionGeneration)) break;
                     long now = System.nanoTime();
@@ -639,6 +675,10 @@ final class V5Transport implements TouchTransport {
                         attempt.putLong(32, lastControlReceiveNanos);
                         sequence = pending.sequence;
                         messageType = V5Protocol.PHONE_TOUCH;
+                        queuedNanos = pending.queuedNanos;
+                        ordinal = pending.sendAttempts;
+                        repairLate = pending.repairLatenessNanos;
+                        selectedAt = now;
                     } else if (sessionStarted && !hasActiveDataPathLocked()
                             && now - lastPingNanos >= IDLE_PING_NANOS) {
                         payloadLength = 0;
@@ -657,13 +697,26 @@ final class V5Transport implements TouchTransport {
                         continue;
                     }
                 }
-                if (payloadLength != 0) attempt.putLong(16, System.nanoTime());
-                int sendLength = sessionChannel.sealInto(
+                long sendStarted = payloadLength != 0 ? System.nanoTime() : 0;
+                if (payloadLength != 0) attempt.putLong(16, sendStarted);
+                int sendLength;
+                boolean sendFailed = true;
+                try {
+                    sendLength = sessionChannel.sealInto(
                         messageType, frameSession, sequence, 0,
                         attemptPayload, payloadLength, sendBuffer
-                );
-                outgoing.setData(sendBuffer, 0, sendLength);
-                sessionBinding.sendToPeer(outgoing);
+                    );
+                    outgoing.setData(sendBuffer, 0, sendLength);
+                    sessionBinding.sendToPeer(outgoing);
+                    sendFailed = false;
+                } finally {
+                    if (recordWriter && payloadLength != 0) {
+                        long returned = System.nanoTime();
+                        diagnostics.writer.offer(DiagnosticRecorder.ATTEMPT, returned, frameSession,
+                                sequence, sendStarted, queuedNanos, ordinal, sendFailed ? 1 : 0,
+                                returned, repairLate, selectedAt, Byte.toUnsignedInt(attempt.get(43)));
+                    }
+                }
                 if (messageType == V5Protocol.PHONE_PING) {
                     sendLength = sessionChannel.sealInto(
                             messageType, frameSession, sequence, 0,
@@ -677,6 +730,8 @@ final class V5Transport implements TouchTransport {
             Thread.currentThread().interrupt();
         } catch (Exception error) {
             failGameplay(sessionGeneration, error);
+        } finally {
+            if (recordWriter) diagnostics.writer.claimed.set(false);
         }
     }
 
@@ -705,17 +760,25 @@ final class V5Transport implements TouchTransport {
         );
     }
 
-    private boolean acknowledgeLocked(long acknowledgedSequence) {
+    private boolean acknowledgeLocked(long acknowledgedSequence, long receivedNanos, long ackHostSendNanos) {
+        boolean future = acknowledgedSequence != V5Protocol.NO_ACK
+                && Long.compareUnsigned(acknowledgedSequence, nextSequence) >= 0;
         if (acknowledgedSequence == V5Protocol.NO_ACK
                 || (highestAcknowledged != V5Protocol.NO_ACK
                 && Long.compareUnsigned(acknowledgedSequence, highestAcknowledged) <= 0)
                 || Long.compareUnsigned(acknowledgedSequence, nextSequence) >= 0) {
+            diagnosticAckLocked(acknowledgedSequence, receivedNanos, future ? 2 : 0, ackHostSendNanos);
             return false;
         }
+        diagnosticAckLocked(acknowledgedSequence, receivedNanos, 1, ackHostSendNanos);
         highestAcknowledged = acknowledgedSequence;
         while (!unacknowledged.isEmpty()) {
             Frame first = unacknowledged.peekFirst();
             if (Long.compareUnsigned(first.sequence, acknowledgedSequence) > 0) break;
+            if (diagnostics != null) diagnostics.queue.offer(DiagnosticRecorder.RETIRED,
+                    receivedNanos, sessionId, first.sequence, first.queuedNanos,
+                    first.writer.getLong(0), first.writer.getLong(8), diagnosticFlags(first),
+                    first.firstSelectedNanos, first.sendAttempts, unacknowledged.size(), acknowledgedSequence);
             unacknowledged.removeFirst();
         }
         if (!hasActiveDataPathLocked()) activePathStartedNanos = 0;
@@ -740,6 +803,10 @@ final class V5Transport implements TouchTransport {
                     || backlogExpired || overflowed) {
                 timedOut = true;
                 staleFrames = unacknowledged.size();
+                if (diagnostics != null) diagnostics.queue.offer(DiagnosticRecorder.WATCHDOG,
+                        now, sessionId, highestAcknowledged, overflowed ? 3 : backlogExpired ? 2 : active ? 1 : 4,
+                        progress, staleFrames, unacknowledged.peekFirst() == null ? 0 : unacknowledged.peekFirst().queuedNanos,
+                        hostWindow, 0, 0, 0);
             }
         }
         if (timedOut && closeSession(sessionGeneration)) {
@@ -1342,8 +1409,7 @@ final class V5Transport implements TouchTransport {
     }
 
     private void failGameplay(int sessionGeneration, Exception error) {
-        if (!closeSession(sessionGeneration)) return;
-        Log.e(TAG, "V5 authenticated session failed", error);
+        if (!closeInternal(sessionGeneration, true, error)) return;
         listener.onConnectionChanged(false, "Authenticated "
                 + (transport == V5Protocol.TransportKind.WIFI ? "Wi-Fi" : "USB")
                 + " session lost; restarting");
@@ -1368,9 +1434,14 @@ final class V5Transport implements TouchTransport {
     @Override
     public void close() {
         closeInternal(0, false);
+        diagnosticStop = true;
     }
 
     private boolean closeInternal(int expectedGeneration, boolean requireMatch) {
+        return closeInternal(expectedGeneration, requireMatch, null);
+    }
+
+    private boolean closeInternal(int expectedGeneration, boolean requireMatch, Exception failure) {
         Thread previousControl;
         Thread previousWriter;
         Thread previousWatchdog;
@@ -1395,6 +1466,12 @@ final class V5Transport implements TouchTransport {
             binding = null;
             channel = null;
             synchronized (queueLock) {
+                if (diagnostics != null && (previousWriter != null || previousControl != null)) {
+                    diagnostics.queue.offer(DiagnosticRecorder.BOUNDARY, System.nanoTime(), sessionId,
+                            highestAcknowledged, requireMatch ? 1 : 0, unacknowledged.size(),
+                            failure == null ? 0 : failure instanceof SocketTimeoutException ? 1
+                                    : failure instanceof IOException ? 2 : 3, 0, 0, 0, 0, 0);
+                }
                 resetSessionStateLocked();
                 queueLock.notifyAll();
             }
@@ -1428,6 +1505,7 @@ final class V5Transport implements TouchTransport {
     }
 
     private void resetSessionStateLocked() {
+        clearUnacknowledgedLocked();
         hostReady = false;
         sessionStarted = false;
         hostWindow = DEFAULT_HOST_WINDOW;
@@ -1474,7 +1552,128 @@ final class V5Transport implements TouchTransport {
     }
 
     private void clearUnacknowledgedLocked() {
+        if (diagnostics != null && !unacknowledged.isEmpty()) {
+            long now = System.nanoTime();
+            while (!unacknowledged.isEmpty()) {
+                Frame f = unacknowledged.peekFirst();
+                diagnostics.queue.offer(DiagnosticRecorder.DISCARDED, now, sessionId, f.sequence,
+                        f.queuedNanos, f.writer.getLong(0), f.writer.getLong(8), diagnosticFlags(f),
+                        f.firstSelectedNanos, f.sendAttempts, unacknowledged.size(), highestAcknowledged);
+                unacknowledged.removeFirst();
+            }
+        }
         unacknowledged.clear();
+    }
+
+    private static long diagnosticFlags(int action, boolean start, boolean historical) {
+        return (start ? 8 : action == TouchSample.ACTION_HEARTBEAT ? 4 : 1) | (historical ? 2 : 0);
+    }
+
+    private static long diagnosticFlags(Frame frame) {
+        int flags = Byte.toUnsignedInt(frame.writer.get(43));
+        return diagnosticFlags(Byte.toUnsignedInt(frame.writer.get(40)),
+                (flags & TouchSample.FRAME_FLAG_SESSION_START) != 0,
+                (flags & TouchSample.FRAME_FLAG_HISTORICAL) != 0);
+    }
+
+    private void diagnosticAckLocked(long sequence, long now, int progress, long hostSend) {
+        if (diagnostics == null) return;
+        Frame oldest = unacknowledged.peekFirst();
+        diagnostics.queue.offer(DiagnosticRecorder.ACK, now, sessionId, sequence, progress,
+                Math.max(lastAcknowledgementProgressNanos, activePathStartedNanos), unacknowledged.size(), oldest == null ? 0 : oldest.queuedNanos,
+                hostWindow, hostSend, 0, 0);
+    }
+
+    private void diagnosticProducer(Runnable work) {
+        try { work.run(); }
+        finally { if (diagnostics != null) diagnosticProducers.decrementAndGet(); }
+    }
+
+    private void startDiagnostics() {
+        if (diagnostics == null || diagnosticThread != null) return;
+        diagnosticStop = false;
+        diagnosticThread = new Thread(() -> {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+            android.os.PowerManager power = (android.os.PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            android.app.ActivityManager.RunningAppProcessInfo process = new android.app.ActivityManager.RunningAppProcessInfo();
+            long[] environment = new long[DiagnosticRecorder.WIDTH];
+            long[] dropTotals = new long[3];
+            long nextEnvironment = 0;
+            String metadata = "transport=" + transport.name().toLowerCase(java.util.Locale.ROOT)
+                    + " android_sdk=" + android.os.Build.VERSION.SDK_INT
+                    + " motion_event_precision_ns=" + (android.os.Build.VERSION.SDK_INT >= 34 ? 1 : 1_000_000)
+                    + " driver_low_latency=unverified ap_wmm=unverified";
+            String selectedInterface = "unavailable";
+            int trafficClass = -1;
+            try {
+                for (;;) {
+                    diagnostics.drain();
+                    long now = System.nanoTime();
+                    if (now >= nextEnvironment) {
+                        nextEnvironment = now + 2_000_000_000L;
+                        V5NetworkBinding current = binding;
+                        java.util.Arrays.fill(environment, -1L);
+                        environment[0] = DiagnosticRecorder.ENVIRONMENT;
+                        environment[1] = now;
+                        environment[2] = 0; environment[3] = 0;
+                        try {
+                            if (power != null) {
+                                environment[4] = android.os.Build.VERSION.SDK_INT >= 29 ? power.getCurrentThermalStatus() : -1;
+                                environment[5] = power.isPowerSaveMode() ? 1 : 0;
+                                environment[6] = power.isInteractive() ? 1 : 0;
+                            }
+                            android.app.ActivityManager.getMyMemoryState(process);
+                            environment[7] = process.importance <= android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND ? 1 : 0;
+                            if (current != null) {
+                                environment[8] = current.diagnosticWifiLockHeld();
+                                selectedInterface = current.diagnosticInterface();
+                                trafficClass = current.socket().getTrafficClass();
+                                current.diagnosticSignal(environment);
+                            }
+                            // Clock-domain/suspend evidence; no subtraction from event ages.
+                            environment[11] = android.os.SystemClock.elapsedRealtimeNanos() - now;
+                        } catch (RuntimeException | IOException unavailable) {
+                            // Numeric -1 fields retain unavailable status; never fabricate healthy values.
+                        }
+                        diagnostics.analyze(environment);
+                        for (int i = 0; i < dropTotals.length; i++) {
+                            long total = diagnosticControlDrops.get(i);
+                            if (total != dropTotals[i]) {
+                                java.util.Arrays.fill(environment, 0);
+                                environment[0] = DiagnosticRecorder.CONTROL_DROP; environment[1] = now;
+                                environment[4] = i; environment[5] = total - dropTotals[i];
+                                diagnostics.analyze(environment);
+                                dropTotals[i] = total;
+                            }
+                        }
+                    }
+                    if (diagnosticStop && diagnosticProducers.get() == 0) break;
+                    Thread.sleep(4);
+                }
+                diagnostics.drain();
+                File directory = new File(context.getFilesDir(), "diagnostics");
+                String name = "android-" + System.currentTimeMillis();
+                diagnostics.write(directory, name, metadata + " interface=" + selectedInterface
+                        + " socket_traffic_class_readback=" + trafficClass
+                        + " qos_request=none control_bad_tag=" + diagnosticControlDrops.get(0)
+                        + " control_packet_replay=" + diagnosticControlDrops.get(1)
+                        + " control_malformed=" + diagnosticControlDrops.get(2));
+                // Bound disk storage after Stop only; never remove unrelated files.
+                File[] reports = directory.listFiles((dir, filename) -> filename.startsWith("android-")
+                        && (filename.endsWith(".txt") || filename.endsWith(".csv")));
+                if (reports != null) {
+                    java.util.Arrays.sort(reports, (left, right) -> left.getName().compareTo(right.getName()));
+                    for (int i = 0; i < reports.length - 16; i++) {
+                        if (!reports[i].delete()) Log.w(TAG, "Could not expire old diagnostic report");
+                    }
+                }
+            } catch (IOException error) {
+                Log.e(TAG, "Diagnostic report could not be saved after Stop", error);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }, "V5 diagnostic analysis");
+        diagnosticThread.start();
     }
 
     private void retainContactsLocked(

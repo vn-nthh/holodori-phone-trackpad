@@ -41,6 +41,7 @@ final class SetupView extends FrameLayout {
         void onForgetRequested();
 
         void onPatternEntered(int[] lanes);
+        void onExportDiagnostics();
     }
 
     static final class Selection {
@@ -304,9 +305,20 @@ final class SetupView extends FrameLayout {
         gapRow = gap;
         list.addView(gap, wrap());
 
+        list.addView(new PressureCalibrationView(context), wrap());
+
         legacySwitch = switchControl();
         legacyRow = prefRow("Protocol v4", "No pairing. USB only.", legacySwitch);
         list.addView(legacyRow, wrap());
+
+        Switch diagnosticsSwitch = switchControl();
+        diagnosticsSwitch.setChecked(preferences.getBoolean("diagnostics", false));
+        diagnosticsSwitch.setOnCheckedChangeListener((button, checked) ->
+                preferences.edit().putBoolean("diagnostics", checked).apply());
+        list.addView(prefRow("Diagnostics", "Capture V5 session health and incidents. Reports save after Stop.", diagnosticsSwitch), wrap());
+        Button exportReports = quietButton("Export");
+        exportReports.setOnClickListener(view -> listener.onExportDiagnostics());
+        list.addView(prefRow("Diagnostic reports", "Export the last eight runs after stopping play.", exportReports), wrap());
 
         Button forgetButton = quietButton("Forget");
         forgetButton.setOnClickListener(view -> listener.onForgetRequested());

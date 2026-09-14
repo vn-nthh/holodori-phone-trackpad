@@ -170,7 +170,7 @@ if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
             JAVA_HOME="${JAVA_HOME_ARG}" ANDROID_HOME="${ANDROID_SDK}" ANDROID_SDK_ROOT="${ANDROID_SDK}" \
                 ./gradlew --no-daemon \
                 -PholodoriVersionName="${VERSION}" \
-                -PholodoriVersionCode=36 \
+                -PholodoriVersionCode=37 \
                 requireReleaseSigning clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
         )
         APK_SRC="${ANDROID_DIR}/app/build/outputs/apk/release/app-release.apk"
@@ -206,6 +206,10 @@ cp "${PROJECT_ROOT}/PROTOCOL_V5.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/PROTOCOL_V5_TEST_VECTORS.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/PROTOCOL_V4.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/LATENCY_VALIDATION.md" "${DOCS_DIR}/"
+cp "${PROJECT_ROOT}/DIAGNOSTICS.md" "${DOCS_DIR}/"
+mkdir -p "${DOCS_DIR}/docs" "${BUNDLE_DIR}/tools"
+cp -R "${PROJECT_ROOT}/docs/diagnostic-examples" "${DOCS_DIR}/docs/"
+cp "${PROJECT_ROOT}/tools/diagnostic_report.py" "${BUNDLE_DIR}/tools/"
 cp "${PROJECT_ROOT}/LICENSE" "${DOCS_DIR}/"
 
 if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
@@ -225,7 +229,7 @@ fi
     echo "name=${NAME}"
     if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
         echo "android_version_name=${VERSION}"
-        echo "android_version_code=34"
+        echo "android_version_code=37"
     fi
     echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "branch=${BRANCH}"

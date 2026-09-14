@@ -118,6 +118,7 @@ final class UdpTransport implements TouchTransport {
     private final float[] retainedPressure = new float[TouchSample.MAX_CONTACTS];
     private final float[] retainedTouchMajor = new float[TouchSample.MAX_CONTACTS];
     private final boolean[] retainedTouching = new boolean[TouchSample.MAX_CONTACTS];
+    private final PressureFilter pressureFilter;
 
     private volatile int generation;
     private volatile boolean running;
@@ -146,6 +147,8 @@ final class UdpTransport implements TouchTransport {
         this.listener = listener;
         Context applicationContext = context.getApplicationContext();
         Context serviceContext = applicationContext == null ? context : applicationContext;
+        pressureFilter = PressureFilter.load(
+                serviceContext.getSharedPreferences("trackpad", Context.MODE_PRIVATE));
         connectivityManager = (ConnectivityManager) serviceContext.getSystemService(
                 Context.CONNECTIVITY_SERVICE
         );
@@ -246,6 +249,7 @@ final class UdpTransport implements TouchTransport {
         }
         synchronized (queueLock) {
             boolean wasActiveDataPath = hasActiveDataPathLocked();
+            pressureFilter.update(action, actionPointerId, contactCount, pointerIds, pressure, touching);
             activeContactCount = countActiveContacts(touching, contactCount);
             retainContactsLocked(
                     contactCount,
@@ -332,6 +336,7 @@ final class UdpTransport implements TouchTransport {
                     && localY >= 0f && localY <= 1f;
             int contactFlags = inside ? TouchSample.CONTACT_FLAG_INSIDE : 0;
             if (touching[index]) contactFlags |= TouchSample.CONTACT_FLAG_TIP;
+            contactFlags |= pressureFilter.contactFlags(pointerIds[index], touching[index]);
             packet.put((byte) (pointerIds[index] & 0xFF));
             packet.put((byte) contactFlags);
             packet.putShort((short) clampFixed(localX));

@@ -162,6 +162,20 @@ uninstall if you want to keep them. Older releases keep their reports under
 [Linux setup guide](LINUX_SETUP.md#latency-reports). The app writes the report
 only after you press **Stop**, not while you are playing.
 
+Reports now include session health and clustered incidents. For sender ACK,
+repair and discarded-frame evidence, enable **Preferences > Diagnostics** on
+Android too, then export its reports after Stop. See the
+[diagnostic guide and example reports](DIAGNOSTICS.md) for cross-device correlation,
+latency bounds, sample quality and coverage limits.
+
+## Optional light-touch filter
+
+Android **Preferences > Light-touch filter · keys only** optionally rejects
+light brushes. Compare brushes and normal taps on its test pad, watch the live
+pressure marker, and drag the cutoff slider. Accepted holds remain active until
+lift; the filter defaults off. See [pressure calibration](android-app/README.md#calibrate-the-optional-keyboard-pressure-filter).
+Install phone and host v0.5.1-alpha3 or newer together before enabling it.
+
 ## Linux users
 
 Linux needs one-time permission and firewall setup. The dedicated

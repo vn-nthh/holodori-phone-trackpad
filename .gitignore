@@ -26,4 +26,6 @@ Desktop.ini
 .idea/
 .vscode/
 *.swp
+__pycache__/
+*.pyc
 *~

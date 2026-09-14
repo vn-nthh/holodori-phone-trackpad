@@ -1,6 +1,6 @@
 # Doritrack Privacy Policy
 
-Last updated: September 13, 2026
+Last updated: September 14, 2026
 
 This policy describes the privacy practices of CattWorks ("we", "us") for
 Doritrack and its Android companion app. Doritrack lets you use your phone as a
@@ -31,6 +31,11 @@ Doritrack processes information locally to provide its controller features:
 - **Optional diagnostic reports:** if you enable report saving, the app writes
   local performance and connection statistics, session identifiers, and
   diagnostic information. These reports are not uploaded automatically.
+  Optional Android reports also include bounded frame timing/ACK/repair evidence,
+  selected-interface signal information and power/thermal/lock observations.
+  Numeric diagnostic traces do not contain touch coordinates, configured keys,
+  pairing secrets, SSID/BSSID or location. Export happens only when you choose a
+  destination; Android retains the last eight runs.
 - **USB network recovery records:** when you enable the option that prevents
   your computer from using your phone's internet connection, the app may save
   network adapter identifiers and routing settings locally so it can restore

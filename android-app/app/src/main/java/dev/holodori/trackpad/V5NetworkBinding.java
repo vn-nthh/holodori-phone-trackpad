@@ -81,6 +81,26 @@ final class V5NetworkBinding implements AutoCloseable {
         return socket;
     }
 
+    // Called only by the diagnostic worker. Held does not establish driver support.
+    int diagnosticWifiLockHeld() {
+        if (transport != V5Protocol.TransportKind.WIFI) return -1;
+        try { return wifiLock != null && wifiLock.isHeld() ? 1 : 0; }
+        catch (RuntimeException unavailable) { return -1; }
+    }
+
+    String diagnosticInterface() { return interfaceName; }
+
+    void diagnosticSignal(long[] row) {
+        if (transport != V5Protocol.TransportKind.WIFI || androidNetwork == null
+                || Build.VERSION.SDK_INT < 29) return;
+        NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(androidNetwork);
+        if (capabilities == null || !(capabilities.getTransportInfo() instanceof android.net.wifi.WifiInfo)) return;
+        android.net.wifi.WifiInfo info = (android.net.wifi.WifiInfo) capabilities.getTransportInfo();
+        int rssi = info.getRssi();
+        row[9] = rssi > -127 && rssi <= 0 ? rssi : -1;
+        row[10] = info.getFrequency() > 0 ? info.getFrequency() : -1;
+    }
+
     InetSocketAddress peer() {
         return peer;
     }

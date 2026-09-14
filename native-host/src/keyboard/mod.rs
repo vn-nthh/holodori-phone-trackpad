@@ -23,6 +23,7 @@ fn max_key_changes(lanes: usize) -> usize {
 #[derive(Clone)]
 struct KeyboardState {
     pointer_lanes: [Option<usize>; POINTER_ID_COUNT],
+    pressure_suppressed: [bool; POINTER_ID_COUNT],
     lane_holds: Vec<u16>,
 }
 
@@ -30,6 +31,7 @@ impl KeyboardState {
     fn new(lanes: usize) -> Self {
         Self {
             pointer_lanes: [None; POINTER_ID_COUNT],
+            pressure_suppressed: [false; POINTER_ID_COUNT],
             lane_holds: vec![0; lanes],
         }
     }
@@ -195,6 +197,7 @@ impl KeyboardSink {
         }
         if pending.changes.is_empty() {
             self.state.pointer_lanes.fill(None);
+            self.state.pressure_suppressed.fill(false);
             self.state.lane_holds.fill(0);
             return Ok(());
         }
@@ -217,6 +220,7 @@ impl KeyboardSink {
         }
 
         self.state.pointer_lanes.fill(None);
+        self.state.pressure_suppressed.fill(false);
         self.state.lane_holds.fill(0);
         Ok(())
     }
@@ -274,6 +278,7 @@ fn plan_into(
     changes: &mut Vec<KeyChange>,
 ) {
     next.pointer_lanes.copy_from_slice(&state.pointer_lanes);
+    next.pressure_suppressed.fill(false);
     next.lane_holds.copy_from_slice(&state.lane_holds);
     changes.clear();
 
@@ -296,6 +301,8 @@ fn plan_into(
     let mut present = [false; POINTER_ID_COUNT];
     for contact in &frame.contacts {
         present[usize::from(contact.pointer_id)] = true;
+        next.pressure_suppressed[usize::from(contact.pointer_id)] =
+            contact.touching() && contact.key_suppressed();
     }
     let mut missing = [0_u8; POINTER_ID_COUNT];
     let mut missing_len = 0;
@@ -316,14 +323,20 @@ fn plan_into(
 
     // A distinct finger-down is a press even when another finger owns the
     // lane. Do not synthesize an UP: the existing hold must remain asserted.
-    // MOVE/heartbeat snapshots and submission retries must not repeat it.
-    let pointer = usize::from(frame.action_pointer_id);
-    if frame.action == crate::protocol::ACTION_DOWN
-        && state.pointer_lanes[pointer].is_none()
-        && let Some(lane) = next.pointer_lanes[pointer]
-        && state.lane_holds[lane] > 0
-    {
-        changes.push(KeyChange { lane, down: true });
+    // A pressure-gated finger may first qualify in a MOVE/history sample.
+    // Commit that admission once, including when it shares an already-held lane.
+    for contact in &frame.contacts {
+        let pointer = usize::from(contact.pointer_id);
+        let new_press = (frame.action == crate::protocol::ACTION_DOWN
+            && contact.pointer_id == frame.action_pointer_id)
+            || state.pressure_suppressed[pointer];
+        if new_press
+            && state.pointer_lanes[pointer].is_none()
+            && let Some(lane) = next.pointer_lanes[pointer]
+            && state.lane_holds[lane] > 0
+        {
+            changes.push(KeyChange { lane, down: true });
+        }
     }
 }
 
@@ -336,7 +349,7 @@ fn apply_contact(
     // Android reports a still-touching contact just outside the locked play
     // rectangle without the INSIDE flag. It still owns the clamped edge lane
     // until TIP clears or the complete snapshot omits it.
-    if contact.touching() {
+    if contact.touching() && !contact.key_suppressed() {
         let lane = lane_for(contact.x, lane_count);
         move_pointer(contact.pointer_id, lane, state, changes);
     } else {
@@ -840,6 +853,111 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(sink.state.lane_holds[2], 1);
         assert!(sink.pressed[2]);
+    }
+
+    #[test]
+    fn pressure_admission_preserves_shared_holds_and_retries_once() {
+        let mut sink = held_sink(6, &[(0, 2)]);
+        let suppressed = CONTACT_FLAG_TIP | crate::protocol::CONTACT_FLAG_KEY_SUPPRESSED;
+        let mut sample = frame(
+            1,
+            ACTION_DOWN,
+            1,
+            FRAME_FLAG_LOCKED,
+            vec![
+                contact(0, CONTACT_FLAG_TIP, 0.4),
+                contact(1, suppressed, 0.4),
+            ],
+        );
+        sink.accept_with(&sample, |_, _| panic!("light brush sent a key"))
+            .unwrap();
+        assert_eq!(sink.state.lane_holds[2], 1);
+        sample.sequence += 1;
+        sample.action = ACTION_MOVE;
+        sample.contacts = vec![
+            contact(0, CONTACT_FLAG_TIP, 0.4),
+            contact(1, CONTACT_FLAG_TIP, 0.4),
+        ]
+        .into_iter()
+        .collect();
+        assert!(
+            sink.accept_with(&sample, |_, changes| {
+                assert_changes(changes, &[(2, true)]);
+                Ok(0)
+            })
+            .is_err()
+        );
+        sink.accept_with(&sample, |_, changes| {
+            assert_changes(changes, &[(2, true)]);
+            Ok(changes.len())
+        })
+        .unwrap();
+        assert_eq!(sink.state.lane_holds[2], 2);
+        sample.sequence += 1;
+        sample.action = ACTION_HEARTBEAT;
+        sink.accept_with(&sample, |_, _| panic!("heartbeat repeated admission"))
+            .unwrap();
+        sample.sequence += 1;
+        sample.action = crate::protocol::ACTION_UP;
+        sample.contacts = vec![contact(0, CONTACT_FLAG_TIP, 0.4), contact(1, 0, 0.4)]
+            .into_iter()
+            .collect();
+        sink.accept_with(&sample, |_, _| {
+            panic!("tapper released another finger's hold")
+        })
+        .unwrap();
+        assert_eq!(sink.state.lane_holds[2], 1);
+        sink.cancel_recorded().unwrap();
+        assert!(!sink.state.pressure_suppressed.iter().any(|value| *value));
+        assert!(!sink.has_active_input());
+    }
+
+    #[test]
+    fn pressure_recovery_reconstructs_only_admitted_contacts_then_slides_every_lane() {
+        let mut sink = test_sink(6);
+        let suppressed = CONTACT_FLAG_TIP | crate::protocol::CONTACT_FLAG_KEY_SUPPRESSED;
+        let mut admitted = contact(0, CONTACT_FLAG_TIP, 0.01);
+        admitted.pressure = 0.0; // Already admitted on the phone, now barely touching.
+        let snapshot = frame(
+            1,
+            ACTION_HEARTBEAT,
+            0,
+            FRAME_FLAG_LOCKED,
+            vec![admitted, contact(1, suppressed, 0.4)],
+        );
+        sink.accept_with(&snapshot, |_, changes| {
+            assert_changes(changes, &[(0, true)]);
+            Ok(changes.len())
+        })
+        .unwrap();
+        admitted.x = 0.99;
+        let slide = frame(
+            2,
+            ACTION_MOVE,
+            0,
+            FRAME_FLAG_LOCKED,
+            vec![admitted, contact(1, suppressed, 0.4)],
+        );
+        sink.accept_with(&slide, |_, changes| {
+            assert_changes(
+                changes,
+                &[
+                    (1, true),
+                    (0, false),
+                    (2, true),
+                    (1, false),
+                    (3, true),
+                    (2, false),
+                    (4, true),
+                    (3, false),
+                    (5, true),
+                    (4, false),
+                ],
+            );
+            Ok(changes.len())
+        })
+        .unwrap();
+        assert_eq!(sink.state.lane_holds, [0, 0, 0, 0, 0, 1]);
     }
 
     #[test]

@@ -249,4 +249,39 @@ public final class MainActivity extends Activity implements
         if (transport != null) transport.close();
         transport = null;
     }
+
+    @Override
+    public void onExportDiagnostics() {
+        android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(android.content.Intent.CATEGORY_OPENABLE).setType("application/zip")
+                .putExtra(android.content.Intent.EXTRA_TITLE, "doritrack-android-diagnostics.zip");
+        startActivityForResult(intent, 502);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != 502 || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        android.net.Uri destination = data.getData();
+        new Thread(() -> {
+            try (java.io.OutputStream output = getContentResolver().openOutputStream(destination);
+                 java.util.zip.ZipOutputStream zip = new java.util.zip.ZipOutputStream(java.util.Objects.requireNonNull(output))) {
+                java.io.File[] reports = new java.io.File(getFilesDir(), "diagnostics").listFiles();
+                byte[] buffer = new byte[8192];
+                if (reports != null) for (java.io.File report : reports) {
+                    if (!report.isFile() || !report.getName().startsWith("android-")
+                            || !(report.getName().endsWith(".txt") || report.getName().endsWith(".csv"))) continue;
+                    zip.putNextEntry(new java.util.zip.ZipEntry(report.getName()));
+                    try (java.io.FileInputStream input = new java.io.FileInputStream(report)) {
+                        int n;
+                        while ((n = input.read(buffer)) >= 0) zip.write(buffer, 0, n);
+                    }
+                    zip.closeEntry();
+                }
+                runOnUiThread(() -> android.widget.Toast.makeText(this, "Reports exported", android.widget.Toast.LENGTH_SHORT).show());
+            } catch (Exception error) {
+                runOnUiThread(() -> android.widget.Toast.makeText(this, "Could not export reports", android.widget.Toast.LENGTH_LONG).show());
+            }
+        }, "Export diagnostic reports").start();
+    }
 }

@@ -229,6 +229,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     let lane_count = sink.lane_count(&options);
     let udp = UdpHost::bind(options.udp_port)?;
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 4);
+    if metrics.enabled() {
+        metrics.configure(
+            "legacy-usb",
+            holodori_native_host::platform::diagnostic_environment(),
+        );
+    }
     #[cfg(windows)]
     let mut tether_policy =
         if options.local_only_tether {
@@ -440,6 +446,12 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
     let mut sink = build_sink(options)?;
     let lane_count = sink.lane_count(options);
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 5);
+    if metrics.enabled() {
+        metrics.configure(
+            transport.label(),
+            holodori_native_host::platform::diagnostic_environment(),
+        );
+    }
     #[cfg(windows)]
     let mut tether_policy =
         if options.local_only_tether {
@@ -817,7 +829,10 @@ fn process_decoded_frame(
         Ok(frame) => frame,
         // Parser counters retain bounded diagnostics for the stop-time
         // report. Never perform per-packet logging on the live input path.
-        Err(_) => return Ok(()),
+        Err(_) => {
+            metrics.note(holodori_native_host::diagnostics::INGRESS, 0, 0, 4, 0);
+            return Ok(());
+        }
     };
     connection.note_valid_peer_activity();
     let incoming_session = frame.session_id;
@@ -825,11 +840,25 @@ fn process_decoded_frame(
     let expected = ordered.expected_sequence();
     let replay =
         same_session && (frame.sequence < expected || ordered.contains_sequence(frame.sequence));
-    if same_session && !replay && frame.sequence > expected {
+    if same_session
+        && !replay
+        && frame.sequence > expected
+        && frame.sequence - expected < holodori_native_host::protocol::MAX_REORDERED_FRAMES as u64
+    {
         metrics.observe_gap(frame.session_id, expected, frame.sequence);
     }
-    metrics.observe_received(&frame, arrival, replay);
+    let observation = metrics.receive_event(&frame, arrival, replay);
+    let incoming_sequence = frame.sequence;
     ordered.push(frame);
+    if let Some(mut event) = observation {
+        if !replay
+            && (!ordered.contains_sequence(incoming_sequence)
+                || ordered.session_id() != Some(incoming_session))
+        {
+            event.0[0] = holodori_native_host::diagnostics::REJECT;
+        }
+        metrics.record(event);
+    }
 
     if commit_ready(ordered, sink, metrics, &SHUTDOWN_REQUESTED)? {
         control_state.last_committed_frame = Instant::now();

@@ -311,12 +311,14 @@ warning budget. The launcher uses the same path resolver for its
 package family name so updates preserve the report path; reset/uninstall may
 remove package data.
 
-The report contains mean, max, p50, p90, p99, and p99.9 values for current-event
-to-host-input estimated latency, Android current input dispatch, Android historical
-batch age, Android callback-to-write, symmetric one-way network, host
-receive-to-sink, and ACK write. Recovery incidents, out-of-order frames,
-replays, unresolved frames, parser discards, and sink retries are counted once
-at exit. No cross-device clocks are directly subtracted.
+Schema-2 diagnostics use bounded numeric producer queues and a separate analysis
+worker. The worker owns histograms, clock-uncertainty intervals and clustered
+incidents; report formatting and files remain Stop-only. Gameplay cadence,
+historical/current latency bounds, control/heartbeat observations, sender ACK
+completion, rejected/discarded frames and failed OS outcomes have distinct
+populations. No RTT/2 one-way value is presented. See [DIAGNOSTICS.md](DIAGNOSTICS.md)
+for metric ownership, bounds, limits, environment verification, cross-device
+correlation and generated healthy/degraded examples.
 
 ## Current protocol v4 build and operation
 

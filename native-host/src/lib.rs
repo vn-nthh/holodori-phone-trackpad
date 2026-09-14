@@ -1,4 +1,5 @@
 pub mod credentials;
+pub mod diagnostics;
 pub mod input;
 pub mod keyboard;
 pub mod metrics;

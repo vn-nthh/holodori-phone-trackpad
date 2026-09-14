@@ -170,15 +170,23 @@ impl InputSink for MeasuredSink {
 }
 
 fn start(
+    connection: V5Connection,
+    sink: MeasuredSink,
+) -> thread::JoinHandle<(MeasuredSink, Result<(), HostV5Error>)> {
+    start_with_metrics(connection, sink, false)
+}
+
+fn start_with_metrics(
     mut connection: V5Connection,
     mut sink: MeasuredSink,
+    diagnostics: bool,
 ) -> thread::JoinHandle<(MeasuredSink, Result<(), HostV5Error>)> {
     thread::spawn(move || {
         let result = serve_gameplay(
             &mut connection,
             &mut OrderedFrames::new(),
             &mut sink,
-            &mut HostMetrics::new(false, 8.333, 5),
+            &mut HostMetrics::new(diagnostics, 8.333, 5),
             6,
             &AtomicBool::new(false),
         );
@@ -441,70 +449,160 @@ fn authenticated_receive_commit_and_ack_allocate_nothing_after_setup() {
 }
 
 #[test]
+fn production_receiver_reports_corruption_order_and_outcomes() {
+    let (mut connection, mut phone) = pair();
+    let mut sink = MeasuredSink::new(phone.epoch);
+    let worker = thread::spawn(move || {
+        let mut metrics = HostMetrics::new(true, 8.333, 5);
+        metrics.begin_connection();
+        let result = serve_gameplay(
+            &mut connection,
+            &mut OrderedFrames::new(),
+            &mut sink,
+            &mut metrics,
+            6,
+            &AtomicBool::new(false),
+        );
+        (metrics, result)
+    });
+    phone.touch(0, ACTION_CANCEL);
+    phone.ack(0).unwrap();
+    // Corrupt a real authenticated record; it must not count as a logical frame.
+    let payload = touch_payload(ACTION_DOWN, duration_nanos(phone.epoch.elapsed()));
+    let length = phone
+        .cipher
+        .seal_into(
+            Direction::PhoneToHost,
+            PHONE_TOUCH,
+            9,
+            1,
+            0,
+            &payload,
+            &mut phone.bytes,
+        )
+        .unwrap();
+    phone.bytes[length - 1] ^= 1;
+    phone.socket.send(&phone.bytes[..length]).unwrap();
+    phone.touch(2, ACTION_UP);
+    phone.ack(0).unwrap();
+    phone.touch(1, ACTION_DOWN);
+    phone.ack(2).unwrap();
+    phone.touch(2, ACTION_UP);
+    phone.ack(2).unwrap();
+    phone.abort();
+    let (mut metrics, _) = worker.join().unwrap();
+    let folder =
+        std::env::temp_dir().join(format!("doritrack-diagnostic-test-{}", std::process::id()));
+    let path = folder.join("production.json");
+    metrics.write_report(&path).unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path.with_extension("events.json")).unwrap())
+            .unwrap();
+    let analysis = &report["analysis"];
+    assert_eq!(analysis["counts"]["bad_tag"], 1);
+    assert_eq!(analysis["counts"]["os_accepted"], 3);
+    assert_eq!(analysis["counts"]["logical_duplicate_datagrams"], 1);
+    assert_eq!(analysis["counts"]["ordering_holes"], 1);
+    assert_eq!(analysis["diagnostic_records_dropped"], 0);
+    assert!(!analysis["incidents"].as_array().unwrap().is_empty());
+    assert!(
+        std::fs::read_to_string(&path)
+            .unwrap()
+            .starts_with("Doritrack diagnostic report")
+    );
+    std::fs::remove_file(path.with_extension("events.json")).unwrap();
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(folder).unwrap();
+}
+
+#[test]
 #[ignore = "optimized production-loop timing; run explicitly without competing builds"]
 fn production_loopback_latency() {
-    for fault in ["healthy", "corrupt-first", "first-lost", "both-lost"] {
-        let (connection, mut phone) = pair();
-        let worker = start(connection, MeasuredSink::new(phone.epoch));
-        phone.touch(0, ACTION_CANCEL);
-        phone.ack(0).unwrap();
-        for sequence in 1..=160 {
-            let event_nanos = duration_nanos(phone.epoch.elapsed());
-            let action = if sequence % 2 == 0 {
-                ACTION_UP
-            } else {
-                ACTION_DOWN
-            };
-            let payload = touch_payload(action, event_nanos);
-            // The timer includes both first encryption and each independent retry encryption.
-            for copy in 0..2 {
-                let length = phone
-                    .cipher
-                    .seal_into(
-                        Direction::PhoneToHost,
-                        PHONE_TOUCH,
-                        9,
-                        sequence,
-                        0,
-                        &payload,
-                        &mut phone.bytes,
-                    )
-                    .unwrap();
-                if fault == "both-lost" || (fault == "first-lost" && copy == 0) {
-                    continue;
+    for diagnostics in [false, true] {
+        for fault in [
+            "healthy",
+            "corrupt-first",
+            "first-lost",
+            "both-lost",
+            "pressure-healthy",
+            "pressure-both-lost",
+        ] {
+            let (connection, mut phone) = pair();
+            let worker =
+                start_with_metrics(connection, MeasuredSink::new(phone.epoch), diagnostics);
+            phone.touch(0, ACTION_CANCEL);
+            phone.ack(0).unwrap();
+            for sequence in 1..=160 {
+                let event_nanos = duration_nanos(phone.epoch.elapsed());
+                let pressure_case = fault.starts_with("pressure-");
+                let action = if pressure_case {
+                    match sequence % 3 {
+                        1 => ACTION_DOWN,
+                        2 => ACTION_MOVE,
+                        _ => ACTION_UP,
+                    }
+                } else if sequence % 2 == 0 {
+                    ACTION_UP
+                } else {
+                    ACTION_DOWN
+                };
+                let mut payload = touch_payload(action, event_nanos);
+                // Phone admission itself is exercised by PressureFilterTest. Here
+                // the real wire/host path sees a rejected brush, admission, then lift.
+                if pressure_case && action == ACTION_DOWN {
+                    payload[TOUCH_PAYLOAD_HEADER_SIZE + 1] |=
+                        crate::protocol::CONTACT_FLAG_KEY_SUPPRESSED;
                 }
-                if fault == "corrupt-first" && copy == 0 {
-                    phone.bytes[length - 1] ^= 1;
+                // The timer includes both first encryption and each independent retry encryption.
+                for copy in 0..2 {
+                    let length = phone
+                        .cipher
+                        .seal_into(
+                            Direction::PhoneToHost,
+                            PHONE_TOUCH,
+                            9,
+                            sequence,
+                            0,
+                            &payload,
+                            &mut phone.bytes,
+                        )
+                        .unwrap();
+                    if fault.ends_with("both-lost") || (fault == "first-lost" && copy == 0) {
+                        continue;
+                    }
+                    if fault == "corrupt-first" && copy == 0 {
+                        phone.bytes[length - 1] ^= 1;
+                    }
+                    phone.socket.send(&phone.bytes[..length]).unwrap();
                 }
-                phone.socket.send(&phone.bytes[..length]).unwrap();
+                if fault.ends_with("both-lost") {
+                    // Real OS scheduling instead of a busy spin. Android's actual repair
+                    // selector is covered separately by V5SendQueueTest/device validation.
+                    let due =
+                        phone.epoch + Duration::from_nanos(event_nanos) + Duration::from_millis(2);
+                    if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                        thread::sleep(wait);
+                    }
+                    phone.send(PHONE_TOUCH, 9, sequence, &payload).unwrap();
+                }
+                phone.ack(sequence).unwrap();
             }
-            if fault == "both-lost" {
-                // Real OS scheduling instead of a busy spin. Android's actual repair
-                // selector is covered separately by V5SendQueueTest/device validation.
-                let due =
-                    phone.epoch + Duration::from_nanos(event_nanos) + Duration::from_millis(2);
-                if let Some(wait) = due.checked_duration_since(Instant::now()) {
-                    thread::sleep(wait);
-                }
-                phone.send(PHONE_TOUCH, 9, sequence, &payload).unwrap();
-            }
-            phone.ack(sequence).unwrap();
+            phone.abort();
+            let (mut sink, _) = worker.join().unwrap();
+            assert_eq!(sink.latency_nanos.len(), 160);
+            // Every gameplay sample, including startup, participates in the budget check.
+            let samples = &mut sink.latency_nanos[..];
+            samples.sort_unstable();
+            let p99 = samples[(samples.len() * 99).div_ceil(100) - 1];
+            let maximum = *samples.last().unwrap();
+            eprintln!(
+                "v5 production {fault} diagnostics={diagnostics}: n={} p50={:.3}ms observed_rank99={:.3}ms max={:.3}ms (OS acceptance simulated)",
+                samples.len(),
+                samples[samples.len() / 2] as f64 / 1e6,
+                p99 as f64 / 1e6,
+                maximum as f64 / 1e6
+            );
+            assert!(maximum <= 8_333_333, "{fault} exceeded one 120 Hz frame");
         }
-        phone.abort();
-        let (mut sink, _) = worker.join().unwrap();
-        assert_eq!(sink.latency_nanos.len(), 160);
-        // Exclude setup/JIT-free allocator warm-up explicitly, then report the tail.
-        let samples = &mut sink.latency_nanos[32..];
-        samples.sort_unstable();
-        let p99 = samples[(samples.len() * 99).div_ceil(100) - 1];
-        let maximum = *samples.last().unwrap();
-        eprintln!(
-            "v5 production {fault}: n={} p50={:.3}ms p99={:.3}ms max={:.3}ms (OS acceptance simulated)",
-            samples.len(),
-            samples[samples.len() / 2] as f64 / 1e6,
-            p99 as f64 / 1e6,
-            maximum as f64 / 1e6
-        );
-        assert!(maximum <= 8_333_333, "{fault} exceeded one 120 Hz frame");
     }
 }

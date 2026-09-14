@@ -73,8 +73,8 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
     --project-dir $AndroidDir `
     --no-daemon `
     "-PholodoriVersionName=$Version" `
-    "-PholodoriVersionCode=36" `
-    requireReleaseSigning clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
+    "-PholodoriVersionCode=37" `
+    requireReleaseSigning clean testDebugUnitTest testReleaseUnitTest assembleDebug assembleRelease lintDebug lintRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
 }
@@ -143,6 +143,10 @@ Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V5.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V5_TEST_VECTORS.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V4.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "LATENCY_VALIDATION.md") $DocsDir
+Copy-Item (Join-Path $ProjectRoot "DIAGNOSTICS.md") $DocsDir
+New-Item -ItemType Directory -Path (Join-Path $DocsDir "docs"), (Join-Path $BundleDir "tools") | Out-Null
+Copy-Item -Recurse (Join-Path $ProjectRoot "docs\diagnostic-examples") (Join-Path $DocsDir "docs")
+Copy-Item (Join-Path $ProjectRoot "tools\diagnostic_report.py") (Join-Path $BundleDir "tools")
 Copy-Item (Join-Path $ProjectRoot "LICENSE") $DocsDir
 
 $Branch = git -C $ProjectRoot branch --show-current
@@ -152,7 +156,7 @@ $Dirty = if ($TrackedChanges) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
     "android_version_name=$Version",
-    "android_version_code=34",
+    "android_version_code=37",
     "built_utc=$([DateTime]::UtcNow.ToString('o'))",
     "branch=$Branch",
     "base_commit=$Commit",
