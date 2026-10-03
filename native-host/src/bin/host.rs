@@ -1,7 +1,7 @@
 use std::env;
 use std::error::Error;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use holodori_native_host::input::{InputSink, cancel_with_deadline, commit_ready};
+use holodori_native_host::input::{InputSink, cancel_with_deadline, commit_ready, receive_ordered};
 use holodori_native_host::keyboard::KeyboardSink;
 use holodori_native_host::metrics::{HostMetrics, log_directory};
 use holodori_native_host::network::{DEFAULT_UDP_PORT, UdpConnection, UdpHost};
@@ -229,12 +229,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let lane_count = sink.lane_count(&options);
     let udp = UdpHost::bind(options.udp_port)?;
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 4);
-    if metrics.enabled() {
-        metrics.configure(
-            "legacy-usb",
-            holodori_native_host::platform::diagnostic_environment(),
-        );
-    }
+    metrics.configure("legacy-usb", platform::diagnostic_environment());
     #[cfg(windows)]
     let mut tether_policy =
         if options.local_only_tether {
@@ -376,20 +371,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         parser.discarded_bytes,
         parser.connection_discarded_bytes,
     );
-    let report_result = if metrics.enabled() {
-        options
-            .metrics_file
-            .map(Ok)
-            .unwrap_or_else(default_metrics_path)
-            .and_then(|report_path| {
-                metrics.write_report(&report_path)?;
-                println!("Metrics written to {}", report_path.display());
-                let _ = io::stdout().flush();
-                Ok(())
-            })
-    } else {
-        Ok(())
-    };
+    let report_result = write_metrics_report(&mut metrics, options.metrics_file.as_deref());
     release_result?;
     #[cfg(windows)]
     if let Some(policy) = tether_policy.as_mut() {
@@ -446,12 +428,7 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
     let mut sink = build_sink(options)?;
     let lane_count = sink.lane_count(options);
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 5);
-    if metrics.enabled() {
-        metrics.configure(
-            transport.label(),
-            holodori_native_host::platform::diagnostic_environment(),
-        );
-    }
+    metrics.configure(transport.label(), platform::diagnostic_environment());
     #[cfg(windows)]
     let mut tether_policy =
         if options.local_only_tether {
@@ -571,21 +548,7 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
     status.publish(HostPhase::Stopping);
     let release_result = cancel_sink_with_deadline(&mut sink, &mut metrics);
     metrics.set_parser_counters(0, 0, 0);
-    let report_result = if metrics.enabled() {
-        options
-            .metrics_file
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(default_metrics_path)
-            .and_then(|report_path| {
-                metrics.write_report(&report_path)?;
-                println!("Metrics written to {}", report_path.display());
-                let _ = io::stdout().flush();
-                Ok(())
-            })
-    } else {
-        Ok(())
-    };
+    let report_result = write_metrics_report(&mut metrics, options.metrics_file.as_deref());
     release_result?;
     #[cfg(windows)]
     if let Some(policy) = tether_policy.as_mut() {
@@ -719,12 +682,25 @@ fn install_exit_command_thread() -> io::Result<()> {
         .map(|_| ())
 }
 
-fn default_metrics_path() -> io::Result<PathBuf> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    Ok(log_directory()?.join(format!("holodori-metrics-{timestamp}.txt")))
+/// Write the stop-time report, if enabled, to the explicit or default path.
+fn write_metrics_report(metrics: &mut HostMetrics, file: Option<&Path>) -> io::Result<()> {
+    if !metrics.enabled() {
+        return Ok(());
+    }
+    let path = match file {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            log_directory()?.join(format!("holodori-metrics-{timestamp}.txt"))
+        }
+    };
+    metrics.write_report(&path)?;
+    println!("Metrics written to {}", path.display());
+    let _ = io::stdout().flush();
+    Ok(())
 }
 
 fn serve_connection(
@@ -836,29 +812,7 @@ fn process_decoded_frame(
     };
     connection.note_valid_peer_activity();
     let incoming_session = frame.session_id;
-    let same_session = ordered.session_id() == Some(frame.session_id);
-    let expected = ordered.expected_sequence();
-    let replay =
-        same_session && (frame.sequence < expected || ordered.contains_sequence(frame.sequence));
-    if same_session
-        && !replay
-        && frame.sequence > expected
-        && frame.sequence - expected < holodori_native_host::protocol::MAX_REORDERED_FRAMES as u64
-    {
-        metrics.observe_gap(frame.session_id, expected, frame.sequence);
-    }
-    let observation = metrics.receive_event(&frame, arrival, replay);
-    let incoming_sequence = frame.sequence;
-    ordered.push(frame);
-    if let Some(mut event) = observation {
-        if !replay
-            && (!ordered.contains_sequence(incoming_sequence)
-                || ordered.session_id() != Some(incoming_session))
-        {
-            event.0[0] = holodori_native_host::diagnostics::REJECT;
-        }
-        metrics.record(event);
-    }
+    receive_ordered(ordered, metrics, frame, arrival);
 
     if commit_ready(ordered, sink, metrics, &SHUTDOWN_REQUESTED)? {
         control_state.last_committed_frame = Instant::now();

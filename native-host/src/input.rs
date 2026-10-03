@@ -22,31 +22,47 @@ pub fn cancel_with_deadline(
     let started = Instant::now();
     let deadline = started + SINK_STALL_TIMEOUT;
     loop {
-        match sink.cancel_all() {
-            Ok(()) => {
-                metrics.note(
-                    crate::diagnostics::CANCEL,
-                    0,
-                    0,
-                    started.elapsed().as_nanos() as u64,
-                    0,
-                );
-                return Ok(());
-            }
-            Err(error) if Instant::now() >= deadline => {
-                metrics.note(
-                    crate::diagnostics::CANCEL,
-                    0,
-                    0,
-                    started.elapsed().as_nanos() as u64,
-                    error.raw_os_error().unwrap_or(-1) as u64,
-                );
-                return Err(error);
-            }
-            Err(_) => {
-                std::thread::yield_now();
-            }
+        let result = sink.cancel_all();
+        if result.is_ok() || Instant::now() >= deadline {
+            let code = result
+                .as_ref()
+                .map_or_else(|error| error.raw_os_error().unwrap_or(-1) as u64, |()| 0);
+            let elapsed = started.elapsed().as_nanos() as u64;
+            metrics.note(crate::diagnostics::CANCEL, 0, 0, elapsed, code);
+            return result;
         }
+        std::thread::yield_now();
+    }
+}
+
+/// Record a received frame and buffer it in order. A unique frame the window
+/// refused (stale session or beyond the window) is recorded as rejected.
+pub fn receive_ordered(
+    ordered: &mut OrderedFrames,
+    metrics: &mut HostMetrics,
+    frame: TouchFrame,
+    arrival: Instant,
+) {
+    let (session, sequence) = (frame.session_id, frame.sequence);
+    let same_session = ordered.session_id() == Some(session);
+    let expected = ordered.expected_sequence();
+    let replay = same_session && (sequence < expected || ordered.contains_sequence(sequence));
+    if same_session
+        && !replay
+        && sequence > expected
+        && sequence - expected < crate::protocol::MAX_REORDERED_FRAMES as u64
+    {
+        metrics.observe_gap(session, expected, sequence);
+    }
+    let observation = metrics.receive_event(&frame, arrival, replay);
+    ordered.push(frame);
+    if let Some(mut event) = observation {
+        if !replay
+            && (!ordered.contains_sequence(sequence) || ordered.session_id() != Some(session))
+        {
+            event.0[0] = crate::diagnostics::REJECT;
+        }
+        metrics.record(event);
     }
 }
 
@@ -61,39 +77,30 @@ pub fn commit_ready(
     while let Some(frame) = ordered.next_ready() {
         let retry_started = Instant::now();
         let mut retries = 0;
-        loop {
+        let failure = loop {
             match sink.accept(frame) {
-                Ok(()) => break,
+                Ok(()) => break None,
                 Err(error) => {
                     retries += 1;
-                    if stopping.load(Ordering::Relaxed) {
-                        metrics.observe_sink(
-                            frame,
-                            retry_started,
-                            Instant::now(),
-                            retries,
-                            Some(error.raw_os_error().unwrap_or(-1)),
-                        );
-                        return Err(io::Error::new(
-                            io::ErrorKind::Interrupted,
-                            "controller stopped",
-                        ));
-                    }
-                    if retry_started.elapsed() >= SINK_STALL_TIMEOUT {
-                        metrics.observe_sink(
-                            frame,
-                            retry_started,
-                            Instant::now(),
-                            retries,
-                            Some(error.raw_os_error().unwrap_or(-1)),
-                        );
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, error));
+                    let stopped = stopping.load(Ordering::Relaxed);
+                    if stopped || retry_started.elapsed() >= SINK_STALL_TIMEOUT {
+                        break Some((error, stopped));
                     }
                     std::thread::yield_now();
                 }
             }
+        };
+        let code = failure
+            .as_ref()
+            .map(|(error, _)| error.raw_os_error().unwrap_or(-1));
+        metrics.observe_sink(frame, retry_started, Instant::now(), retries, code);
+        if let Some((error, stopped)) = failure {
+            return Err(if stopped {
+                io::Error::new(io::ErrorKind::Interrupted, "controller stopped")
+            } else {
+                io::Error::new(io::ErrorKind::TimedOut, error)
+            });
         }
-        metrics.observe_sink(frame, retry_started, Instant::now(), retries, None);
         if !ordered.commit_ready() {
             return Err(io::Error::other(
                 "accepted frame was missing from the receive window",

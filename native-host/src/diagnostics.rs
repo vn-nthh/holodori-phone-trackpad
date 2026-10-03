@@ -29,6 +29,16 @@ pub const QUIET_NS: u64 = 32_000_000;
 #[derive(Clone, Copy, Default, Debug, Serialize)]
 pub struct Event(pub [u64; 12]);
 
+impl Event {
+    /// Zero-fills any of the eight kind-specific fields not supplied.
+    pub fn new(kind: u64, at: u64, session: u64, sequence: u64, fields: &[u64]) -> Self {
+        let mut values = [0; 12];
+        values[..4].copy_from_slice(&[kind, at, session, sequence]);
+        values[4..4 + fields.len()].copy_from_slice(fields);
+        Self(values)
+    }
+}
+
 #[derive(Serialize)]
 pub struct Series {
     pub n: u64,
@@ -246,23 +256,19 @@ impl Analysis {
             (observed - high).max(0) as u64,
             (observed - low).max(0) as u64,
         ];
-        let gameplay = d[9] & 1 != 0;
-        self.sample(
-            if gameplay {
-                "forward_transit_lower_bound_ns"
-            } else {
-                "control_frame_forward_lower_ns"
-            },
-            forward[0],
-        );
-        self.sample(
-            if gameplay {
-                "forward_transit_upper_bound_ns"
-            } else {
-                "control_frame_forward_upper_ns"
-            },
-            forward[1],
-        );
+        let (lower_key, upper_key) = if d[9] & 1 != 0 {
+            (
+                "forward_transit_lower_bound_ns",
+                "forward_transit_upper_bound_ns",
+            )
+        } else {
+            (
+                "control_frame_forward_lower_ns",
+                "control_frame_forward_upper_ns",
+            )
+        };
+        self.sample(lower_key, forward[0]);
+        self.sample(upper_key, forward[1]);
         self.sample("clock_offset_interval_width_ns", (high - low) as u64);
         let reverse = d[8] as i128 - d[7] as i128;
         if self
@@ -397,19 +403,15 @@ impl Analysis {
                     if d[4] == 0 || d[5] < d[4] || d[6] < d[5] {
                         self.anomaly(e, "android_timestamp_order_invalid");
                     }
-                    self.count(
-                        if d[9] & 2 != 0 {
-                            "historical_frames_observed"
-                        } else {
-                            "current_frames_observed"
-                        },
-                        1,
-                    );
-                    let input_key = if d[9] & 2 != 0 {
-                        "android_historical_dispatch_ns"
+                    let (count_key, input_key) = if d[9] & 2 != 0 {
+                        (
+                            "historical_frames_observed",
+                            "android_historical_dispatch_ns",
+                        )
                     } else {
-                        "android_current_dispatch_ns"
+                        ("current_frames_observed", "android_current_dispatch_ns")
                     };
+                    self.count(count_key, 1);
                     if self
                         .delta(input_key, d[5], d[4])
                         .is_some_and(|v| v > self.budget_ns)
@@ -509,37 +511,30 @@ impl Analysis {
                                 // plus the same documented phone clock-rate assumption.
                                 let lower =
                                     timestamp_total.saturating_sub(1_000_000 + phone_age / 1000);
-                                let key = if f[9] & 2 != 0 {
-                                    "historical_event_to_sink_local_lower_bound_ns"
+                                let (local_key, low_key, high_key) = if f[9] & 2 != 0 {
+                                    (
+                                        "historical_event_to_sink_local_lower_bound_ns",
+                                        "historical_event_to_sink_lower_ns",
+                                        "historical_event_to_sink_upper_ns",
+                                    )
                                 } else {
-                                    "current_event_to_sink_local_lower_bound_ns"
+                                    (
+                                        "current_event_to_sink_local_lower_bound_ns",
+                                        "current_event_to_sink_lower_ns",
+                                        "current_event_to_sink_upper_ns",
+                                    )
                                 };
-                                self.sample(key, lower);
+                                self.sample(local_key, lower);
                                 if lower > self.budget_ns {
                                     self.anomaly(e, "event_to_sink_definite_budget_violation");
                                 }
                                 if let Some(bounds) = self.forward_bounds[slot] {
-                                    let historical = f[9] & 2 != 0;
                                     let low = lower.saturating_add(bounds[0]);
                                     let high = timestamp_total
                                         .saturating_add(phone_age / 1000)
                                         .saturating_add(bounds[1]);
-                                    self.sample(
-                                        if historical {
-                                            "historical_event_to_sink_lower_ns"
-                                        } else {
-                                            "current_event_to_sink_lower_ns"
-                                        },
-                                        low,
-                                    );
-                                    self.sample(
-                                        if historical {
-                                            "historical_event_to_sink_upper_ns"
-                                        } else {
-                                            "current_event_to_sink_upper_ns"
-                                        },
-                                        high,
-                                    );
+                                    self.sample(low_key, low);
+                                    self.sample(high_key, high);
                                     if low > self.budget_ns {
                                         self.count("gameplay_budget_definite_fail", 1);
                                         self.anomaly(e, "bounded_event_to_sink_budget_violation");
@@ -677,7 +672,7 @@ impl Analysis {
 
     pub fn finish(&mut self, dropped: u64) {
         self.diagnostic_records_dropped = dropped;
-        let event = Event([BOUNDARY, self.last_event_ns, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let event = Event::new(BOUNDARY, self.last_event_ns, 0, 0, &[]);
         self.discard_pending(event);
         if dropped > 0 {
             self.anomaly(event, "diagnostic_coverage_gap");

@@ -149,20 +149,8 @@ impl HostMetrics {
     }
     pub fn note(&mut self, kind: u64, session: u64, sequence: u64, a: u64, b: u64) {
         if self.recorder.is_some() {
-            self.record(Event([
-                kind,
-                self.clock_nanos(Instant::now()),
-                session,
-                sequence,
-                a,
-                b,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ]));
+            let at = self.clock_nanos(Instant::now());
+            self.record(Event::new(kind, at, session, sequence, &[a, b]));
         }
     }
     pub fn begin_connection(&mut self) {
@@ -182,7 +170,7 @@ impl HostMetrics {
         } else {
             1
         } | if frame.historical() { 2 } else { 0 };
-        Some(Event([
+        Some(Event::new(
             if duplicate {
                 diag::DUPLICATE
             } else {
@@ -191,15 +179,17 @@ impl HostMetrics {
             self.clock_nanos(arrival),
             frame.session_id,
             frame.sequence,
-            frame.phone_event_nanos,
-            frame.phone_callback_nanos,
-            frame.phone_send_nanos,
-            frame.echo_host_send_nanos,
-            frame.phone_control_receive_nanos,
-            flags,
-            frame.action as u64,
-            frame.contacts.len() as u64,
-        ]))
+            &[
+                frame.phone_event_nanos,
+                frame.phone_callback_nanos,
+                frame.phone_send_nanos,
+                frame.echo_host_send_nanos,
+                frame.phone_control_receive_nanos,
+                flags,
+                frame.action as u64,
+                frame.contacts.len() as u64,
+            ],
+        ))
     }
     pub fn observe_gap(&mut self, session: u64, expected: u64, received: u64) {
         self.note(
@@ -221,24 +211,20 @@ impl HostMetrics {
         if self.recorder.is_none() {
             return;
         }
-        self.record(Event([
-            if error.is_some() {
-                diag::SINK_FAILURE
-            } else {
-                diag::ACCEPT
-            },
-            self.clock_nanos(end),
+        let kind = if error.is_some() {
+            diag::SINK_FAILURE
+        } else {
+            diag::ACCEPT
+        };
+        let fields = [self.clock_nanos(ready), retries, error.unwrap_or(0) as u64];
+        let at = self.clock_nanos(end);
+        self.record(Event::new(
+            kind,
+            at,
             frame.session_id,
             frame.sequence,
-            self.clock_nanos(ready),
-            retries,
-            error.unwrap_or(0) as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]));
+            &fields,
+        ));
     }
     pub fn observe_ack(
         &mut self,
@@ -252,20 +238,20 @@ impl HostMetrics {
             return;
         }
         let end = Instant::now();
-        self.record(Event([
-            diag::ACK,
-            self.clock_nanos(end),
-            session,
-            sequence.unwrap_or(u64::MAX),
+        let fields = [
             end.saturating_duration_since(start).as_nanos() as u64,
             progressed as u64,
             failed as u64,
             self.clock_nanos(start),
-            0,
-            0,
-            0,
-            0,
-        ]));
+        ];
+        let at = self.clock_nanos(end);
+        self.record(Event::new(
+            diag::ACK,
+            at,
+            session,
+            sequence.unwrap_or(u64::MAX),
+            &fields,
+        ));
     }
     pub fn observe_ack_write(&mut self, elapsed: Duration) {
         self.note(diag::ACK, 0, u64::MAX, elapsed.as_nanos() as u64, 0);
@@ -417,7 +403,7 @@ impl HostMetrics {
             },
         );
         let mut json = BufWriter::new(File::create(json_path)?);
-        serde_json::to_writer_pretty(
+        serde_json::to_writer(
             &mut json,
             &serde_json::json!({"source": "host", "protocol": self.protocol_version, "transport": self.transport, "environment": self.environment, "analysis": analysis, "recent_context": analysis.recent_context()}),
         )?;

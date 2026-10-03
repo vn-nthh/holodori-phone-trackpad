@@ -27,7 +27,7 @@ use windows_sys::Win32::Networking::WinSock::{
 use zeroize::Zeroizing;
 
 use crate::credentials;
-use crate::input::{InputSink, cancel_with_deadline, commit_ready};
+use crate::input::{InputSink, cancel_with_deadline, commit_ready, receive_ordered};
 use crate::metrics::HostMetrics;
 use crate::protocol::{OrderedFrames, TouchFrame};
 use crate::v5::{PHONE_PING, PHONE_TOUCH, decode_touch_payload};
@@ -462,20 +462,14 @@ fn serve_gameplay_inner(
         }
         let received = connection.receive_record_into(&mut receive_buffer);
         if let Some((reason, arrival)) = connection.last_diagnostic_discard.take() {
-            metrics.record(crate::diagnostics::Event([
+            let at = metrics.clock_nanos(arrival);
+            metrics.record(crate::diagnostics::Event::new(
                 crate::diagnostics::INGRESS,
-                metrics.clock_nanos(arrival),
+                at,
                 0,
                 0,
-                reason,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-            ]));
+                &[reason],
+            ));
         }
         let Some((header, arrival)) = received? else {
             continue;
@@ -561,29 +555,7 @@ fn process_gameplay_frame(
             "a new gameplay session requires fresh IK",
         ));
     }
-    let same_session = ordered.session_id() == Some(frame.session_id);
-    let expected = ordered.expected_sequence();
-    let replay =
-        same_session && (frame.sequence < expected || ordered.contains_sequence(frame.sequence));
-    if same_session
-        && !replay
-        && frame.sequence > expected
-        && frame.sequence - expected < crate::protocol::MAX_REORDERED_FRAMES as u64
-    {
-        metrics.observe_gap(frame.session_id, expected, frame.sequence);
-    }
-    let observation = metrics.receive_event(&frame, arrival, replay);
-    let incoming_sequence = frame.sequence;
-    ordered.push(frame);
-    if let Some(mut event) = observation {
-        if !replay
-            && (!ordered.contains_sequence(incoming_sequence)
-                || ordered.session_id() != Some(incoming_session))
-        {
-            event.0[0] = crate::diagnostics::REJECT;
-        }
-        metrics.record(event);
-    }
+    receive_ordered(ordered, metrics, frame, arrival);
 
     let progressed = commit_ready(ordered, sink, metrics, stopping)?;
     if progressed {
