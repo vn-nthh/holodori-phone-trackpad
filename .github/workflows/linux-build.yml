@@ -84,6 +84,9 @@ jobs:
       - name: Clippy native-host
         run: cargo clippy --locked --manifest-path native-host/Cargo.toml --all-targets -- -D warnings
 
+      - name: Test diagnostic report tools
+        run: python3 -m unittest discover -s tools -p "test_*.py"
+
       - name: Check loopback loss recovery budget
         run: |
           cargo test --locked --release --manifest-path native-host/Cargo.toml --lib \
