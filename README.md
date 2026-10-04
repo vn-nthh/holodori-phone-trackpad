@@ -14,8 +14,9 @@ into lane keys. The default keys are `S D F J K L`.
 
 ## Download
 
-The stable version is **v0.5.0**, with authenticated USB/Wi-Fi sessions,
-pairing, thumb mode, and new Android and PC icons.
+The stable version is **v0.5.1**, with authenticated USB/Wi-Fi sessions,
+pairing, thumb mode, lower-latency scheduling, optional pressure calibration,
+and session diagnostics.
 Install the phone and host from the same release.
 
 Starting with v0.5.1-alpha2, the portable Windows ZIP contains only the Windows
@@ -23,14 +24,14 @@ app and its supporting files. Download the Android APK separately from the same
 release. Microsoft Store distribution uses MSIX with Microsoft's free package
 signing after certification; see the [Store packaging guide](packaging/MICROSOFT_STORE.md).
 
-- [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-windows-x64.zip)
+- [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-windows-x64.zip)
 - Linux app: a ready-made download is not available yet. See the
   [Linux setup guide](LINUX_SETUP.md) if you want to build and use it now.
-- [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-android.apk)
-- [Release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0)
+- [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-android.apk)
+- [Release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.1)
 
 **Upgrading from an alpha or v0.4.1:** the Android app now uses a persistent
-private release key. Uninstall the old APK once, install v0.5.0, and pair again.
+private release key. Uninstall the old APK once, install v0.5.1, and pair again.
 Uninstalling clears the phone app's settings and pairing. Future releases using
 this key can update normally.
 

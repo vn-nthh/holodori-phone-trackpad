@@ -76,7 +76,14 @@ jobs:
           DORITRACK_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.DORITRACK_MSIX_PUBLISHER_DISPLAY_NAME }}
         run: |
           $version = (Get-Content VERSION -Raw).Trim()
-          $development = $env:GITHUB_REF_TYPE -ne "tag" -or $version.Contains("-")
+          $stable = $env:GITHUB_REF_TYPE -eq "tag" -and -not $version.Contains("-")
+          $identity = $env:DORITRACK_MSIX_PACKAGE_NAME -and $env:DORITRACK_MSIX_PUBLISHER -and $env:DORITRACK_MSIX_PUBLISHER_DISPLAY_NAME
+          # Until Partner Center identity is configured, a stable tag still publishes its
+          # GitHub release; the MSIX is then only the validation build.
+          if ($stable -and -not $identity) {
+            Write-Host "::warning::Partner Center identity is not configured; building the validation MSIX, not a Store submission."
+          }
+          $development = -not ($stable -and $identity)
           .\packaging\build-microsoft-store.ps1 -Development:$development
 
       - uses: actions/upload-artifact@v4

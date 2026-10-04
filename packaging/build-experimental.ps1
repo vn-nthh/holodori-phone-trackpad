@@ -73,7 +73,7 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
     --project-dir $AndroidDir `
     --no-daemon `
     "-PholodoriVersionName=$Version" `
-    "-PholodoriVersionCode=37" `
+    "-PholodoriVersionCode=38" `
     requireReleaseSigning clean testDebugUnitTest testReleaseUnitTest assembleDebug assembleRelease lintDebug lintRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."

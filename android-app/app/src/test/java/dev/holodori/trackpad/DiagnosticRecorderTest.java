@@ -81,4 +81,30 @@ public final class DiagnosticRecorderTest {
         assertEquals(4, frame.sendAttempts);
         assertEquals(100, frame.firstSelectedNanos);
     }
+
+    @Test public void persistentEnvironmentConstraintOpensOneIncident() {
+        DiagnosticRecorder recorder = new DiagnosticRecorder();
+        long[] row = new long[DiagnosticRecorder.WIDTH];
+        // Ten minutes of 2 s samples with power save on and no low-latency Wi-Fi lock.
+        for (int n = 0; n < 300; n++) {
+            java.util.Arrays.fill(row, -1);
+            row[0] = DiagnosticRecorder.ENVIRONMENT;
+            row[1] = n * 2_000_000_000L;
+            row[2] = row[3] = 0;
+            row[4] = 0; row[5] = 1; row[6] = 1; row[7] = 1; row[8] = 0;
+            recorder.analyze(row);
+        }
+        assertEquals(1, recorder.incidents);
+        assertEquals(300, recorder.constrainedEnvironmentSamples);
+        // A newly appearing condition is still reported, and clearing re-arms it.
+        row[1] += 2_000_000_000L; row[4] = 3;
+        recorder.analyze(row);
+        assertEquals(2, recorder.incidents);
+        row[1] += 2_000_000_000L; row[4] = 0; row[5] = 0; row[8] = 1;
+        recorder.analyze(row);
+        row[1] += 2_000_000_000L; row[5] = 1;
+        recorder.analyze(row);
+        assertEquals(3, recorder.incidents);
+        assertEquals(0, recorder.omittedIncidents);
+    }
 }

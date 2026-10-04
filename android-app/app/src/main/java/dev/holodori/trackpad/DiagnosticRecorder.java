@@ -65,6 +65,7 @@ final class DiagnosticRecorder {
     long pendingHighWater, oldestPendingMaxNs, repairLatenessMaxNs;
     private long lastBadSession, lastBadSequence = -1;
     private int recovering = -1;
+    long environmentConditions, constrainedEnvironmentSamples;
 
     void drain() {
         // Merge currently published records. A producer may publish a timestamp late;
@@ -142,7 +143,13 @@ final class DiagnosticRecorder {
         } else if (kind == ENVIRONMENT) {
             System.arraycopy(r, 0, latestEnvironment, 0, WIDTH);
             // Android API unavailable values are -1; never treat unavailable as verified.
-            if (r[4] >= 3 || r[5] == 1 || r[6] == 0 || r[7] == 0 || r[8] == 0) reasons |= 512;
+            // A constraint is a state: open an incident when one appears, not on every
+            // 2 s sample while it persists, or a steady state exhausts incident storage.
+            long conditions = (r[4] >= 3 ? 1 : 0) | (r[5] == 1 ? 2 : 0) | (r[6] == 0 ? 4 : 0)
+                    | (r[7] == 0 ? 8 : 0) | (r[8] == 0 ? 16 : 0);
+            if ((conditions & ~environmentConditions) != 0) reasons |= 512;
+            environmentConditions = conditions;
+            if (conditions != 0) constrainedEnvironmentSamples++;
         }
         if (reasons != 0) trigger(r, reasons);
         if ((kind == BOUNDARY && r[4] != 0) || kind == WATCHDOG) recovering = active;
@@ -222,6 +229,8 @@ final class DiagnosticRecorder {
             out.println("ACK completion is a sender-clock upper bound on OS acceptance, including return-path delay; not one-way or game-observed latency.");
             out.println("pending_depth_high_water=" + pendingHighWater + " oldest_pending_at_ack_max_ns=" + oldestPendingMaxNs
                     + " repair_deadline_lateness_max_ns=" + repairLatenessMaxNs);
+            out.println("environment_constrained_samples=" + constrainedEnvironmentSamples
+                    + " environment_conditions_at_stop=" + environmentConditions);
             out.println("queue_diagnostic_drop_span_ns=" + queue.firstDropNs + "," + queue.lastDropNs
                     + " writer_diagnostic_drop_span_ns=" + writer.firstDropNs + "," + writer.lastDropNs);
             out.println("Attempt is seal/send invocation; socket return is local submission, not NIC transmission. Repairs do not prove forward loss; ACK loss can also cause repair.");
