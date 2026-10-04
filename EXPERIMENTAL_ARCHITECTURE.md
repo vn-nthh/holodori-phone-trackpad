@@ -270,6 +270,15 @@ uses independent cipher locks for send and receive, reusable control buffers,
 and a retained-frame ring with deadline waits and fair 2 ms repairs. Network
 interface checks run on watchdog workers, outside gameplay send/receive work.
 
+V5 sends two ACK copies when ordered OS acceptance advances, and one immediate
+ACK when a logical duplicate or ordering hole leaves progress unchanged. This
+reduces redundant feedback without delaying ACKs or changing phone repair timing.
+Android 10+ Wi-Fi bindings request a low-latency Wi-Fi lock during pairing and
+play, including rests, and release it with the binding. USB does not acquire it.
+The Windows native host requests HighQoS to disable execution-speed throttling
+alongside its existing high input priority. These startup requests are best
+effort; no busy polling, affinity pinning, or system-wide power changes are used.
+
 An absolute promise that every phone is faster than every physical keyboard is
 not physically testable or universally true: phone touch scan rate and USB
 controller scheduling vary. The enforceable target for this branch is:
@@ -292,18 +301,24 @@ clock origins.
 Pass `--metrics` to collect bounded in-memory samples. No metrics are formatted,
 sorted, printed, or written while input is active. Press Q then Enter, Ctrl+C,
 or close the console to request graceful shutdown; the host then writes one
-timestamped file under `Windows\Logs` on Windows or
+timestamped file under `%LOCALAPPDATA%\Doritrack\Logs` for portable Windows,
+`%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs` for Store MSIX, or
 `$XDG_STATE_HOME/holodori/logs` (falling back to
 `~/.local/state/holodori/logs`) on Linux. `--metrics-file PATH` selects an
 explicit destination and `--warn-ms MS` changes the default 8.333 ms final
-warning budget.
+warning budget. The launcher uses the same path resolver for its
+**Open report folder** action, available after Stop. MSIX uses the runtime
+package family name so updates preserve the report path; reset/uninstall may
+remove package data.
 
-The report contains mean, max, p50, p90, p99, and p99.9 values for current-event
-to-host-input estimated latency, Android current input dispatch, Android historical
-batch age, Android callback-to-write, symmetric one-way network, host
-receive-to-sink, and ACK write. Recovery incidents, out-of-order frames,
-replays, unresolved frames, parser discards, and sink retries are counted once
-at exit. No cross-device clocks are directly subtracted.
+Schema-2 diagnostics use bounded numeric producer queues and a separate analysis
+worker. The worker owns histograms, clock-uncertainty intervals and clustered
+incidents; report formatting and files remain Stop-only. Gameplay cadence,
+historical/current latency bounds, control/heartbeat observations, sender ACK
+completion, rejected/discarded frames and failed OS outcomes have distinct
+populations. No RTT/2 one-way value is presented. See [DIAGNOSTICS.md](DIAGNOSTICS.md)
+for metric ownership, bounds, limits, environment verification, cross-device
+correlation and generated healthy/degraded examples.
 
 ## Current protocol v4 build and operation
 
@@ -326,4 +341,5 @@ gradlew.bat assembleRelease
 ```
 
 On the phone, enable USB tethering before launching the host. The app uses
-normal `INTERNET` and `ACCESS_NETWORK_STATE` permissions only.
+normal `INTERNET`, `ACCESS_NETWORK_STATE`, and `ACCESS_WIFI_STATE` permissions,
+plus `WAKE_LOCK` for the v5 Wi-Fi low-latency request.

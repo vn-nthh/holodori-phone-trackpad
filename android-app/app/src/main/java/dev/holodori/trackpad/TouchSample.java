@@ -18,6 +18,7 @@ final class TouchSample {
     static final int FRAME_FLAG_HISTORICAL = 0x04;
     static final int CONTACT_FLAG_INSIDE = 0x01;
     static final int CONTACT_FLAG_TIP = 0x02;
+    static final int CONTACT_FLAG_KEY_SUPPRESSED = 0x04;
 
     static final int FRAME_HEADER_SIZE = 68;
     static final int CONTACT_SIZE = 10;

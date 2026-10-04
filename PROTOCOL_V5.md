@@ -358,7 +358,7 @@ Every contact record is a complete member of the simultaneous snapshot:
 | Offset | Type | Meaning |
 |---:|---|---|
 | 0 | `u8` | Pointer ID, unique in this frame |
-| 1 | `u8` | Inside `0x01`, physical tip down `0x02` |
+| 1 | `u8` | Inside `0x01`, physical tip down `0x02`, keyboard suppressed `0x04` |
 | 2 | `i16` | Normalized X multiplied by 10,000 |
 | 4 | `i16` | Normalized Y multiplied by 10,000 |
 | 6 | `u16` | Normalized pressure multiplied by 65,535 |
@@ -367,6 +367,21 @@ Every contact record is a complete member of the simultaneous snapshot:
 The payload is exactly `44 + 10 * contact_count` bytes. Its maximum
 authenticated datagram is 268 bytes. Values outside the painted rectangle are
 allowed so an owned contact can remain asserted until lift.
+
+Starting with v0.5.1-alpha3, optional phone pressure calibration uses contact
+flag `0x04` to suppress keyboard admission. Physical TIP, coordinates, pressure,
+and every historical sample remain intact; the touch sink ignores `0x04`.
+With the filter enabled, a physical contact is suppressed until a sample meets
+the saved cutoff (pressure clamped to 0..1, inclusive comparison). Admission
+then stays latched until lift, omission, or physical CANCEL. A later pressure
+dip never releases an admitted hold. Each pointer is independent. An admission
+during MOVE/history counts as a new key press even on an already-owned lane,
+without releasing the other owner. No timer or confirmation window is added.
+Heartbeats and fresh-session reconstruction retain the latest admission state;
+transport failure still releases host input and rejects stale session frames.
+The setting defaults off. Install phone and host v0.5.1-alpha3 or newer together
+before enabling it: older V5 hosts reject the newly defined flag. Other
+undefined contact bits remain invalid. The contact size and MTU are unchanged.
 
 ### Host control payload
 
@@ -439,12 +454,17 @@ V5 keeps the v4 delivery semantics after authentication:
   in order, and deduplicates repairs.
 - The phone sends the first copy immediately, a separately encrypted redundant
   copy immediately, and starts repair after 2 ms when cumulative progress does
-  not cover the frame. Host controls use the same two-copy rule. An overdue
-  repair gets a turn between new immediate pairs, so a burst of new samples
+  not cover the frame. An overdue repair gets a turn between new immediate
+  pairs, so a burst of new samples
   cannot starve the missing sequence. The writer waits for queue notifications
   or the next repair/heartbeat deadline instead of polling every millisecond.
 - The host advances its cumulative ACK only after the selected Windows or Linux
-  sink accepts the complete ordered frame.
+  sink accepts the complete ordered frame. Each advancement sends two immediate,
+  independently encrypted ACK copies. A valid logical duplicate or future frame
+  behind an ordering hole sends one immediate ACK with the unchanged cumulative
+  sequence, so lost feedback can recover without another redundant pair. ACKs
+  are never delayed to collect more frames. Initial HELLO and PONG responses
+  retain two copies; HELLO repairs remain single-copy.
 - An 8 ms acknowledged full-state heartbeat sustains active stationary
   contacts. Idle sessions do not manufacture touch frames.
 - A 64 ms oldest-pending or no-ACK-progress boundary makes Android abandon the
@@ -469,6 +489,15 @@ to these values requires loopback fault injection and real phone/PC evidence
 against the 8.333 ms target.
 
 ## Wi-Fi path measurement
+
+On Android 10 and newer, each selected Wi-Fi binding requests a
+`WIFI_MODE_FULL_LOW_LATENCY` lock for both Pair and Start. The binding owns the
+lock through rests and releases it on close, replacement, or failed setup.
+This uses `WAKE_LOCK`; Android activates the low-latency policy only while the
+app is foreground, the screen is on, and the phone is connected to an AP.
+Older Android versions and USB keep their existing radio behavior. An unavailable
+lock is reported in the Android log and does not prevent connection. Hardware
+latency improvements still require measurement on the actual phone and AP.
 
 Wi-Fi signal strength is useful diagnosis, not proof of identity and not a
 compatibility gate. During the human lane-entry interval, the apps run a
@@ -529,8 +558,11 @@ The result shown after pairing SHOULD include:
 
 The report MUST distinguish unavailable data from zero. On multi-link Wi-Fi,
 the app reports the frequency exposed by Android and labels that it may
-represent only one link. The UI shows the 8.333 ms target beside estimated
-one-way and repair-completion metrics while reporting RTT separately. It MAY
+represent only one link. The UI shows the 8.333 ms target beside repair-completion
+metrics and reports duplex timing separately. One-way point estimates based on
+RTT/2 are not reported: directionality is unknown. Gameplay diagnostics may use
+explicit clock-uncertainty bounds as specified in [DIAGNOSTICS.md](DIAGNOSTICS.md).
+Percentile support and missing/invalid samples must remain visible. It MAY
 warn on poor measured tails, but it still lets the user continue. No release
 may claim universal Wi-Fi latency without a real-device soak across
 representative phones, routers, wired/wireless PCs, bands, and congestion.

@@ -14,8 +14,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::protocol::{
     ACTION_CANCEL, ACTION_DOWN, ACTION_HEARTBEAT, ACTION_MOVE, ACTION_UP, CONTACT_FLAG_INSIDE,
-    CONTACT_FLAG_TIP, Contact, Contacts, FRAME_FLAG_HISTORICAL, FRAME_FLAG_LOCKED,
-    FRAME_FLAG_SESSION_START, MAX_CONTACTS, TouchFrame,
+    CONTACT_FLAG_KEY_SUPPRESSED, CONTACT_FLAG_TIP, Contact, Contacts, FRAME_FLAG_HISTORICAL,
+    FRAME_FLAG_LOCKED, FRAME_FLAG_SESSION_START, MAX_CONTACTS, TouchFrame,
 };
 
 pub const PROTOCOL_VERSION: u8 = 5;
@@ -60,7 +60,8 @@ pub const QUALITY_REPAIR_ONLY: u32 = 0x01;
 pub const NO_ACK: u64 = u64::MAX;
 
 const VALID_FRAME_FLAGS: u8 = FRAME_FLAG_LOCKED | FRAME_FLAG_SESSION_START | FRAME_FLAG_HISTORICAL;
-const VALID_CONTACT_FLAGS: u8 = CONTACT_FLAG_INSIDE | CONTACT_FLAG_TIP;
+const VALID_CONTACT_FLAGS: u8 =
+    CONTACT_FLAG_INSIDE | CONTACT_FLAG_TIP | CONTACT_FLAG_KEY_SUPPRESSED;
 const NOISE_PROLOGUE_PREFIX: &[u8] = b"holodori-phone-trackpad-v5\0";
 const CONNECTION_DOMAIN: &[u8] = b"holodori-v5-connection";
 const SAS_COMMIT_DOMAIN: &[u8] = b"holodori-v5-sas-commit";
@@ -869,6 +870,29 @@ mod tests {
         assert_eq!(read_u64(&first, 24), 0);
         assert_eq!(read_u64(&second, 24), 1);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn authenticated_pressure_suppression_keeps_physical_tip_and_rejects_reserved_flags() {
+        let (mut phone, mut host) = cipher_pair();
+        let mut payload = vec![0_u8; TOUCH_PAYLOAD_HEADER_SIZE + CONTACT_SIZE];
+        payload[40] = ACTION_DOWN;
+        payload[42] = 1;
+        payload[43] = FRAME_FLAG_LOCKED;
+        payload[45] = CONTACT_FLAG_TIP | CONTACT_FLAG_KEY_SUPPRESSED;
+        let wire = phone
+            .seal(Direction::PhoneToHost, PHONE_TOUCH, 9, 1, 0, &payload)
+            .unwrap();
+        let record = host.open(Direction::PhoneToHost, &wire).unwrap();
+        let frame = decode_touch_record(&record).unwrap();
+        assert!(frame.contacts[0].touching());
+        assert!(frame.contacts[0].key_suppressed());
+        payload[45] |= 0x08;
+        let wire = phone
+            .seal(Direction::PhoneToHost, PHONE_TOUCH, 9, 2, 0, &payload)
+            .unwrap();
+        let record = host.open(Direction::PhoneToHost, &wire).unwrap();
+        assert_eq!(decode_touch_record(&record), Err(WireError::ReservedBits));
     }
 
     #[test]

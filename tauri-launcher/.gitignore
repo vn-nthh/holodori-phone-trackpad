@@ -6,3 +6,6 @@ src-tauri/gen/
 src-tauri/icons/*
 !src-tauri/icons/icon.ico
 !src-tauri/icons/icon.png
+!src-tauri/icons/Square44x44Logo.png
+!src-tauri/icons/Square150x150Logo.png
+!src-tauri/icons/StoreLogo.png

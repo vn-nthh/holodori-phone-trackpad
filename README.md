@@ -14,18 +14,24 @@ into lane keys. The default keys are `S D F J K L`.
 
 ## Download
 
-The stable version is **v0.5.0**, with authenticated USB/Wi-Fi sessions,
-pairing, thumb mode, and new Android and PC icons.
+The stable version is **v0.5.1**, with authenticated USB/Wi-Fi sessions,
+pairing, thumb mode, lower-latency scheduling, optional pressure calibration,
+and session diagnostics.
 Install the phone and host from the same release.
 
-- [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-windows-x64.zip)
+Starting with v0.5.1-alpha2, the portable Windows ZIP contains only the Windows
+app and its supporting files. Download the Android APK separately from the same
+release. Microsoft Store distribution uses MSIX with Microsoft's free package
+signing after certification; see the [Store packaging guide](packaging/MICROSOFT_STORE.md).
+
+- [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-windows-x64.zip)
 - Linux app: a ready-made download is not available yet. See the
   [Linux setup guide](LINUX_SETUP.md) if you want to build and use it now.
-- [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-android.apk)
-- [Release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0)
+- [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-android.apk)
+- [Release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.1)
 
 **Upgrading from an alpha or v0.4.1:** the Android app now uses a persistent
-private release key. Uninstall the old APK once, install v0.5.0, and pair again.
+private release key. Uninstall the old APK once, install v0.5.1, and pair again.
 Uninstalling clears the phone app's settings and pairing. Future releases using
 this key can update normally.
 
@@ -147,10 +153,29 @@ press Start again.
 
 ### Save latency report when stopped
 
-Leave this checked if you want a report after playing. Reports are saved under
-`Windows\Logs` on Windows. Linux locations are listed in the
+Leave this checked if you want a report after playing. After **Stop**, use
+**Settings > Open report folder**. Starting with v0.5.1-alpha2, portable Windows
+reports use `%LOCALAPPDATA%\Doritrack\Logs`; Store MSIX reports use
+`%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs`.
+Reports survive app updates. Copy Store reports elsewhere before an app reset or
+uninstall if you want to keep them. Older releases keep their reports under
+`Windows\Logs` in the extracted folder. Linux locations are listed in the
 [Linux setup guide](LINUX_SETUP.md#latency-reports). The app writes the report
 only after you press **Stop**, not while you are playing.
+
+Reports now include session health and clustered incidents. For sender ACK,
+repair and discarded-frame evidence, enable **Preferences > Diagnostics** on
+Android too, then export its reports after Stop. See the
+[diagnostic guide and example reports](DIAGNOSTICS.md) for cross-device correlation,
+latency bounds, sample quality and coverage limits.
+
+## Optional light-touch filter
+
+Android **Preferences > Light-touch filter · keys only** optionally rejects
+light brushes. Compare brushes and normal taps on its test pad, watch the live
+pressure marker, and drag the cutoff slider. Accepted holds remain active until
+lift; the filter defaults off. See [pressure calibration](android-app/README.md#calibrate-the-optional-keyboard-pressure-filter).
+Install phone and host v0.5.1-alpha3 or newer together before enabling it.
 
 ## Linux users
 

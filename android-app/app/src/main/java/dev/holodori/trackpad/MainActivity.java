@@ -1,12 +1,23 @@
 package dev.holodori.trackpad;
 
 import android.app.Activity;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /** Explicit V5 setup/pairing front end and latency-sensitive play surface. */
 public final class MainActivity extends Activity implements
@@ -14,6 +25,7 @@ public final class MainActivity extends Activity implements
         SetupView.Listener {
     private static final long RECONNECT_MIN_MILLIS = 4;
     private static final long RECONNECT_MAX_MILLIS = 64;
+    private static final int EXPORT_DIAGNOSTICS_REQUEST = 502;
 
     private TouchTransport transport;
     private TrackpadView trackpadView;
@@ -248,5 +260,53 @@ public final class MainActivity extends Activity implements
         cancelReconnect();
         if (transport != null) transport.close();
         transport = null;
+    }
+
+    @Override
+    public void onExportDiagnostics() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE).setType("application/zip")
+                .putExtra(Intent.EXTRA_TITLE, "doritrack-android-diagnostics.zip");
+        startActivityForResult(intent, EXPORT_DIAGNOSTICS_REQUEST);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != EXPORT_DIAGNOSTICS_REQUEST || resultCode != RESULT_OK
+                || data == null || data.getData() == null) return;
+        Uri destination = data.getData();
+        new Thread(() -> {
+            boolean exported;
+            try {
+                exportDiagnostics(destination);
+                exported = true;
+            } catch (IOException | RuntimeException error) {
+                exported = false;
+            }
+            String message = exported ? "Reports exported" : "Could not export reports";
+            int length = exported ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG;
+            runOnUiThread(() -> Toast.makeText(this, message, length).show());
+        }, "Export diagnostic reports").start();
+    }
+
+    private void exportDiagnostics(Uri destination) throws IOException {
+        OutputStream output = getContentResolver().openOutputStream(destination);
+        if (output == null) throw new IOException("Export destination is unavailable");
+        File[] reports = DiagnosticWorker.directory(this)
+                .listFiles((dir, name) -> DiagnosticWorker.isReport(name));
+        byte[] buffer = new byte[8192];
+        try (ZipOutputStream zip = new ZipOutputStream(output)) {
+            if (reports == null) return;
+            for (File report : reports) {
+                if (!report.isFile()) continue;
+                zip.putNextEntry(new ZipEntry(report.getName()));
+                try (InputStream input = new FileInputStream(report)) {
+                    int n;
+                    while ((n = input.read(buffer)) >= 0) zip.write(buffer, 0, n);
+                }
+                zip.closeEntry();
+            }
+        }
     }
 }

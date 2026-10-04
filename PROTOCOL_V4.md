@@ -111,6 +111,13 @@ Each contact record contains a pointer ID, inside/tip flags, signed normalized
 X/Y coordinates, normalized pressure, and normalized touch-major size. Every
 record is a complete simultaneous contact snapshot.
 
+From v0.5.1-alpha3, contact flags additionally define `0x04` as keyboard
+suppressed by optional phone pressure calibration. Physical TIP (`0x02`) stays
+intact and touch injection ignores suppression. Admission is independent per
+pointer and latched until lift, omission, or physical CANCEL, with the same
+rules as V5. Retained snapshots preserve this decision across session recovery.
+Older V4 hosts ignore this flag, so install matching phone and host builds.
+
 ## Host-to-phone control record
 
 Control records are fixed at 40 bytes.

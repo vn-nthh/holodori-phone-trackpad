@@ -1,0 +1,40 @@
+Doritrack diagnostic report schema=2 protocol=5 transport=synthetic-wifi duration_s=0.019
+environment=synthetic fixture; no physical latency claim; QoS/thermal/driver unavailable
+diagnostic_drop_span_ns=None
+environment_at_stop=os=windows process_priority_readback=32 input_thread_priority_readback=0 qos_query_ok=true qos_control_mask=0 qos_state_mask=0 thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified
+budget_ns=8333333 diagnostic_records_dropped=0 incidents=0 omitted_incident_triggers=0
+coverage=host-observed frames only; join Android report to account for frames never received. Any omitted evidence or queue loss makes forensic coverage incomplete.
+latency=OS submission, not game-observed input. No one-way point estimate. Local lower bounds exclude unknown forward transit. Duplex residual includes both directions and endpoint scheduling; never divide by two.
+clock=echo validity <=2s; relative drift allowance 1000ppm is an assumption, not calibration; MotionEvent precision may be 1ms on Android <34.
+parser_invalid=0 parser_discarded_bytes=0 parser_boundary_bytes=0
+ack_progress_submissions=1000
+current_frames_observed=938
+gameplay_os_accepted=1000
+gameplay_within_budget_under_clock_assumption=1000
+historical_frames_observed=62
+logical_duplicate_datagrams=1000
+os_accepted=1000
+sink_retries=0
+unique_logical_frames_observed=1000
+histogram=integer nanoseconds; 32 subdivisions/octave; full u64 range; inclusive quantile bounds; exact maximum and strict budget exceed counts; no warmup exclusion
+android_callback_to_winning_attempt_ns: n=1000 invalid=0 over_budget=0 mean_ns=100000 max_ns=100000 p50=Some([98304, 100000]) p90=Some([98304, 100000]) p99=Some([98304, 100000]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+android_current_dispatch_ns: n=938 invalid=0 over_budget=0 mean_ns=200000 max_ns=200000 p50=Some([196608, 200000]) p90=Some([196608, 200000]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+android_historical_dispatch_ns: n=62 invalid=0 over_budget=0 mean_ns=200000 max_ns=200000 p50=Some([196608, 200000]) p90=Some([196608, 200000]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+clock_offset_interval_width_ns: n=1000 invalid=0 over_budget=0 mean_ns=802002 max_ns=802002 p50=Some([786432, 802002]) p90=Some([786432, 802002]) p99=Some([786432, 802002]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+current_event_to_sink_local_lower_bound_ns: n=938 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+current_event_to_sink_lower_ns: n=938 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+current_event_to_sink_upper_ns: n=938 invalid=0 over_budget=0 mean_ns=1151301 max_ns=1151301 p50=Some([1146880, 1151301]) p90=Some([1146880, 1151301]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+duplex_exchange_residual_upper_ns: n=1000 invalid=0 over_budget=0 mean_ns=802002 max_ns=802002 p50=Some([786432, 802002]) p90=Some([786432, 802002]) p99=Some([786432, 802002]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+forward_transit_lower_bound_ns: n=1000 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=Some([0, 0]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+forward_transit_upper_bound_ns: n=1000 invalid=0 over_budget=0 mean_ns=801001 max_ns=801001 p50=Some([786432, 801001]) p90=Some([786432, 801001]) p99=Some([786432, 801001]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+historical_event_to_sink_local_lower_bound_ns: n=62 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+historical_event_to_sink_lower_ns: n=62 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+historical_event_to_sink_upper_ns: n=62 invalid=0 over_budget=0 mean_ns=1151301 max_ns=1151301 p50=Some([1146880, 1151301]) p90=Some([1146880, 1151301]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+host_ack_submission_ns: n=1000 invalid=0 over_budget=0 mean_ns=10000 max_ns=10000 p50=Some([9984, 10000]) p90=Some([9984, 10000]) p99=Some([9984, 10000]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+host_receive_to_ready_ns: n=1000 invalid=0 over_budget=0 mean_ns=20000 max_ns=20000 p50=Some([19968, 20000]) p90=Some([19968, 20000]) p99=Some([19968, 20000]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+host_receive_to_sink_outcome_ns: n=1000 invalid=0 over_budget=0 mean_ns=50000 max_ns=50000 p50=Some([49152, 50000]) p90=Some([49152, 50000]) p99=Some([49152, 50000]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+reverse_control_lower_bound_ns: n=1000 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=Some([0, 0]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+reverse_control_upper_bound_ns: n=1000 invalid=0 over_budget=0 mean_ns=801001 max_ns=801001 p50=Some([786432, 801001]) p90=Some([786432, 801001]) p99=Some([786432, 801001]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+sink_attempts_including_planning_ns: n=1000 invalid=0 over_budget=0 mean_ns=30000 max_ns=30000 p50=Some([29696, 30000]) p90=Some([29696, 30000]) p99=Some([29696, 30000]) p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+unique_gameplay_cadence_excess_ns: n=999 invalid=0 over_budget=0 mean_ns=0 max_ns=0 p50=Some([0, 0]) p90=Some([0, 0]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply
+unique_gameplay_receive_interval_ns: n=999 invalid=0 over_budget=0 mean_ns=8000000 max_ns=8000000 p50=Some([7995392, 8000000]) p90=Some([7995392, 8000000]) p99=None p99.9=None tail_quality=insufficient tail support; max/exceed counts still apply

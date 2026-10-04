@@ -617,6 +617,27 @@ fn host_status(state: State<'_, Mutex<HostState>>) -> Result<HostStatus, String>
     Ok(status(&state))
 }
 
+#[tauri::command]
+fn open_report_folder(state: State<'_, Mutex<HostState>>) -> Result<(), String> {
+    let state = state.lock().map_err(|error| error.to_string())?;
+    if state.runtime.is_some() {
+        return Err("Stop the controller before opening reports.".to_owned());
+    }
+    let directory =
+        holodori_native_host::metrics::log_directory().map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let opener = if cfg!(windows) {
+        "explorer.exe"
+    } else {
+        "xdg-open"
+    };
+    Command::new(opener)
+        .arg(&directory)
+        .spawn()
+        .map_err(|error| format!("Could not open {}: {error}", directory.display()))?;
+    Ok(())
+}
+
 fn status(state: &HostState) -> HostStatus {
     HostStatus {
         running: state.runtime.is_some(),
@@ -995,6 +1016,7 @@ fn main() {
             forget_device,
             stop_host,
             host_status,
+            open_report_folder,
             restart_as_admin,
             launcher_is_elevated,
             elevation_model,

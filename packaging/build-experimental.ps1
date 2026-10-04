@@ -73,8 +73,8 @@ $AndroidDir = Join-Path $ProjectRoot "android-app"
     --project-dir $AndroidDir `
     --no-daemon `
     "-PholodoriVersionName=$Version" `
-    "-PholodoriVersionCode=34" `
-    requireReleaseSigning clean testDebugUnitTest assembleDebug assembleRelease lintDebug lintRelease
+    "-PholodoriVersionCode=38" `
+    requireReleaseSigning clean testDebugUnitTest testReleaseUnitTest assembleDebug assembleRelease lintDebug lintRelease
 if ($LASTEXITCODE -ne 0) {
     throw "Android release build failed."
 }
@@ -122,11 +122,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $WindowsDir = Join-Path $BundleDir "Windows"
-$AndroidOutputDir = Join-Path $BundleDir "Android"
 $DocsDir = Join-Path $BundleDir "Docs"
 New-Item -ItemType Directory -Path @(
     $WindowsDir,
-    $AndroidOutputDir,
     $DocsDir
 ) | Out-Null
 
@@ -136,7 +134,6 @@ Copy-Item (Join-Path $NativeRelease "holodori-native-host.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-probe.exe") $WindowsDir
 Copy-Item (Join-Path $NativeRelease "holodori-touch-smoke.exe") $WindowsDir
 Copy-Item (Join-Path $TauriRelease "holodori-usb-controller.exe") (Join-Path $BundleDir "HolodoriUsbController.exe")
-Copy-Item $Apk (Join-Path $AndroidOutputDir "Doritrack-v5.apk")
 Copy-Item $Apk $StandaloneApkPath
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\README.txt") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-touch.cmd") $BundleDir
@@ -146,6 +143,10 @@ Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V5.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V5_TEST_VECTORS.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V4.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "LATENCY_VALIDATION.md") $DocsDir
+Copy-Item (Join-Path $ProjectRoot "DIAGNOSTICS.md") $DocsDir
+New-Item -ItemType Directory -Path (Join-Path $DocsDir "docs"), (Join-Path $BundleDir "tools") | Out-Null
+Copy-Item -Recurse (Join-Path $ProjectRoot "docs\diagnostic-examples") (Join-Path $DocsDir "docs")
+Copy-Item (Join-Path $ProjectRoot "tools\diagnostic_report.py") (Join-Path $BundleDir "tools")
 Copy-Item (Join-Path $ProjectRoot "LICENSE") $DocsDir
 
 $Branch = git -C $ProjectRoot branch --show-current
@@ -155,7 +156,7 @@ $Dirty = if ($TrackedChanges) { "yes" } else { "no" }
 $BuildInfo = @(
     "name=$Name",
     "android_version_name=$Version",
-    "android_version_code=34",
+    "android_version_code=37",
     "built_utc=$([DateTime]::UtcNow.ToString('o'))",
     "branch=$Branch",
     "base_commit=$Commit",
@@ -168,6 +169,7 @@ $BuildInfo = @(
     "windows_crt=static",
     "windows_launcher=tauri",
     "windows_webview2=system-runtime",
+    "android_package=$Name-android.apk",
     "android_signing=private-release-key"
 )
 $BuildInfo | Set-Content -Encoding UTF8 (Join-Path $BundleDir "BUILD-INFO.txt")

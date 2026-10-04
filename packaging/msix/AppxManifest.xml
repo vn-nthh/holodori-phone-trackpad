@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         xmlns:win32dependencies="http://schemas.microsoft.com/appx/manifest/externaldependencies"
+         IgnorableNamespaces="uap rescap win32dependencies">
+  <!-- The build replaces these test values with Partner Center identity. -->
+  <Identity Name="Doritrack.PackagingTest" Publisher="CN=Doritrack Packaging Test"
+            Version="1.0.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Doritrack</DisplayName>
+    <PublisherDisplayName>Doritrack development</PublisherDisplayName>
+    <Description>Unofficial phone controller for hololive Dreams.</Description>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Resources>
+    <Resource Language="en-US" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+    <!-- App Installer handles this; Store/PowerShell installs still require
+         the system Evergreen runtime. See MICROSOFT_STORE.md. -->
+    <win32dependencies:ExternalDependency Name="Microsoft.WebView2"
+        Publisher="CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+        MinVersion="109.0.1518.0" Optional="false" />
+  </Dependencies>
+  <Applications>
+    <Application Id="Doritrack" Executable="HolodoriUsbController.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="Doritrack"
+          Description="Unofficial phone controller for hololive Dreams."
+          BackgroundColor="transparent"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png" />
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <!-- Preserve the release launcher's requireAdministrator behavior. This
+         needs Microsoft's restricted-capability approval for Store release. -->
+    <rescap:Capability Name="allowElevation" />
+  </Capabilities>
+</Package>

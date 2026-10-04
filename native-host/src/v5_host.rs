@@ -27,7 +27,7 @@ use windows_sys::Win32::Networking::WinSock::{
 use zeroize::Zeroizing;
 
 use crate::credentials;
-use crate::input::{InputSink, cancel_with_deadline, commit_ready};
+use crate::input::{InputSink, cancel_with_deadline, commit_ready, receive_ordered};
 use crate::metrics::HostMetrics;
 use crate::protocol::{OrderedFrames, TouchFrame};
 use crate::v5::{PHONE_PING, PHONE_TOUCH, decode_touch_payload};
@@ -366,6 +366,13 @@ pub fn serve_gameplay(
 ) -> Result<(), HostV5Error> {
     ordered.require_fresh_session();
     let result = serve_gameplay_inner(connection, ordered, sink, metrics, lane_count, stopping);
+    metrics.note(
+        crate::diagnostics::BOUNDARY,
+        ordered.session_id().unwrap_or(0),
+        ordered.expected_sequence(),
+        u64::from(result.is_err() && !stopping.load(Ordering::Relaxed)),
+        0,
+    );
     ordered.require_fresh_session();
     cancel_with_deadline(sink, metrics)?;
     result
@@ -396,6 +403,13 @@ fn serve_gameplay_inner(
     let mut last_hello_send = Instant::now();
     while !stopping.load(Ordering::Relaxed) {
         if interface_monitor.changed() {
+            metrics.note(
+                crate::diagnostics::STALL,
+                ordered.session_id().unwrap_or(0),
+                ordered.expected_sequence(),
+                1,
+                0,
+            );
             return Err(io::Error::new(
                 io::ErrorKind::NetworkUnreachable,
                 "selected network interface changed",
@@ -425,6 +439,13 @@ fn serve_gameplay_inner(
         if sink.has_active_input()
             && control.last_committed_frame.elapsed() >= ACTIVE_INPUT_SILENCE_TIMEOUT
         {
+            metrics.note(
+                crate::diagnostics::STALL,
+                ordered.session_id().unwrap_or(0),
+                ordered.expected_sequence(),
+                2,
+                32_000_000,
+            );
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "authenticated input made no committed progress for 32 ms",
@@ -439,7 +460,18 @@ fn serve_gameplay_inner(
                 io::Error::new(io::ErrorKind::TimedOut, "authenticated idle peer expired").into(),
             );
         }
-        let Some((header, arrival)) = connection.receive_record_into(&mut receive_buffer)? else {
+        let received = connection.receive_record_into(&mut receive_buffer);
+        if let Some((reason, arrival)) = connection.last_diagnostic_discard.take() {
+            let at = metrics.clock_nanos(arrival);
+            metrics.record(crate::diagnostics::Event::new(
+                crate::diagnostics::INGRESS,
+                at,
+                0,
+                0,
+                &[reason],
+            ));
+        }
+        let Some((header, arrival)) = received? else {
             continue;
         };
         if header.message_type == PHONE_AUTH_ABORT {
@@ -523,17 +555,10 @@ fn process_gameplay_frame(
             "a new gameplay session requires fresh IK",
         ));
     }
-    let same_session = ordered.session_id() == Some(frame.session_id);
-    let expected = ordered.expected_sequence();
-    let replay =
-        same_session && (frame.sequence < expected || ordered.contains_sequence(frame.sequence));
-    if same_session && !replay && frame.sequence > expected {
-        metrics.observe_gap(frame.session_id, expected, frame.sequence);
-    }
-    metrics.observe_received(&frame, arrival, replay);
-    ordered.push(frame);
+    receive_ordered(ordered, metrics, frame, arrival);
 
-    if commit_ready(ordered, sink, metrics, stopping)? {
+    let progressed = commit_ready(ordered, sink, metrics, stopping)?;
+    if progressed {
         control.last_committed_frame = Instant::now();
         control.last_idle_activity = control.last_committed_frame;
     }
@@ -546,15 +571,35 @@ fn process_gameplay_frame(
     }
     let acknowledged = ordered.acknowledged_sequence();
     let ack_started = Instant::now();
-    connection.send_control(
-        HOST_ACK,
+    let ack_result = if progressed {
+        connection.send_control(
+            HOST_ACK,
+            session_id,
+            acknowledged,
+            RECEIVE_WINDOW,
+            control.lane_count,
+            || metrics.clock_nanos(Instant::now()),
+        )
+    } else {
+        // A logical duplicate or ordering hole still needs an immediate ACK
+        // to recover lost feedback, but does not need another redundant pair.
+        connection.send_control_once(
+            HOST_ACK,
+            session_id,
+            acknowledged,
+            RECEIVE_WINDOW,
+            control.lane_count,
+            metrics.clock_nanos(Instant::now()),
+        )
+    };
+    metrics.observe_ack(
         session_id,
         acknowledged,
-        RECEIVE_WINDOW,
-        control.lane_count,
-        || metrics.clock_nanos(Instant::now()),
-    )?;
-    metrics.observe_ack_write(ack_started.elapsed());
+        ack_started,
+        progressed,
+        ack_result.is_err(),
+    );
+    ack_result?;
     Ok(())
 }
 
@@ -618,6 +663,7 @@ pub struct V5Connection {
     cipher: RecordCipher,
     cached_handshake: Option<(Vec<u8>, Vec<u8>)>,
     send_buffer: [u8; MAX_DATAGRAM_SIZE],
+    last_diagnostic_discard: Option<(u64, Instant)>,
 }
 
 pub struct InterfaceMonitor {
@@ -654,6 +700,7 @@ impl V5Connection {
             cipher,
             cached_handshake,
             send_buffer: [0; MAX_DATAGRAM_SIZE],
+            last_diagnostic_discard: None,
         }
     }
 
@@ -723,11 +770,13 @@ impl V5Connection {
             }))
     }
 
-    /// Timestamp kernel delivery before authentication/decoding, using the caller's reusable buffer.
+    /// Timestamp userspace receive completion before authentication/decoding.
+    /// This is not a NIC/kernel ingress timestamp; kernel queueing is unobserved.
     pub fn receive_record_into(
         &mut self,
         bytes: &mut [u8; MAX_DATAGRAM_SIZE],
     ) -> Result<Option<(RecordHeader, Instant)>, HostV5Error> {
+        self.last_diagnostic_discard = None;
         let (count, peer, ingress) = match receive_datagram(&self.socket, bytes) {
             Ok(value) => value,
             Err(error)
@@ -742,6 +791,7 @@ impl V5Connection {
         };
         let arrival = Instant::now();
         if peer != self.peer || !self.binding.accepts_ingress(ingress) {
+            self.last_diagnostic_discard = Some((1, arrival));
             return Ok(None);
         }
         let datagram = &mut bytes[..count];
@@ -758,15 +808,24 @@ impl V5Connection {
                 self.cached_handshake = None;
                 Ok(Some((record, arrival)))
             }
+            Err(WireError::Replay) => {
+                self.last_diagnostic_discard = Some((2, arrival));
+                Ok(None)
+            }
+            Err(WireError::BadTag) => {
+                self.last_diagnostic_discard = Some((3, arrival));
+                Ok(None)
+            }
             Err(
-                WireError::BadTag
-                | WireError::Replay
-                | WireError::BadMagic
+                WireError::BadMagic
                 | WireError::BadVersion(_)
                 | WireError::WrongConnection
                 | WireError::BadLength(_)
                 | WireError::ReservedBits,
-            ) => Ok(None),
+            ) => {
+                self.last_diagnostic_discard = Some((4, arrival));
+                Ok(None)
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -1579,6 +1638,7 @@ struct QualityStats {
     jitter_micros: Vec<u64>,
     repair_completion_micros: Vec<u64>,
     duplicates: u64,
+    invalid_timing: u64,
     reordered: u64,
     highest_probe_id: Option<u64>,
     last_delay_micros: Option<u64>,
@@ -1604,11 +1664,19 @@ impl QualityStats {
         } else {
             self.highest_probe_id = Some(reply.probe_id);
         }
-        let turnaround = reply
-            .phone_send_nanos
-            .saturating_sub(reply.phone_receive_nanos);
-        let completion_nanos = received_nanos.saturating_sub(reply.host_send_nanos);
-        let micros = completion_nanos.saturating_sub(turnaround) / 1_000;
+        if reply.phone_send_nanos < reply.phone_receive_nanos
+            || received_nanos < reply.host_send_nanos
+        {
+            self.invalid_timing += 1;
+            return;
+        }
+        let turnaround = reply.phone_send_nanos - reply.phone_receive_nanos;
+        let completion_nanos = received_nanos - reply.host_send_nanos;
+        if completion_nanos < turnaround {
+            self.invalid_timing += 1;
+            return;
+        }
+        let micros = (completion_nanos - turnaround) / 1_000;
         if self.delays_micros.len() < 512 {
             if let Some(previous) = self.last_delay_micros {
                 self.jitter_micros.push(previous.abs_diff(micros));
@@ -1641,7 +1709,7 @@ impl QualityStats {
             if values.is_empty() {
                 return None;
             }
-            let index = ((values.len() - 1) * percent).div_ceil(100);
+            let index = (values.len() * percent).div_ceil(100).max(1) - 1;
             Some(values[index] as f64 / 1_000.0)
         };
         let metric = |value: Option<f64>| {
@@ -1664,20 +1732,24 @@ impl QualityStats {
         };
         let rtt_p95 = percentile(&self.delays_micros, 95);
         format!(
-            "{frequency}; {signal}; host RSSI unavailable; network RTT p50 {} p95 {} p99 {} max {}; jitter p95 {}; estimated one-way p95 {}; repair completion p95 {}; samples {received}/{sent}, loss {lost}, reordered {}, duplicates {}, immediate-copy winner unavailable (8.333ms target)",
+            "{frequency}; {signal}; host RSSI unavailable; duplex residual p50 {} p95 {} p99 {} max {}; jitter p95 {}; one-way unavailable (asymmetry unknown); repair completion p95 {}; samples {received}/{sent}, loss {lost}, reordered {}, duplicates {}, invalid timing {}, immediate-copy winner unavailable (8.333ms target; small pairing sample is not gameplay tail validation)",
             metric(percentile(&self.delays_micros, 50)),
             metric(rtt_p95),
-            metric(percentile(&self.delays_micros, 99)),
+            metric(if self.delays_micros.len() >= 1000 {
+                percentile(&self.delays_micros, 99)
+            } else {
+                None
+            }),
             metric(
                 self.delays_micros
                     .last()
                     .map(|value| *value as f64 / 1_000.0)
             ),
             metric(percentile(&self.jitter_micros, 95)),
-            metric(rtt_p95.map(|value| value / 2.0)),
             metric(percentile(&self.repair_completion_micros, 95)),
             self.reordered,
             self.duplicates,
+            self.invalid_timing,
         )
     }
 }
@@ -1991,8 +2063,8 @@ mod tests {
             8_000_000,
         );
         let summary = quality.summary();
-        assert!(summary.contains("network RTT p50 5.000ms"));
-        assert!(summary.contains("estimated one-way p95 2.500ms"));
+        assert!(summary.contains("duplex residual p50 5.000ms"));
+        assert!(summary.contains("one-way unavailable (asymmetry unknown)"));
         assert!(summary.contains("repair completion p95 7.000ms"));
         assert!(summary.contains("host RSSI unavailable"));
     }

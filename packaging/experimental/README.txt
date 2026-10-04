@@ -8,7 +8,9 @@ same private subnet. Legacy protocol v4 is available only as an explicit,
 unpaired USB migration option.
 
 Install:
-  1. Copy Android\Doritrack-v5.apk to the phone.
+  1. Download the separate Doritrack-<release>-android.apk from the same
+     release as this Windows ZIP and copy it to the phone. The Windows ZIP
+     does not include the Android app.
   2. Open the APK on the phone and approve installation from that source.
      If Android reports a signature conflict, uninstall the existing Holodori
      Controller first; release APKs use a private key, not the debug key.
@@ -67,8 +69,11 @@ Connection diagnostics:
     progress, starts socket recovery with a 4 ms backoff, and restores
     still-held contacts from its latest snapshot.
   - HolodoriUsbController.exe collects metrics silently in memory when the
-    report option is checked. One report is written under Windows\Logs after
-    Stop. Nothing is formatted, sorted, or written mid-play.
+    report option is checked. One report is written under
+    %LOCALAPPDATA%\Doritrack\Logs after Stop. Use Settings > Open report
+    folder, or paste this path into File Explorer. Nothing is formatted, sorted,
+    or written mid-play. Reports stay here when the app folder is upgraded.
+    Older releases left reports under Windows\Logs in their extracted folder.
   - V5 and explicit legacy v4 use fixed UDP port 42825. V4 never runs on the
     Wi-Fi listener. The 8.333 ms 120 Hz warning budget is applied automatically.
 

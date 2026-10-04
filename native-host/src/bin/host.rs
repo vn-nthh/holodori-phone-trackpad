@@ -1,7 +1,7 @@
 use std::env;
 use std::error::Error;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -9,9 +9,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use holodori_native_host::input::{InputSink, cancel_with_deadline, commit_ready};
+use holodori_native_host::input::{InputSink, cancel_with_deadline, commit_ready, receive_ordered};
 use holodori_native_host::keyboard::KeyboardSink;
-use holodori_native_host::metrics::HostMetrics;
+use holodori_native_host::metrics::{HostMetrics, log_directory};
 use holodori_native_host::network::{DEFAULT_UDP_PORT, UdpConnection, UdpHost};
 use holodori_native_host::platform;
 use holodori_native_host::protocol::{
@@ -229,6 +229,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let lane_count = sink.lane_count(&options);
     let udp = UdpHost::bind(options.udp_port)?;
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 4);
+    metrics.configure("legacy-usb", platform::diagnostic_environment());
     #[cfg(windows)]
     let mut tether_policy =
         if options.local_only_tether {
@@ -370,15 +371,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         parser.discarded_bytes,
         parser.connection_discarded_bytes,
     );
-    let report_result = if metrics.enabled() {
-        let report_path = options.metrics_file.unwrap_or_else(default_metrics_path);
-        metrics.write_report(&report_path).map(|()| {
-            println!("Metrics written to {}", report_path.display());
-            let _ = io::stdout().flush();
-        })
-    } else {
-        Ok(())
-    };
+    let report_result = write_metrics_report(&mut metrics, options.metrics_file.as_deref());
     release_result?;
     #[cfg(windows)]
     if let Some(policy) = tether_policy.as_mut() {
@@ -435,6 +428,7 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
     let mut sink = build_sink(options)?;
     let lane_count = sink.lane_count(options);
     let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 5);
+    metrics.configure(transport.label(), platform::diagnostic_environment());
     #[cfg(windows)]
     let mut tether_policy =
         if options.local_only_tether {
@@ -554,18 +548,7 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
     status.publish(HostPhase::Stopping);
     let release_result = cancel_sink_with_deadline(&mut sink, &mut metrics);
     metrics.set_parser_counters(0, 0, 0);
-    let report_result = if metrics.enabled() {
-        let report_path = options
-            .metrics_file
-            .clone()
-            .unwrap_or_else(default_metrics_path);
-        metrics.write_report(&report_path).map(|()| {
-            println!("Metrics written to {}", report_path.display());
-            let _ = io::stdout().flush();
-        })
-    } else {
-        Ok(())
-    };
+    let report_result = write_metrics_report(&mut metrics, options.metrics_file.as_deref());
     release_result?;
     #[cfg(windows)]
     if let Some(policy) = tether_policy.as_mut() {
@@ -699,40 +682,25 @@ fn install_exit_command_thread() -> io::Result<()> {
         .map(|_| ())
 }
 
-fn default_metrics_path() -> PathBuf {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    metrics_log_directory().join(format!("holodori-metrics-{timestamp}.txt"))
-}
-
-#[cfg(windows)]
-fn metrics_log_directory() -> PathBuf {
-    env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Logs")
-}
-
-#[cfg(not(windows))]
-fn metrics_log_directory() -> PathBuf {
-    // Writing next to the binary (the Windows convention) is wrong on Linux:
-    // the binary directory is often read-only (e.g. /usr/bin) and is not
-    // where per-user runtime state belongs. Follow the XDG base directory
-    // spec instead. `write_report` creates this directory if it is missing.
-    if let Ok(state_home) = env::var("XDG_STATE_HOME")
-        && !state_home.is_empty()
-    {
-        return PathBuf::from(state_home).join("holodori").join("logs");
+/// Write the stop-time report, if enabled, to the explicit or default path.
+fn write_metrics_report(metrics: &mut HostMetrics, file: Option<&Path>) -> io::Result<()> {
+    if !metrics.enabled() {
+        return Ok(());
     }
-    let home = env::var("HOME").unwrap_or_else(|_| ".".to_owned());
-    PathBuf::from(home)
-        .join(".local")
-        .join("state")
-        .join("holodori")
-        .join("logs")
+    let path = match file {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            log_directory()?.join(format!("holodori-metrics-{timestamp}.txt"))
+        }
+    };
+    metrics.write_report(&path)?;
+    println!("Metrics written to {}", path.display());
+    let _ = io::stdout().flush();
+    Ok(())
 }
 
 fn serve_connection(
@@ -837,19 +805,14 @@ fn process_decoded_frame(
         Ok(frame) => frame,
         // Parser counters retain bounded diagnostics for the stop-time
         // report. Never perform per-packet logging on the live input path.
-        Err(_) => return Ok(()),
+        Err(_) => {
+            metrics.note(holodori_native_host::diagnostics::INGRESS, 0, 0, 4, 0);
+            return Ok(());
+        }
     };
     connection.note_valid_peer_activity();
     let incoming_session = frame.session_id;
-    let same_session = ordered.session_id() == Some(frame.session_id);
-    let expected = ordered.expected_sequence();
-    let replay =
-        same_session && (frame.sequence < expected || ordered.contains_sequence(frame.sequence));
-    if same_session && !replay && frame.sequence > expected {
-        metrics.observe_gap(frame.session_id, expected, frame.sequence);
-    }
-    metrics.observe_received(&frame, arrival, replay);
-    ordered.push(frame);
+    receive_ordered(ordered, metrics, frame, arrival);
 
     if commit_ready(ordered, sink, metrics, &SHUTDOWN_REQUESTED)? {
         control_state.last_committed_frame = Instant::now();

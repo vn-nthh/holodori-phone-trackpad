@@ -42,6 +42,7 @@ const noticeAdminButton = $("#restart-as-admin");
 const noticeDismissButton = $("#notice-dismiss");
 const keySlots = Array.from(document.querySelectorAll(".key-slot"));
 const metricsInput = $("#metrics");
+const openReportsButton = $("#open-reports");
 const legacyV4Input = $("#legacy-v4");
 const localOnlyTetherInput = $("#local-only-tether");
 const adminAction = $("#admin-action");
@@ -229,6 +230,7 @@ function render() {
     slot.disabled = running;
   });
   metricsInput.disabled = running;
+  openReportsButton.disabled = running;
   legacyV4Input.disabled = running;
   pairedPref.hidden = !status.paired;
   forgetDeviceButton.disabled = running;
@@ -648,6 +650,14 @@ forgetDeviceButton.addEventListener("click", async () => {
 metricsInput.addEventListener("change", () => {
   store.metrics = metricsInput.checked;
   writePref(PREF.metrics, store.metrics);
+});
+
+openReportsButton.addEventListener("click", async () => {
+  try {
+    await invoke("open_report_folder");
+  } catch (error) {
+    fail(error);
+  }
 });
 
 legacyV4Input.addEventListener("change", () => {

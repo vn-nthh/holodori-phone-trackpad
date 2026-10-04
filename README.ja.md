@@ -10,18 +10,18 @@ Android スマホを、Windows 上の [hololive Dreams (holodori)](https://store
 
 ## ダウンロード
 
-安定版は **v0.5.0** です。
+安定版は **v0.5.1** です。
 
-認証付き USB/Wi-Fi 接続、ペアリング、親指モード、遅延の改善を含みます。
-Android と PC のアイコンも新しくなりました。
+認証付き USB/Wi-Fi 接続、ペアリング、親指モード、遅延の改善に加え、
+任意の筆圧キャリブレーションとセッション診断を含みます。
 スマホと PC には、同じリリースのアプリをインストールしてください。
 
-- [Windows アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-windows-x64.zip)
-- [Android アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.0/Doritrack-v0.5.0-android.apk)
-- [リリースノート](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.0)
+- [Windows アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-windows-x64.zip)
+- [Android アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-android.apk)
+- [リリースノート](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.1)
 
 **アルファ版・v0.4.1 からの更新:** Android の署名鍵が専用のリリース鍵に変わりました。
-旧 APK を一度アンインストールし、v0.5.0 をインストールして再ペアリングしてください。
+旧 APK を一度アンインストールし、v0.5.1 をインストールして再ペアリングしてください。
 アンインストールするとスマホ側の設定とペアリングが消去されます。
 今後、同じ鍵で署名したリリースには通常どおり更新できます。
 
@@ -87,7 +87,7 @@ USB テザリングだと、PC がスマホをインターネット接続とし�
 
 ### 停止時にレイテンシレポートを保存する
 
-プレイ後にレポートが欲しい場合はこのチェックを付けたままにしてください。**Stop** を押すと `Windows\Logs` に保存されます。プレイ中はレポートを書きません。
+プレイ後にレポートが欲しい場合はこのチェックを付けたままにしてください。v0.5.1-alpha2 以降は **Stop** の後、設定の **Open report folder** から開けます。ポータブル版は `%LOCALAPPDATA%\Doritrack\Logs`、Store の MSIX 版は `%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs` に保存されます。更新後も残りますが、MSIX 版のリセットやアンインストール前には必要なレポートを別の場所へコピーしてください。以前のバージョンのレポートは展開先の `Windows\Logs` に残ります。プレイ中はレポートを書きません。
 
 ## トラブルシューティング
 

@@ -9,6 +9,22 @@ README. Keep the native host, Tauri launcher, and APK from the same source
 revision: Noise identities, discovery confinement, interoperability vectors,
 status tokens, and clean recovery are coordinated across those artifacts.
 
+From v0.5.1-alpha2 onward, the Windows ZIP contains the launcher, native Windows
+tools, and documentation only. The build still validates both platforms, but
+ships Android exclusively as the separate `*-android.apk` release asset. Users
+download both assets from the same release. Store submissions use the
+[separate MSIX package](MICROSOFT_STORE.md), which Microsoft signs for free
+after certification. Unsigned submission packages stay in CI artifacts, not
+public GitHub downloads. Until Partner Center identity is configured, branch
+and alpha CI validate MSIX with a separate test identity.
+
+Windows latency reports go to `%LOCALAPPDATA%\Doritrack\Logs` for portable
+builds, or `%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs` for
+MSIX. Use Settings > Open report folder after Stop. Both paths survive updates;
+MSIX reset/uninstall can remove its reports. Do not write into the app directory.
+Old `Windows\Logs` reports are left in place. `--metrics-file PATH` still
+overrides the destination.
+
 Before publishing, run the validation commands in `AGENTS.md`. Also verify on a
 real Windows PC that:
 

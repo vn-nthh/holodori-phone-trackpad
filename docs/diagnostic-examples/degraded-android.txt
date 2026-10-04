@@ -1,0 +1,60 @@
+Doritrack Android diagnostic report schema=2 protocol=5
+transport=synthetic-wifi synthetic=true motion_event_precision_ns=1000000 driver_low_latency=unverified ap_wmm=unverified
+observed=5007 dropped=0 incidents=3 omitted_incident_triggers=0 evidence_omitted=0 writer_generations_unavailable=0
+ACK completion is a sender-clock upper bound on OS acceptance, including return-path delay; not one-way or game-observed latency.
+pending_depth_high_water=1 oldest_pending_at_ack_max_ns=12980000 repair_deadline_lateness_max_ns=0
+queue_diagnostic_drop_span_ns=0,0 writer_diagnostic_drop_span_ns=0,0
+Attempt is seal/send invocation; socket return is local submission, not NIC transmission. Repairs do not prove forward loss; ACK loss can also cause repair.
+Counters cover the full observed run. Percentile ranks use log histogram intervals; p99 requires n>=1000, p99.9 n>=10000. Samples are correlated; no confidence claim.
+event_0=1
+event_1=0
+event_2=0
+event_3=0
+event_4=0
+event_5=0
+event_6=0
+event_7=0
+event_8=0
+event_9=0
+event_10=0
+event_11=0
+event_12=0
+event_13=0
+event_14=0
+event_15=0
+event_16=0
+event_17=0
+event_18=0
+event_19=0
+event_20=1002
+event_21=2001
+event_22=1000
+event_23=1001
+event_24=1
+event_25=0
+event_26=1
+event_27=0
+event_28=0
+event_29=1
+event_30=0
+event_31=0
+event_32=0
+event_33=0
+event_34=0
+event_35=0
+event_36=0
+event_37=0
+event_38=0
+event_39=0
+current_dispatch_ns n=938 sum_ns=187500000 max_ns=200000 sum_saturated=false over_budget=0 invalid=0 p50=[196608,200000] p90=[196608,200000] p99=insufficient p99.9=insufficient
+historical_dispatch_ns n=63 sum_ns=32600000 max_ns=20200000 sum_saturated=false over_budget=1 invalid=0 p50=[196608,200703] p90=[196608,200703] p99=insufficient p99.9=insufficient
+queue_to_attempt_ns n=2001 sum_ns=182100000 max_ns=2100000 sum_saturated=false over_budget=0 invalid=0 p50=[98304,100351] p90=[98304,100351] p99=[98304,100351] p99.9=insufficient
+seal_and_socket_send_ns n=2001 sum_ns=20010000 max_ns=10000 sum_saturated=false over_budget=0 invalid=0 p50=[9984,10000] p90=[9984,10000] p99=[9984,10000] p99.9=insufficient
+queued_to_cumulative_ack_ns n=1001 sum_ns=996300000 max_ns=12980000 sum_saturated=false over_budget=1 invalid=0 p50=[966656,983039] p90=[966656,983039] p99=[966656,983039] p99.9=insufficient
+current_event_to_ack_ns n=937 sum_ns=1140400000 max_ns=13200000 sum_saturated=false over_budget=1 invalid=0 p50=[1179648,1212415] p90=[1179648,1212415] p99=insufficient p99.9=insufficient
+historical_event_to_ack_ns n=63 sum_ns=95600000 max_ns=21200000 sum_saturated=false over_budget=1 invalid=0 p50=[1179648,1212415] p90=[1179648,1212415] p99=insufficient p99.9=insufficient
+active_ack_progress_interval_ns n=1000 sum_ns=8000000000 max_ns=8000000 sum_saturated=false over_budget=0 invalid=0 p50=[7995392,8000000] p90=[7995392,8000000] p99=[7995392,8000000] p99.9=insufficient
+Incident columns: first_ns,last_anomaly_ns,session,first_seq,last_seq,reasons,first_later_ack_ns,affected_observations,evidence_offset,evidence_count,post_complete,omitted
+5001330000,5012200000,7,500,500,18,5012200000,1,0,156,1,0
+6599220000,6600200000,7,700,700,17,6600200000,1,156,153,1,0
+9072000000,9072000001,7,1001,1001,192,9088300000,1,309,133,0,0

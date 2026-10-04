@@ -15,7 +15,10 @@ final class V5SendQueue {
         int payloadLength;
         long queuedNanos;
         long lastSentNanos;
+        long firstSelectedNanos;
+        long repairLatenessNanos;
         int sendCount;
+        long sendAttempts;
 
         Frame(int payloadCapacity) {
             payload = new byte[payloadCapacity];
@@ -47,7 +50,10 @@ final class V5SendQueue {
         frame.payloadLength = payloadLength;
         frame.queuedNanos = now;
         frame.lastSentNanos = 0;
+        frame.firstSelectedNanos = 0;
+        frame.repairLatenessNanos = 0;
         frame.sendCount = 0;
+        frame.sendAttempts = 0;
         frame.writer.clear();
         return frame;
     }
@@ -95,7 +101,11 @@ final class V5SendQueue {
     private Frame at(long index) { return frames[(int) (index % frames.length)]; }
 
     private static Frame markSent(Frame frame, long now) {
+        if (frame.sendCount == 0) frame.firstSelectedNanos = now;
+        frame.repairLatenessNanos = frame.sendCount >= IMMEDIATE_COPIES
+                ? Math.max(0L, now - frame.lastSentNanos - REPAIR_NANOS) : 0;
         frame.lastSentNanos = now;
+        if (frame.sendAttempts < Long.MAX_VALUE) frame.sendAttempts++;
         if (frame.sendCount <= IMMEDIATE_COPIES) frame.sendCount++;
         return frame;
     }

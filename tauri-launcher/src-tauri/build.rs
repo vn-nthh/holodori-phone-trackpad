@@ -4,6 +4,8 @@
 // builds embed the manifest: debug builds share it with the `cargo test`
 // harness binary, which Windows would then refuse to start unelevated. Other
 // targets ignore the manifest.
+// Store MSIX packages preserve this behavior with runFullTrust + allowElevation
+// in packaging/msix/AppxManifest.xml; Store publication needs capability review.
 const WINDOWS_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>

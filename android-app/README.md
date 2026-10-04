@@ -58,6 +58,30 @@ Previously the app excluded these newer downstream networks along with
 upstream networks, which could return Pair immediately to its inactive state
 despite USB tethering being enabled.
 
+## Calibrate the optional keyboard pressure filter
+
+In **Preferences**, enable **Light-touch filter · keys only** (off by default).
+Brush the test pad lightly, then make normal taps. The vertical marker moves
+along the pressure line; drag the round slider thumb to choose the minimum
+pressure that registers. Live pressure, the last touch's peak, and the observed
+range help place the cutoff above unwanted brushes and below normal taps.
+The saved cutoff uses 0.1 percentage-point steps on the same clamped 0..1 scale
+as the transmitted pressure. Calibration is manual and local to this phone.
+The test pad never sends keys, and the meter runs only in Preferences.
+
+Each gameplay finger registers on the first historical or current sample at
+or above the cutoff, without a timer. Once registered, it remains active until
+lift/cancel even if its pressure falls, preserving holds, slides, and shared
+lane ownership. A low initial reading can register later when it rises, but
+that moves the key press later too; an excessive cutoff can miss fast taps.
+Touch-injection mode keeps using the physical contacts without this filter.
+
+Some phones report constant pressure. If brushes and taps have indistinguishable
+readings, leave the filter off; calibration cannot separate them. Android's
+documented fallback for unknown pressure is 1.0 during contact:
+[Android touch device calibration](https://source.android.com/docs/core/interaction/input/touch-devices#pressure-field).
+Install phone and host v0.5.1-alpha3 or newer together before enabling the filter.
+
 ## Protocol v5 behavior
 
 Every touch snapshot is carried by one HPT5 ChaCha20-Poly1305 datagram. Android

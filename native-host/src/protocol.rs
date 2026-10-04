@@ -23,6 +23,7 @@ pub const FRAME_FLAG_SESSION_START: u8 = 0x02;
 pub const FRAME_FLAG_HISTORICAL: u8 = 0x04;
 pub const CONTACT_FLAG_INSIDE: u8 = 0x01;
 pub const CONTACT_FLAG_TIP: u8 = 0x02;
+pub const CONTACT_FLAG_KEY_SUPPRESSED: u8 = 0x04;
 
 pub const FRAME_HEADER_SIZE: usize = 68;
 pub const CONTACT_SIZE: usize = 10;
@@ -91,6 +92,10 @@ impl Contact {
 
     pub fn touching(&self) -> bool {
         self.flags & CONTACT_FLAG_TIP != 0
+    }
+
+    pub fn key_suppressed(&self) -> bool {
+        self.flags & CONTACT_FLAG_KEY_SUPPRESSED != 0
     }
 }
 

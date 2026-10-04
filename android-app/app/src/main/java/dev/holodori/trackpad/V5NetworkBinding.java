@@ -6,7 +6,9 @@ import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.util.Log;
 
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -37,6 +39,7 @@ final class V5NetworkBinding implements AutoCloseable {
     private final List<DiscoveryPolicy.Ipv4Subnet> subnets;
     private final List<InetAddress> destinations;
     private final DatagramSocket socket;
+    private final WifiManager.WifiLock wifiLock;
 
     private volatile InetSocketAddress peer;
 
@@ -48,7 +51,8 @@ final class V5NetworkBinding implements AutoCloseable {
             List<String> localFingerprint,
             List<DiscoveryPolicy.Ipv4Subnet> subnets,
             List<InetAddress> destinations,
-            DatagramSocket socket
+            DatagramSocket socket,
+            WifiManager.WifiLock wifiLock
     ) {
         this.connectivityManager = connectivityManager;
         this.transport = transport;
@@ -58,22 +62,43 @@ final class V5NetworkBinding implements AutoCloseable {
         this.subnets = subnets;
         this.destinations = destinations;
         this.socket = socket;
+        this.wifiLock = wifiLock;
     }
 
     static V5NetworkBinding open(Context context, V5Protocol.TransportKind transport)
             throws IOException {
         Context application = context.getApplicationContext();
-        ConnectivityManager manager = (ConnectivityManager) (application == null
-                ? context
-                : application).getSystemService(Context.CONNECTIVITY_SERVICE);
+        Context owner = application == null ? context : application;
+        ConnectivityManager manager =
+                (ConnectivityManager) owner.getSystemService(Context.CONNECTIVITY_SERVICE);
         if (manager == null) throw new IOException("Android network service is unavailable");
         return transport == V5Protocol.TransportKind.WIFI
-                ? openWifi(manager)
+                ? openWifi(owner, manager)
                 : openUsb(manager);
     }
 
     DatagramSocket socket() {
         return socket;
+    }
+
+    // Called only by the diagnostic worker. Held does not establish driver support.
+    int diagnosticWifiLockHeld() {
+        if (transport != V5Protocol.TransportKind.WIFI) return -1;
+        try { return wifiLock != null && wifiLock.isHeld() ? 1 : 0; }
+        catch (RuntimeException unavailable) { return -1; }
+    }
+
+    String diagnosticInterface() { return interfaceName; }
+
+    void diagnosticSignal(long[] row) {
+        if (transport != V5Protocol.TransportKind.WIFI || androidNetwork == null
+                || Build.VERSION.SDK_INT < 29) return;
+        NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(androidNetwork);
+        if (capabilities == null || !(capabilities.getTransportInfo() instanceof android.net.wifi.WifiInfo)) return;
+        android.net.wifi.WifiInfo info = (android.net.wifi.WifiInfo) capabilities.getTransportInfo();
+        int rssi = info.getRssi();
+        row[9] = rssi > -127 && rssi <= 0 ? rssi : -1;
+        row[10] = info.getFrequency() > 0 ? info.getFrequency() : -1;
     }
 
     InetSocketAddress peer() {
@@ -150,8 +175,9 @@ final class V5NetworkBinding implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         socket.close();
+        releaseWifiLock(wifiLock);
     }
 
     private boolean isOnSelectedSubnet(InetSocketAddress source) {
@@ -166,7 +192,8 @@ final class V5NetworkBinding implements AutoCloseable {
         return false;
     }
 
-    private static V5NetworkBinding openWifi(ConnectivityManager manager) throws IOException {
+    private static V5NetworkBinding openWifi(Context context, ConnectivityManager manager)
+            throws IOException {
         Network selected = selectWifiNetwork(manager);
         if (selected == null) {
             throw new IOException("Connect Android to a physical Wi-Fi network first");
@@ -192,13 +219,16 @@ final class V5NetworkBinding implements AutoCloseable {
             throw new IOException("Wi-Fi has no private IPv4 local subnet");
         }
         DatagramSocket socket = new DatagramSocket(0);
+        WifiManager.WifiLock wifiLock = null;
         boolean success = false;
         try {
             selected.bindSocket(socket);
             socket.setBroadcast(true);
             socket.setSoTimeout(4);
-            success = true;
-            return new V5NetworkBinding(
+            // Pair's quality probes and Start use the same radio policy. Ownership
+            // follows this binding, including idle gaps and failed/replaced sessions.
+            wifiLock = acquireLowLatencyWifiLock(context);
+            V5NetworkBinding binding = new V5NetworkBinding(
                     manager,
                     V5Protocol.TransportKind.WIFI,
                     selected,
@@ -206,10 +236,46 @@ final class V5NetworkBinding implements AutoCloseable {
                     wifiFingerprint(properties),
                     subnets,
                     deduplicate(broadcasts),
-                    socket
+                    socket,
+                    wifiLock
             );
+            success = true;
+            return binding;
         } finally {
-            if (!success) socket.close();
+            if (!success) {
+                socket.close();
+                releaseWifiLock(wifiLock);
+            }
+        }
+    }
+
+    private static WifiManager.WifiLock acquireLowLatencyWifiLock(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null;
+        WifiManager.WifiLock lock = null;
+        try {
+            WifiManager manager = (WifiManager) context.getApplicationContext()
+                    .getSystemService(Context.WIFI_SERVICE);
+            if (manager == null) return null;
+            lock = manager.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Doritrack:V5WiFi");
+            lock.setReferenceCounted(false);
+            lock.acquire();
+            return lock;
+        } catch (RuntimeException error) {
+            releaseWifiLock(lock);
+            // Performance hints must not make an otherwise usable path unavailable.
+            Log.w("HolodoriUDP5", "Wi-Fi low-latency lock unavailable", error);
+            return null;
+        }
+    }
+
+    private static void releaseWifiLock(WifiManager.WifiLock lock) {
+        if (lock == null) return;
+        try {
+            if (lock.isHeld()) lock.release();
+        } catch (RuntimeException error) {
+            // Keep socket/channel cleanup working even if the Wi-Fi service failed.
+            Log.w("HolodoriUDP5", "Wi-Fi low-latency lock release failed", error);
         }
     }
 
@@ -235,7 +301,8 @@ final class V5NetworkBinding implements AutoCloseable {
                     candidate.localFingerprint,
                     candidate.subnets,
                     candidate.broadcasts,
-                    socket
+                    socket,
+                    null
             );
         } finally {
             if (!success) socket.close();
