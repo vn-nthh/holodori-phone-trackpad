@@ -15,6 +15,9 @@ use std::thread::JoinHandle;
 use tauri::{AppHandle, Manager, State};
 
 const DEFAULT_WARNING_BUDGET_MS: &str = "8.333";
+/// Beta re-press spacing: one 60 Hz game frame, so a frame-polled game sees
+/// every same-lane release and re-press.
+const REPRESS_GAP_MS: &str = "17";
 const USB_TETHER_UDP_PORT: u16 = 42_825;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -71,6 +74,10 @@ struct HostRuntime {
     readers: Vec<JoinHandle<()>>,
     local_only_tether: bool,
     kind: RuntimeKind,
+    /// Lane keys the controller may hold; released by the launcher if the
+    /// controller dies without its own cleanup. Linux needs no failsafe.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    lane_keys: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,6 +161,7 @@ fn start_host(
     local_only_tether: bool,
     transport: String,
     legacy_v4: bool,
+    separate_represses: bool,
 ) -> Result<HostStatus, String> {
     let mut state = state
         .lock()
@@ -198,6 +206,12 @@ fn start_host(
     // plain child process already inherits admin rights when needed.
     // Linux delegates local-only configuration to NetworkManager and never
     // elevates this launcher or the native gameplay host.
+    let lane_keys = keys
+        .split(',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect();
     let mut command = Command::new(&host);
     command
         .current_dir(host.parent().unwrap_or_else(|| std::path::Path::new(".")))
@@ -220,6 +234,9 @@ fn start_host(
     if metrics {
         command.arg("--metrics");
     }
+    if separate_represses {
+        command.arg("--repress-gap-ms").arg(REPRESS_GAP_MS);
+    }
     #[cfg(any(windows, target_os = "linux"))]
     if local_only_tether {
         command.arg("--local-only-tether");
@@ -235,6 +252,7 @@ fn start_host(
         command,
         RuntimeKind::Controller,
         local_only_tether,
+        lane_keys,
     )?);
     state.phase = HostPhase::Waiting;
     state.stopping = false;
@@ -285,7 +303,12 @@ fn begin_pairing(
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    state.runtime = Some(spawn_runtime(command, RuntimeKind::Pairing, false)?);
+    state.runtime = Some(spawn_runtime(
+        command,
+        RuntimeKind::Pairing,
+        false,
+        Vec::new(),
+    )?);
     state.phase = HostPhase::Pairing;
     state.stopping = false;
     state.message.clear();
@@ -355,6 +378,7 @@ fn spawn_runtime(
     mut command: Command,
     kind: RuntimeKind,
     local_only_tether: bool,
+    lane_keys: Vec<String>,
 ) -> Result<HostRuntime, String> {
     let mut child = command
         .spawn()
@@ -389,6 +413,7 @@ fn spawn_runtime(
         readers,
         local_only_tether,
         kind,
+        lane_keys,
     })
 }
 
@@ -678,6 +703,11 @@ fn reap_child(state: &mut HostState) -> Result<(), String> {
         let expected_stop = state.stopping;
         let local_only_tether = runtime.local_only_tether;
         let runtime_kind = runtime.kind;
+        #[cfg(windows)]
+        if !exit_status.success() && !runtime.lane_keys.is_empty() {
+            // A killed or crashed controller skipped its own key release.
+            let _ = holodori_native_host::keyboard::release_lane_keys(&runtime.lane_keys);
+        }
         drop(runtime);
 
         if exit_status.success() {

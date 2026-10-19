@@ -42,6 +42,7 @@ const noticeAdminButton = $("#restart-as-admin");
 const noticeDismissButton = $("#notice-dismiss");
 const keySlots = Array.from(document.querySelectorAll(".key-slot"));
 const metricsInput = $("#metrics");
+const separateRepressesInput = $("#separate-represses");
 const openReportsButton = $("#open-reports");
 const legacyV4Input = $("#legacy-v4");
 const localOnlyTetherInput = $("#local-only-tether");
@@ -57,6 +58,7 @@ const PREF = {
   transport: "doritrack.transport",
   keys: "doritrack.keys",
   metrics: "doritrack.metrics",
+  separateRepresses: "doritrack.separateRepresses",
   legacyV4: "doritrack.legacyV4",
   localOnlyTether: "doritrack.localOnlyTether",
 };
@@ -82,6 +84,7 @@ function writePref(key, value) {
 const store = {
   transport: ["usb", "wifi"].includes(readPref(PREF.transport)) ? readPref(PREF.transport) : null,
   metrics: readPref(PREF.metrics) === "true",
+  separateRepresses: readPref(PREF.separateRepresses) === "true",
   legacyV4: readPref(PREF.legacyV4) === "true",
   localOnlyTether: readPref(PREF.localOnlyTether) === "true",
 };
@@ -114,6 +117,7 @@ versionLabel.textContent = `v${version}`;
   if (keySlots[index] && KEY_PATTERN.test(key)) keySlots[index].value = key.toLowerCase();
 });
 metricsInput.checked = store.metrics;
+separateRepressesInput.checked = store.separateRepresses;
 legacyV4Input.checked = store.legacyV4;
 localOnlyTetherInput.checked = store.localOnlyTether;
 
@@ -230,6 +234,7 @@ function render() {
     slot.disabled = running;
   });
   metricsInput.disabled = running;
+  separateRepressesInput.disabled = running;
   openReportsButton.disabled = running;
   legacyV4Input.disabled = running;
   pairedPref.hidden = !status.paired;
@@ -553,6 +558,7 @@ async function startHost() {
         localOnlyTether,
         transport: transport(),
         legacyV4,
+        separateRepresses: separateRepressesInput.checked,
       }),
     );
   } catch (error) {
@@ -650,6 +656,11 @@ forgetDeviceButton.addEventListener("click", async () => {
 metricsInput.addEventListener("change", () => {
   store.metrics = metricsInput.checked;
   writePref(PREF.metrics, store.metrics);
+});
+
+separateRepressesInput.addEventListener("change", () => {
+  store.separateRepresses = separateRepressesInput.checked;
+  writePref(PREF.separateRepresses, store.separateRepresses);
 });
 
 openReportsButton.addEventListener("click", async () => {

@@ -8,11 +8,58 @@ use crate::metrics::HostMetrics;
 use crate::protocol::{OrderedFrames, TouchFrame};
 
 pub const SINK_STALL_TIMEOUT: Duration = Duration::from_millis(8);
+const MIN_DEFERRED_READ_TIMEOUT: Duration = Duration::from_millis(1);
 
 pub trait InputSink {
     fn accept(&mut self, frame: &TouchFrame) -> io::Result<()>;
     fn has_active_input(&self) -> bool;
     fn cancel_all(&mut self) -> io::Result<()>;
+
+    /// Submit input the sink deliberately scheduled for later, if now due.
+    fn service(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// The earliest instant `service` has scheduled work.
+    fn next_deadline(&self) -> Option<Instant> {
+        None
+    }
+}
+
+/// Emit due deferred input, retrying a refused submission like a frame.
+pub fn service_deferred(sink: &mut impl InputSink, stopping: &AtomicBool) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match sink.service() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                if stopping.load(Ordering::Relaxed) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "controller stopped",
+                    ));
+                }
+                if started.elapsed() >= SINK_STALL_TIMEOUT {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, error));
+                }
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+/// Shorten the socket wait so deferred input is not held behind a read.
+/// Whole milliseconds, rounded up, keep the socket option from changing on
+/// every loop and never wake before the deadline.
+pub fn deferred_read_timeout(sink: &impl InputSink, base: Duration) -> Duration {
+    let Some(deadline) = sink.next_deadline() else {
+        return base;
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    Duration::from_millis(remaining.as_micros().div_ceil(1_000) as u64).clamp(
+        MIN_DEFERRED_READ_TIMEOUT,
+        base.max(MIN_DEFERRED_READ_TIMEOUT),
+    )
 }
 
 pub fn cancel_with_deadline(
@@ -109,4 +156,39 @@ pub fn commit_ready(
         progressed = true;
     }
     Ok(progressed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Deferred(Option<Instant>);
+
+    impl InputSink for Deferred {
+        fn accept(&mut self, _: &TouchFrame) -> io::Result<()> {
+            Ok(())
+        }
+        fn has_active_input(&self) -> bool {
+            self.0.is_some()
+        }
+        fn cancel_all(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn next_deadline(&self) -> Option<Instant> {
+            self.0
+        }
+    }
+
+    #[test]
+    fn deferred_read_timeout_wakes_for_due_input_without_spinning() {
+        let base = Duration::from_millis(4);
+        assert_eq!(deferred_read_timeout(&Deferred(None), base), base);
+        let soon = Deferred(Some(Instant::now() + Duration::from_micros(2_500)));
+        let timeout = deferred_read_timeout(&soon, base);
+        assert!(timeout >= Duration::from_millis(1) && timeout <= Duration::from_millis(3));
+        let late = Deferred(Some(Instant::now() - Duration::from_millis(5)));
+        assert_eq!(deferred_read_timeout(&late, base), Duration::from_millis(1));
+        let far = Deferred(Some(Instant::now() + Duration::from_millis(30)));
+        assert_eq!(deferred_read_timeout(&far, base), base);
+    }
 }

@@ -143,7 +143,7 @@ final class DiagnosticWorker {
                 + " driver_low_latency=unverified ap_wmm=unverified"
                 + " interface=" + selectedInterface
                 + " socket_traffic_class_readback=" + trafficClass
-                + " qos_request=none control_bad_tag=" + controlDrops.get(0)
+                + " qos_request=dscp_ef control_bad_tag=" + controlDrops.get(0)
                 + " control_packet_replay=" + controlDrops.get(1)
                 + " control_malformed=" + controlDrops.get(2));
         // Bound disk storage after Stop only; never remove unrelated files.

@@ -9,7 +9,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use holodori_native_host::input::{InputSink, cancel_with_deadline, commit_ready, receive_ordered};
+use holodori_native_host::input::{
+    InputSink, cancel_with_deadline, commit_ready, receive_ordered, service_deferred,
+};
 use holodori_native_host::keyboard::KeyboardSink;
 use holodori_native_host::metrics::{HostMetrics, log_directory};
 use holodori_native_host::network::{DEFAULT_UDP_PORT, UdpConnection, UdpHost};
@@ -111,6 +113,7 @@ struct Options {
     pair: bool,
     legacy_v4: bool,
     transport: Option<TransportKind>,
+    repress_gap: Option<Duration>,
 }
 
 struct ControlState {
@@ -178,6 +181,20 @@ impl InputSink for Sink {
             Self::Record => Ok(()),
         }
     }
+
+    fn service(&mut self) -> io::Result<()> {
+        match self {
+            Self::Keys(keys) => keys.service(),
+            _ => Ok(()),
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Keys(keys) => keys.next_deadline(),
+            _ => None,
+        }
+    }
 }
 
 fn main() {
@@ -220,6 +237,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         SHUTDOWN_COMPLETE.store(true, Ordering::Release);
         return result;
     }
+    // Held for the controller's lifetime, before diagnostics read it back.
+    let _timer_resolution = platform::request_timer_resolution();
     if !options.legacy_v4 {
         let result = run_v5_controller(&options);
         SHUTDOWN_COMPLETE.store(true, Ordering::Release);
@@ -753,6 +772,8 @@ fn serve_connection(
         // input is idle. During active input, cumulative control ACKs sustain
         // the phone; a real migration reaches the 32 ms committed-progress
         // watchdog, releases input, and returns to discovery cleanly.
+        // Legacy v4 polls deferred re-presses once per read (up to 4 ms late).
+        service_deferred(sink, &SHUTDOWN_REQUESTED)?;
         let count = connection.read(&mut read_buffer, 4, !sink.has_active_input())?;
         if connection.take_session_changed() {
             ordered.require_fresh_session();
@@ -874,7 +895,17 @@ fn build_sink(options: &Options) -> Result<Sink, Box<dyn Error>> {
             );
             Ok(Sink::Touch(Box::new(TouchInjector::new(target)?)))
         }
-        Mode::Keys => Ok(Sink::Keys(Box::new(KeyboardSink::new(&options.lane_keys)?))),
+        Mode::Keys => {
+            let mut keys = KeyboardSink::new(&options.lane_keys)?;
+            if let Some(gap) = options.repress_gap {
+                keys.set_repress_gap(gap);
+                println!(
+                    "beta: same-lane re-presses spaced by {} ms",
+                    gap.as_millis()
+                );
+            }
+            Ok(Sink::Keys(Box::new(keys)))
+        }
         Mode::Record => Ok(Sink::Record),
     }
 }
@@ -922,6 +953,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         pair: false,
         legacy_v4: false,
         transport: None,
+        repress_gap: None,
     };
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -994,6 +1026,16 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                     return Err("--local-only-tether is supported only on Windows and Linux".into());
                 }
             }
+            "--repress-gap-ms" => {
+                let milliseconds: u64 = arguments
+                    .next()
+                    .ok_or("--repress-gap-ms needs milliseconds")?
+                    .parse()?;
+                if !(1..=50).contains(&milliseconds) {
+                    return Err("--repress-gap-ms must be between 1 and 50".into());
+                }
+                options.repress_gap = Some(Duration::from_millis(milliseconds));
+            }
             "--warn-ms" => {
                 let milliseconds: f64 = arguments
                     .next()
@@ -1010,7 +1052,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                      [--lanes s,d,f,j,k,l] [--target-title TITLE] [--no-probe] \\\n\
                      --transport usb|wifi [--pair] [--legacy-v4] \
                      [--udp-port 42825] [--metrics] [--local-only-tether] \
-                     [--metrics-file PATH] [--warn-ms 8.333]"
+                     [--metrics-file PATH] [--warn-ms 8.333] \
+                     [--repress-gap-ms 17 (beta, keys mode)]"
                 );
                 std::process::exit(0);
             }

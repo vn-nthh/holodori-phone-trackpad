@@ -26,19 +26,90 @@ pub fn diagnostic_environment() -> String {
     let priority = unsafe { GetPriorityClass(GetCurrentProcess()) };
     let thread = unsafe { GetThreadPriority(GetCurrentThread()) };
     format!(
-        "os=windows process_priority_readback={priority} input_thread_priority_readback={thread} qos_query_ok={} qos_control_mask={} qos_state_mask={} thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified",
+        "os=windows process_priority_readback={priority} input_thread_priority_readback={thread} qos_query_ok={} qos_control_mask={} qos_state_mask={} timer_period_1ms_granted={} socket_1ms_timeout_us={} thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified",
         ok != 0,
         state.ControlMask,
-        state.StateMask
+        state.StateMask,
+        TIMER_PERIOD_GRANTED.load(std::sync::atomic::Ordering::Relaxed),
+        socket_timeout_probe_us(),
     )
 }
 
 #[cfg(not(windows))]
 pub fn diagnostic_environment() -> String {
     format!(
-        "os={} priority_readback=unavailable thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified",
-        std::env::consts::OS
+        "os={} priority_readback=unavailable socket_1ms_timeout_us={} thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified",
+        std::env::consts::OS,
+        socket_timeout_probe_us(),
     )
+}
+
+/// Setup-time evidence of how long a 1 ms socket read timeout really takes.
+/// Gameplay watchdogs and deferred key edges wake through such timeouts, so
+/// a coarse OS timer stretches them. Median of three loopback waits, or -1
+/// when the probe socket is unavailable. Never runs per input.
+fn socket_timeout_probe_us() -> i64 {
+    use std::time::{Duration, Instant};
+    let Ok(socket) = std::net::UdpSocket::bind(("127.0.0.1", 0)) else {
+        return -1;
+    };
+    if socket
+        .set_read_timeout(Some(Duration::from_millis(1)))
+        .is_err()
+    {
+        return -1;
+    }
+    let mut buffer = [0_u8; 1];
+    let mut samples = [0_i64; 3];
+    for sample in &mut samples {
+        let started = Instant::now();
+        let _ = socket.recv(&mut buffer);
+        *sample = i64::try_from(started.elapsed().as_micros()).unwrap_or(i64::MAX);
+    }
+    samples.sort_unstable();
+    samples[1]
+}
+
+#[cfg(windows)]
+static TIMER_PERIOD_GRANTED: AtomicBool = AtomicBool::new(false);
+
+/// Holds a 1 ms Windows timer period while the controller runs.
+///
+/// Socket read timeouts drive the active-input watchdog, HELLO repair, and
+/// deferred key edges. At the default 15.6 ms tick a "4 ms" timeout can take
+/// a whole tick, stretching the 32 ms stuck-key watchdog toward 48 ms.
+/// Received datagrams wake the input thread immediately either way.
+pub struct TimerResolution {
+    #[cfg(windows)]
+    granted: bool,
+}
+
+#[cfg(windows)]
+pub fn request_timer_resolution() -> TimerResolution {
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::Media::{TIMERR_NOERROR, timeBeginPeriod};
+    let granted = unsafe { timeBeginPeriod(1) } == TIMERR_NOERROR;
+    if !granted {
+        eprintln!("warning: Windows did not grant a 1 ms timer period");
+    }
+    TIMER_PERIOD_GRANTED.store(granted, Ordering::Relaxed);
+    TimerResolution { granted }
+}
+
+/// Linux socket timeouts already use high-resolution timers.
+#[cfg(not(windows))]
+pub fn request_timer_resolution() -> TimerResolution {
+    TimerResolution {}
+}
+
+#[cfg(windows)]
+impl Drop for TimerResolution {
+    fn drop(&mut self) {
+        if self.granted {
+            unsafe { windows_sys::Win32::Media::timeEndPeriod(1) };
+            TIMER_PERIOD_GRANTED.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 pub fn lower_diagnostic_priority() {
@@ -172,16 +243,18 @@ pub fn raise_input_priority() {
 fn request_high_qos() -> io::Result<()> {
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
-        ProcessPowerThrottling, SetProcessInformation,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetProcessInformation,
     };
     let state = PROCESS_POWER_THROTTLING_STATE {
         Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
         StateMask: 0,
     };
-    // Opt out of execution-speed throttling without changing timer policy,
-    // affinity, or the user's system-wide power configuration.
+    // Opt out of execution-speed throttling and keep Windows 11 honoring this
+    // windowless process's timer-period request (`request_timer_resolution`),
+    // without changing affinity or the user's system-wide power configuration.
     let ok = unsafe {
         SetProcessInformation(
             GetCurrentProcess(),
@@ -236,7 +309,8 @@ mod tests {
         }
         use windows_sys::Win32::System::Threading::{
             GetCurrentProcess, GetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-            PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
             ProcessPowerThrottling,
         };
         super::raise_input_priority();
@@ -261,5 +335,22 @@ mod tests {
             state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
             0
         );
+        assert_ne!(
+            state.ControlMask & PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            0
+        );
+        assert_eq!(
+            state.StateMask & PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            0
+        );
+    }
+
+    #[test]
+    fn timer_period_request_is_scoped_to_its_guard() {
+        use std::sync::atomic::Ordering;
+        let guard = super::request_timer_resolution();
+        assert!(super::TIMER_PERIOD_GRANTED.load(Ordering::Relaxed));
+        drop(guard);
+        assert!(!super::TIMER_PERIOD_GRANTED.load(Ordering::Relaxed));
     }
 }

@@ -27,7 +27,10 @@ use windows_sys::Win32::Networking::WinSock::{
 use zeroize::Zeroizing;
 
 use crate::credentials;
-use crate::input::{InputSink, cancel_with_deadline, commit_ready, receive_ordered};
+use crate::input::{
+    InputSink, cancel_with_deadline, commit_ready, deferred_read_timeout, receive_ordered,
+    service_deferred,
+};
 use crate::metrics::HostMetrics;
 use crate::protocol::{OrderedFrames, TouchFrame};
 use crate::v5::{PHONE_PING, PHONE_TOUCH, decode_touch_payload};
@@ -396,7 +399,8 @@ fn serve_gameplay_inner(
     let session_start_deadline = Instant::now() + V5_SESSION_START_TIMEOUT;
     let mut session_established = false;
     let mut receive_buffer = [0_u8; MAX_DATAGRAM_SIZE];
-    connection.set_read_timeout(V5_SESSION_START_POLL)?;
+    let mut read_timeout = V5_SESSION_START_POLL;
+    connection.set_read_timeout(read_timeout)?;
     connection.send_control(HOST_HELLO, 0, None, RECEIVE_WINDOW, lane_count, || {
         metrics.clock_nanos(Instant::now())
     })?;
@@ -459,6 +463,14 @@ fn serve_gameplay_inner(
             return Err(
                 io::Error::new(io::ErrorKind::TimedOut, "authenticated idle peer expired").into(),
             );
+        }
+        service_deferred(sink, stopping)?;
+        if session_established {
+            let wanted = deferred_read_timeout(sink, V5_GAMEPLAY_READ_TIMEOUT);
+            if wanted != read_timeout {
+                connection.set_read_timeout(wanted)?;
+                read_timeout = wanted;
+            }
         }
         let received = connection.receive_record_into(&mut receive_buffer);
         if let Some((reason, arrival)) = connection.last_diagnostic_discard.take() {
@@ -528,7 +540,8 @@ fn serve_gameplay_inner(
             stopping,
         )?;
         if !session_established && ordered.session_id().is_some() {
-            connection.set_read_timeout(V5_GAMEPLAY_READ_TIMEOUT)?;
+            read_timeout = V5_GAMEPLAY_READ_TIMEOUT;
+            connection.set_read_timeout(read_timeout)?;
             session_established = true;
         }
     }

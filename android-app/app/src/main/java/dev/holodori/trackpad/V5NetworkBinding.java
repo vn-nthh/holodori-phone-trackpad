@@ -225,6 +225,7 @@ final class V5NetworkBinding implements AutoCloseable {
             selected.bindSocket(socket);
             socket.setBroadcast(true);
             socket.setSoTimeout(4);
+            requestGameplayTrafficClass(socket);
             // Pair's quality probes and Start use the same radio policy. Ownership
             // follows this binding, including idle gaps and failed/replaced sessions.
             wifiLock = acquireLowLatencyWifiLock(context);
@@ -246,6 +247,21 @@ final class V5NetworkBinding implements AutoCloseable {
                 socket.close();
                 releaseWifiLock(wifiLock);
             }
+        }
+    }
+
+    /**
+     * DSCP EF (46) in the upper six TOS bits. Most Wi-Fi drivers and access
+     * points map it to the WMM voice queue (AC_VO), which waits less for
+     * airtime; USB tethering ignores it. A best-effort hint, never a failure.
+     */
+    static final int GAMEPLAY_TRAFFIC_CLASS = 0xB8;
+
+    private static void requestGameplayTrafficClass(DatagramSocket socket) {
+        try {
+            socket.setTrafficClass(GAMEPLAY_TRAFFIC_CLASS);
+        } catch (SocketException error) {
+            Log.w("HolodoriUDP5", "DSCP traffic class unavailable", error);
         }
     }
 
@@ -292,6 +308,7 @@ final class V5NetworkBinding implements AutoCloseable {
             if (candidate.androidNetwork != null) candidate.androidNetwork.bindSocket(socket);
             socket.setBroadcast(true);
             socket.setSoTimeout(4);
+            requestGameplayTrafficClass(socket);
             success = true;
             return new V5NetworkBinding(
                     manager,

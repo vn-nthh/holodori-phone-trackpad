@@ -451,10 +451,12 @@ mod tests {
             KeyChange {
                 lane: 0,
                 down: true,
+                touch: false,
             },
             KeyChange {
                 lane: 1,
                 down: false,
+                touch: false,
             },
         ];
         let mut observed = Vec::new();
@@ -486,10 +488,12 @@ mod tests {
             KeyChange {
                 lane: 0,
                 down: true,
+                touch: false,
             },
             KeyChange {
                 lane: 1,
                 down: true,
+                touch: false,
             },
         ];
 
@@ -515,6 +519,7 @@ mod tests {
         let down = [KeyChange {
             lane: 0,
             down: true,
+            touch: false,
         }];
         assert_eq!(sink.submit_with(&down, |_| Ok(1)).unwrap(), 0);
 
@@ -579,6 +584,7 @@ mod tests {
             sink.submit(&[KeyChange {
                 lane: 0,
                 down: true,
+                touch: false,
             }])
             .expect("key down should be accepted"),
             1
@@ -587,6 +593,7 @@ mod tests {
             sink.submit(&[KeyChange {
                 lane: 0,
                 down: false,
+                touch: false,
             }])
             .expect("key up should be accepted"),
             1
