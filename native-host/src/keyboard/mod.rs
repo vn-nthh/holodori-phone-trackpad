@@ -54,8 +54,11 @@ struct PendingFrame {
     applied: usize,
 }
 
-/// Beta: keeps every same-lane re-press observable by a game that samples
-/// key state once per rendered frame.
+/// Beta: keeps same-lane edges from reaching Windows in the same instant.
+///
+/// The gap is a fixed 1-2 ms separation, not an attempt to reproduce the
+/// phone's timing or to outlast a game frame; holding input for a full frame
+/// would break the latency budget.
 ///
 /// Without spacing, a release and re-press of one lane can reach Windows
 /// microseconds apart (a repaired burst, or two fingers alternating on one
@@ -1460,7 +1463,7 @@ pub(crate) mod tests {
         assert_eq!(sink.pressed, [true, false, false, false]);
     }
 
-    const GAP: Duration = Duration::from_millis(17);
+    const GAP: Duration = Duration::from_millis(2);
 
     fn spaced_sink(lanes: usize) -> ManuallyDrop<KeyboardSink> {
         let mut sink = test_sink(lanes);
@@ -1499,7 +1502,7 @@ pub(crate) mod tests {
     #[test]
     fn spaced_repress_waits_one_gap_after_release_and_stays_visible() {
         let t0 = Instant::now();
-        let ms = |value: u64| t0 + Duration::from_millis(value);
+        let us = |value: u64| t0 + Duration::from_micros(value);
         let mut sink = spaced_sink(6);
         let tip = |action| {
             frame(
@@ -1518,25 +1521,25 @@ pub(crate) mod tests {
             vec![contact(0, 0, lane_x(2))],
         );
 
-        assert_eq!(step(&mut sink, ms(0), &tip(ACTION_DOWN)), [(2, true)]);
-        assert_eq!(step(&mut sink, ms(20), &lift), [(2, false)]);
-        assert_eq!(step(&mut sink, ms(25), &tip(ACTION_DOWN)), []);
+        assert_eq!(step(&mut sink, us(0), &tip(ACTION_DOWN)), [(2, true)]);
+        assert_eq!(step(&mut sink, us(5000), &lift), [(2, false)]);
+        assert_eq!(step(&mut sink, us(6000), &tip(ACTION_DOWN)), []);
         assert!(sink.has_active_input());
-        assert_eq!(deadline(&sink, ms(25)), Some(ms(37)));
-        assert_eq!(tick(&mut sink, ms(36)), []);
-        assert_eq!(tick(&mut sink, ms(37)), [(2, true)]);
+        assert_eq!(deadline(&sink, us(6000)), Some(us(7000)));
+        assert_eq!(tick(&mut sink, us(6999)), []);
+        assert_eq!(tick(&mut sink, us(7000)), [(2, true)]);
         // The spaced press is held long enough for a polling game to see it.
-        assert_eq!(step(&mut sink, ms(40), &lift), []);
-        assert_eq!(tick(&mut sink, ms(53)), []);
-        assert_eq!(tick(&mut sink, ms(54)), [(2, false)]);
+        assert_eq!(step(&mut sink, us(7500), &lift), []);
+        assert_eq!(tick(&mut sink, us(8999)), []);
+        assert_eq!(tick(&mut sink, us(9000)), [(2, false)]);
         assert!(!sink.has_active_input());
-        assert_eq!(deadline(&sink, ms(54)), None);
+        assert_eq!(deadline(&sink, us(9000)), None);
     }
 
     #[test]
     fn spaced_second_finger_on_held_lane_releases_then_represses() {
         let t0 = Instant::now();
-        let ms = |value: u64| t0 + Duration::from_millis(value);
+        let us = |value: u64| t0 + Duration::from_micros(value);
         let mut sink = spaced_sink(6);
         let x = lane_x(2);
         let both = |action, pointer, first, second| {
@@ -1556,14 +1559,14 @@ pub(crate) mod tests {
             vec![contact(0, CONTACT_FLAG_TIP, x)],
         );
 
-        assert_eq!(step(&mut sink, ms(0), &one), [(2, true)]);
+        assert_eq!(step(&mut sink, us(0), &one), [(2, true)]);
         let second = both(ACTION_DOWN, 1, CONTACT_FLAG_TIP, CONTACT_FLAG_TIP);
-        assert_eq!(step(&mut sink, ms(30), &second), [(2, false)]);
+        assert_eq!(step(&mut sink, us(30000), &second), [(2, false)]);
         assert_eq!(sink.state.lane_holds[2], 2);
-        assert_eq!(tick(&mut sink, ms(46)), []);
-        assert_eq!(tick(&mut sink, ms(47)), [(2, true)]);
+        assert_eq!(tick(&mut sink, us(31999)), []);
+        assert_eq!(tick(&mut sink, us(32000)), [(2, true)]);
         let first_lifts = both(crate::protocol::ACTION_UP, 0, 0, CONTACT_FLAG_TIP);
-        assert_eq!(step(&mut sink, ms(60), &first_lifts), []);
+        assert_eq!(step(&mut sink, us(40000), &first_lifts), []);
         let second_lifts = frame(
             1,
             crate::protocol::ACTION_UP,
@@ -1571,14 +1574,14 @@ pub(crate) mod tests {
             FRAME_FLAG_LOCKED,
             vec![contact(1, 0, x)],
         );
-        assert_eq!(step(&mut sink, ms(70), &second_lifts), [(2, false)]);
+        assert_eq!(step(&mut sink, us(50000), &second_lifts), [(2, false)]);
         assert!(!sink.has_active_input());
     }
 
     #[test]
     fn spaced_press_holds_back_a_later_release_so_slides_never_gap() {
         let t0 = Instant::now();
-        let ms = |value: u64| t0 + Duration::from_millis(value);
+        let us = |value: u64| t0 + Duration::from_micros(value);
         let mut sink = spaced_sink(6);
         let snapshot = |action, pointer, slider: f32, tapper| {
             let mut contacts = vec![contact(1, CONTACT_FLAG_TIP, slider)];
@@ -1589,24 +1592,24 @@ pub(crate) mod tests {
         };
 
         let slider_down = snapshot(ACTION_DOWN, 1, lane_x(0), None);
-        assert_eq!(step(&mut sink, ms(0), &slider_down), [(0, true)]);
+        assert_eq!(step(&mut sink, us(0), &slider_down), [(0, true)]);
         let tap = snapshot(ACTION_DOWN, 0, lane_x(0), Some(CONTACT_FLAG_TIP));
-        assert_eq!(step(&mut sink, ms(1), &tap), [(1, true)]);
+        assert_eq!(step(&mut sink, us(1000), &tap), [(1, true)]);
         let lift = snapshot(crate::protocol::ACTION_UP, 0, lane_x(0), Some(0));
-        assert_eq!(step(&mut sink, ms(30), &lift), [(1, false)]);
+        assert_eq!(step(&mut sink, us(30000), &lift), [(1, false)]);
         // The slide re-enters lane 1 within the gap: its press waits, and the
         // release of lane 0 must not leave a no-key gap before it.
         let slide = snapshot(ACTION_MOVE, 1, lane_x(1), None);
-        assert_eq!(step(&mut sink, ms(35), &slide), []);
+        assert_eq!(step(&mut sink, us(31000), &slide), []);
         assert!(sink.pressed[0]);
-        assert_eq!(tick(&mut sink, ms(46)), []);
-        assert_eq!(tick(&mut sink, ms(47)), [(1, true), (0, false)]);
+        assert_eq!(tick(&mut sink, us(31999)), []);
+        assert_eq!(tick(&mut sink, us(32000)), [(1, true), (0, false)]);
     }
 
     #[test]
     fn spaced_burst_keeps_each_repaired_tap_visible() {
         let t0 = Instant::now();
-        let ms = |value: u64| t0 + Duration::from_millis(value);
+        let us = |value: u64| t0 + Duration::from_micros(value);
         let mut sink = spaced_sink(6);
         let x = lane_x(3);
         let down = frame(
@@ -1625,15 +1628,15 @@ pub(crate) mod tests {
         );
 
         // Two complete taps arrive together after a repair.
-        assert_eq!(step(&mut sink, ms(0), &down), [(3, true)]);
-        assert_eq!(step(&mut sink, ms(0), &up), []);
-        assert_eq!(step(&mut sink, ms(0), &down), []);
-        assert_eq!(step(&mut sink, ms(0), &up), []);
-        assert_eq!(tick(&mut sink, ms(16)), []);
-        assert_eq!(tick(&mut sink, ms(17)), [(3, false)]);
-        assert_eq!(tick(&mut sink, ms(33)), []);
-        assert_eq!(tick(&mut sink, ms(34)), [(3, true)]);
-        assert_eq!(tick(&mut sink, ms(51)), [(3, false)]);
+        assert_eq!(step(&mut sink, us(0), &down), [(3, true)]);
+        assert_eq!(step(&mut sink, us(0), &up), []);
+        assert_eq!(step(&mut sink, us(0), &down), []);
+        assert_eq!(step(&mut sink, us(0), &up), []);
+        assert_eq!(tick(&mut sink, us(1999)), []);
+        assert_eq!(tick(&mut sink, us(2000)), [(3, false)]);
+        assert_eq!(tick(&mut sink, us(3999)), []);
+        assert_eq!(tick(&mut sink, us(4000)), [(3, true)]);
+        assert_eq!(tick(&mut sink, us(6000)), [(3, false)]);
         assert!(!sink.has_active_input());
     }
 
@@ -1671,7 +1674,7 @@ pub(crate) mod tests {
     #[test]
     fn spaced_slide_crossings_are_not_delayed() {
         let t0 = Instant::now();
-        let ms = |value: u64| t0 + Duration::from_millis(value);
+        let us = |value: u64| t0 + Duration::from_micros(value);
         let mut sink = spaced_sink(6);
         let at = |action, x| {
             frame(
@@ -1683,11 +1686,11 @@ pub(crate) mod tests {
             )
         };
         assert_eq!(
-            step(&mut sink, ms(0), &at(ACTION_DOWN, lane_x(0))),
+            step(&mut sink, us(0), &at(ACTION_DOWN, lane_x(0))),
             [(0, true)]
         );
         assert_eq!(
-            step(&mut sink, ms(30), &at(ACTION_MOVE, lane_x(5))),
+            step(&mut sink, us(30000), &at(ACTION_MOVE, lane_x(5))),
             [
                 (1, true),
                 (0, false),
@@ -1707,7 +1710,7 @@ pub(crate) mod tests {
     #[test]
     fn spaced_cancel_drops_deferred_edges() {
         let t0 = Instant::now();
-        let ms = |value: u64| t0 + Duration::from_millis(value);
+        let us = |value: u64| t0 + Duration::from_micros(value);
         let mut sink = spaced_sink(6);
         let x = lane_x(2);
         let down = frame(
@@ -1724,19 +1727,19 @@ pub(crate) mod tests {
             FRAME_FLAG_LOCKED,
             vec![contact(0, 0, x)],
         );
-        step(&mut sink, ms(0), &down);
-        step(&mut sink, ms(20), &up);
-        assert_eq!(step(&mut sink, ms(25), &down), []);
+        step(&mut sink, us(0), &down);
+        step(&mut sink, us(5000), &up);
+        assert_eq!(step(&mut sink, us(6000), &down), []);
         let cancel = frame(1, ACTION_CANCEL, 0, FRAME_FLAG_LOCKED, vec![]);
-        assert_eq!(step(&mut sink, ms(26), &cancel), []);
+        assert_eq!(step(&mut sink, us(6500), &cancel), []);
         assert!(!sink.has_active_input());
-        assert_eq!(tick(&mut sink, ms(60)), []);
+        assert_eq!(tick(&mut sink, us(20000)), []);
     }
 
     #[test]
     fn spaced_partial_submission_retries_only_the_remainder() {
         let t0 = Instant::now();
-        let ms = |value: u64| t0 + Duration::from_millis(value);
+        let us = |value: u64| t0 + Duration::from_micros(value);
         let mut sink = spaced_sink(6);
         let snapshot = |action, pointer, slider: f32, tapper| {
             let mut contacts = vec![contact(1, CONTACT_FLAG_TIP, slider)];
@@ -1745,32 +1748,32 @@ pub(crate) mod tests {
             }
             frame(1, action, pointer, FRAME_FLAG_LOCKED, contacts)
         };
-        step(&mut sink, ms(0), &snapshot(ACTION_DOWN, 1, lane_x(0), None));
+        step(&mut sink, us(0), &snapshot(ACTION_DOWN, 1, lane_x(0), None));
         step(
             &mut sink,
-            ms(1),
+            us(1000),
             &snapshot(ACTION_DOWN, 0, lane_x(0), Some(CONTACT_FLAG_TIP)),
         );
         step(
             &mut sink,
-            ms(30),
+            us(30000),
             &snapshot(crate::protocol::ACTION_UP, 0, lane_x(0), Some(0)),
         );
         step(
             &mut sink,
-            ms(35),
+            us(31000),
             &snapshot(ACTION_MOVE, 1, lane_x(1), None),
         );
 
         let error = sink
-            .service_at(ms(47), |_, changes| {
+            .service_at(us(32000), |_, changes| {
                 assert_changes(changes, &[(1, true), (0, false)]);
                 Ok(1)
             })
             .unwrap_err();
         assert!(error.to_string().contains("accepted 1 of 2"));
         assert_eq!(sink.pressed[..2], [true, true]);
-        assert_eq!(tick(&mut sink, ms(47)), [(0, false)]);
+        assert_eq!(tick(&mut sink, us(32000)), [(0, false)]);
         assert!(sink.spacer.as_ref().unwrap().queue.is_empty());
     }
 

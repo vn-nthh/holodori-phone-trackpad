@@ -15,9 +15,9 @@ use std::thread::JoinHandle;
 use tauri::{AppHandle, Manager, State};
 
 const DEFAULT_WARNING_BUDGET_MS: &str = "8.333";
-/// Beta re-press spacing: one 60 Hz game frame, so a frame-polled game sees
-/// every same-lane release and re-press.
-const REPRESS_GAP_MS: &str = "17";
+/// Beta re-press spacing: a fixed 2 ms between same-lane edges that would
+/// otherwise reach Windows together. It does not wait out a game frame.
+const REPRESS_GAP_MS: &str = "2";
 const USB_TETHER_UDP_PORT: u16 = 42_825;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;

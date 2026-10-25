@@ -1031,8 +1031,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                     .next()
                     .ok_or("--repress-gap-ms needs milliseconds")?
                     .parse()?;
-                if !(1..=50).contains(&milliseconds) {
-                    return Err("--repress-gap-ms must be between 1 and 50".into());
+                if !(1..=2).contains(&milliseconds) {
+                    return Err("--repress-gap-ms must be 1 or 2".into());
                 }
                 options.repress_gap = Some(Duration::from_millis(milliseconds));
             }
@@ -1053,7 +1053,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                      --transport usb|wifi [--pair] [--legacy-v4] \
                      [--udp-port 42825] [--metrics] [--local-only-tether] \
                      [--metrics-file PATH] [--warn-ms 8.333] \
-                     [--repress-gap-ms 17 (beta, keys mode)]"
+                     [--repress-gap-ms 2 (beta, keys mode)]"
                 );
                 std::process::exit(0);
             }
