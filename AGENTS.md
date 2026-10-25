@@ -169,5 +169,6 @@ Reviewed 2026-09-01:
   community evidence, not an official specification.
 
 The repository's normative target specifications are
-`EXPERIMENTAL_ARCHITECTURE.md` and `PROTOCOL_V5.md`. `PROTOCOL_V4.md` remains
-the current implementation and migration reference until v5 code ships.
+`EXPERIMENTAL_ARCHITECTURE.md` and `PROTOCOL_V5.md`. V5 has shipped since
+v0.5.0; `PROTOCOL_V4.md` is the reference for the explicitly selected USB-only
+legacy mode and the published v0.4.x builds.

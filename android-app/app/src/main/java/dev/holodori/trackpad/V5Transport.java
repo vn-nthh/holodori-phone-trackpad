@@ -44,6 +44,9 @@ final class V5Transport implements TouchTransport {
     private static final String XX_NAME = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
     private static final String IK_NAME = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
     private static final long DISCOVERY_INTERVAL_NANOS = 100_000_000L;
+    // A paired phone's IK retry starts fast so an in-game recovery is not
+    // held behind a lost first datagram, then backs off to discovery pace.
+    private static final long REMEMBERED_FIRST_RETRY_NANOS = 4_000_000L;
     private static final long APPLICATION_RETRY_NANOS = 100_000_000L;
     private static final long HANDSHAKE_TIMEOUT_NANOS = 5_000_000_000L;
     private static final long PAIRING_TIMEOUT_NANOS = 60_000_000_000L;
@@ -109,6 +112,15 @@ final class V5Transport implements TouchTransport {
     private int retainedContactCount;
     private boolean queueOverflowed;
     private final DiagnosticWorker diagnostics;
+    // Unwrapped once per Start: reconnects must not repeat a Keystore unwrap
+    // (one of which ran on the UI thread). Destroyed by close(); Forget is
+    // only reachable after Stop, and every open() still checks pairing.
+    private final Object identityLock = new Object();
+    private CredentialStore.Identity rememberedIdentity;
+    // Last authenticated host on this Start. IK is unicast there first so a
+    // reconnect does not depend on Wi-Fi broadcast delivery (basic rate,
+    // no MAC retry, held to DTIM for power-saving receivers).
+    private volatile InetSocketAddress lastHost;
 
     V5Transport(
             Context context,
@@ -163,7 +175,8 @@ final class V5Transport implements TouchTransport {
     public boolean open() {
         closeInternal(0, false);
         try {
-            if (!credentials.isPaired()) {
+            CredentialStore.Identity identity = rememberedIdentity();
+            if (identity == null || !identity.hasPairedHost()) {
                 listener.onConnectionChanged(false, "Pair this phone before Start");
                 return false;
             }
@@ -401,9 +414,8 @@ final class V5Transport implements TouchTransport {
             int sessionGeneration,
             V5NetworkBinding sessionBinding
     ) throws Exception {
-        CredentialStore.Identity identity = credentials.load();
+        CredentialStore.Identity identity = rememberedIdentity();
         if (identity == null || !identity.hasPairedHost()) {
-            if (identity != null) identity.destroy();
             throw new IOException("No paired host identity");
         }
         HandshakeState handshake = null;
@@ -429,6 +441,8 @@ final class V5Transport implements TouchTransport {
             );
             long deadline = System.nanoTime() + HANDSHAKE_TIMEOUT_NANOS;
             long nextSend = 0;
+            long retryInterval = REMEMBERED_FIRST_RETRY_NANOS;
+            InetSocketAddress preferredHost = lastHost;
             DatagramPacket incoming = new DatagramPacket(
                     new byte[V5Protocol.MAX_DATAGRAM_SIZE],
                     V5Protocol.MAX_DATAGRAM_SIZE
@@ -436,8 +450,9 @@ final class V5Transport implements TouchTransport {
             while (isGameplayActive(sessionGeneration) && System.nanoTime() < deadline) {
                 long now = System.nanoTime();
                 if (now >= nextSend) {
-                    sessionBinding.sendDiscovery(request);
-                    nextSend = now + DISCOVERY_INTERVAL_NANOS;
+                    sessionBinding.sendDiscovery(request, preferredHost);
+                    nextSend = now + retryInterval;
+                    retryInterval = nextRememberedRetry(retryInterval);
                 }
                 incoming.setLength(incoming.getData().length);
                 try {
@@ -474,6 +489,7 @@ final class V5Transport implements TouchTransport {
                 }
                 byte[] handshakeHash = handshake.getHandshakeHash().clone();
                 CipherStatePair split = handshake.split();
+                lastHost = source;
                 try {
                     return new V5Protocol.Channel(split, handshakeHash);
                 } finally {
@@ -482,7 +498,6 @@ final class V5Transport implements TouchTransport {
             }
             throw new IOException("Paired host not found on the selected interface");
         } finally {
-            identity.destroy();
             Arrays.fill(exchangeId, (byte) 0);
             Arrays.fill(message, (byte) 0);
             Arrays.fill(payload, (byte) 0);
@@ -532,6 +547,11 @@ final class V5Transport implements TouchTransport {
             V5Protocol.RecordHeader header,
             ByteBuffer control
     ) throws IOException {
+        if (header.messageType == V5Protocol.HOST_AUTH_ABORT) {
+            // The host already released input; restart now rather than after
+            // the 64 ms active or 2 s idle watchdog.
+            throw new IOException("Host ended the authenticated session");
+        }
         if (header.flags != 0
                 || header.payloadLength != V5Protocol.CONTROL_PAYLOAD_SIZE) {
             throw new IOException("Malformed authenticated host control");
@@ -583,7 +603,16 @@ final class V5Transport implements TouchTransport {
                             null,
                             null
                     );
-                    if (activeContactCount > 0) activePathStartedNanos = now;
+                    // Pipeline the boundary: the host applies sequences in
+                    // order, so reconstruction and live input need not wait a
+                    // round trip for the CANCEL's ACK. Taps in that window are
+                    // now sent instead of collapsing into the retained snapshot.
+                    sessionStarted = true;
+                    if (activeContactCount > 0) {
+                        activePathStartedNanos = now;
+                        lastHeartbeatNanos = now;
+                        enqueueRetainedSnapshotLocked(now);
+                    }
                     becameReady = true;
                 }
             } else if (header.messageType == V5Protocol.HOST_ACK) {
@@ -593,11 +622,6 @@ final class V5Transport implements TouchTransport {
                 if (acknowledgeLocked(header.logicalId, receiveNanos, hostSendNanos)) {
                     lastAcknowledgementProgressNanos = receiveNanos;
                     lastIdleResponseNanos = receiveNanos;
-                    if (!sessionStarted
-                            && Long.compareUnsigned(header.logicalId, 0L) >= 0) {
-                        sessionStarted = true;
-                        lastHeartbeatNanos = 0;
-                    }
                 }
             } else if (header.messageType == V5Protocol.HOST_PONG) {
                 if (!sessionStarted || header.sessionId != sessionId
@@ -671,6 +695,8 @@ final class V5Transport implements TouchTransport {
                         repairLate = pending.repairLatenessNanos;
                         selectedAt = now;
                     } else if (sessionStarted && !hasActiveDataPathLocked()
+                            // The host owns the session only once CANCEL commits.
+                            && highestAcknowledged != V5Protocol.NO_ACK
                             && now - lastPingNanos >= IDLE_PING_NANOS) {
                         payloadLength = 0;
                         sequence = nextPingId++;
@@ -733,6 +759,11 @@ final class V5Transport implements TouchTransport {
             return;
         }
         lastHeartbeatNanos = nowNanos;
+        enqueueRetainedSnapshotLocked(nowNanos);
+    }
+
+    /** Full-state frame from the latest snapshot: heartbeat and fresh-session reconstruction. */
+    private void enqueueRetainedSnapshotLocked(long nowNanos) {
         enqueueFrameLocked(
                 TouchSample.ACTION_HEARTBEAT,
                 0,
@@ -1424,7 +1455,28 @@ final class V5Transport implements TouchTransport {
     @Override
     public void close() {
         closeInternal(0, false);
+        forgetRememberedIdentity();
         if (diagnostics != null) diagnostics.stop();
+    }
+
+    private CredentialStore.Identity rememberedIdentity()
+            throws CredentialStore.CredentialException {
+        synchronized (identityLock) {
+            if (rememberedIdentity == null) rememberedIdentity = credentials.load();
+            return rememberedIdentity;
+        }
+    }
+
+    private void forgetRememberedIdentity() {
+        synchronized (identityLock) {
+            if (rememberedIdentity != null) rememberedIdentity.destroy();
+            rememberedIdentity = null;
+        }
+        lastHost = null;
+    }
+
+    static long nextRememberedRetry(long currentNanos) {
+        return Math.min(DISCOVERY_INTERVAL_NANOS, currentNanos * 2);
     }
 
     private boolean closeInternal(int expectedGeneration, boolean requireMatch) {

@@ -1,9 +1,9 @@
 # Holodori lossless touch protocol v4
 
-> **Implementation status:** the current release implements this USB-only
-> protocol. [Protocol v5](PROTOCOL_V5.md) supersedes it as the default current
-> source implementation. This document remains the exact reference for the
-> published v0.4.1 build and explicit legacy migration tests.
+> **Implementation status:** [protocol v5](PROTOCOL_V5.md) is the default
+> transport from v0.5.0. This USB-only protocol remains the exact reference for
+> the published v0.4.x builds, the explicitly selected legacy mode, and its
+> migration tests.
 
 Protocol v4 is the duplex binary protocol used by the native Windows and Linux
 hosts over Android USB tethering/RNDIS and UDP. Android retains each input

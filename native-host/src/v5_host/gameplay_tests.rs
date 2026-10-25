@@ -7,6 +7,9 @@ use crate::protocol::{
 use crate::v5::{CONTACT_SIZE, TOUCH_PAYLOAD_HEADER_SIZE};
 use std::mem::ManuallyDrop;
 
+/// Android's `V5SendQueue.REPAIR_NANOS`.
+const ANDROID_REPAIR_INTERVAL: Duration = Duration::from_millis(2);
+
 struct Phone {
     socket: UdpSocket,
     cipher: RecordCipher,
@@ -246,7 +249,150 @@ fn ack_copies_follow_committed_progress_including_ordering_holes() {
             acknowledgements.push(header.logical_id);
         }
     }
-    assert_eq!(acknowledgements, [0, 0, 0, 0, 0, 2, 2, 2]);
+    // Progress always sends an immediate pair. Duplicates and holes add at
+    // most one ACK each, and only when they are not the immediate twin of an
+    // ACK sent under 1 ms earlier (timing-dependent under test load).
+    assert_eq!(acknowledgements[..2], [0, 0]);
+    assert!(acknowledgements.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(acknowledgements.iter().filter(|&&id| id == 2).count() >= 2);
+    assert!(acknowledgements.len() <= 8);
+}
+
+fn gameplay_state() -> GameplayState {
+    GameplayState {
+        lane_count: 6,
+        last_committed_frame: Instant::now(),
+        last_idle_activity: Instant::now(),
+        last_ping: None,
+        last_ack: None,
+    }
+}
+
+fn sealed_frame(
+    phone: &mut Phone,
+    connection: &mut V5Connection,
+    sequence: u64,
+    action: u8,
+) -> TouchFrame {
+    let payload = touch_payload(action, duration_nanos(phone.epoch.elapsed()));
+    let length = phone
+        .cipher
+        .seal_into(
+            Direction::PhoneToHost,
+            PHONE_TOUCH,
+            9,
+            sequence,
+            0,
+            &payload[..payload_length(action)],
+            &mut phone.bytes,
+        )
+        .unwrap();
+    let header = connection
+        .cipher
+        .open_in_place(Direction::PhoneToHost, &mut phone.bytes[..length])
+        .unwrap();
+    decode_touch_payload(
+        &header,
+        &phone.bytes[RECORD_HEADER_SIZE..length - crate::v5::TAG_SIZE],
+    )
+    .unwrap()
+}
+
+fn drain_acks(phone: &mut Phone) -> Vec<u64> {
+    phone.socket.set_nonblocking(true).unwrap();
+    let mut acknowledgements = Vec::new();
+    while let Ok(length) = phone.socket.recv(&mut phone.bytes) {
+        let header = phone
+            .cipher
+            .open_in_place(Direction::HostToPhone, &mut phone.bytes[..length])
+            .unwrap();
+        if header.message_type == HOST_ACK {
+            acknowledgements.push(header.logical_id);
+        }
+    }
+    phone.socket.set_nonblocking(false).unwrap();
+    acknowledgements
+}
+
+#[test]
+fn immediate_twin_is_not_acked_but_a_later_repair_is() {
+    let (mut connection, mut phone) = pair();
+    let mut sink = MeasuredSink::new(phone.epoch);
+    let mut ordered = OrderedFrames::new();
+    ordered.require_fresh_session();
+    let mut metrics = HostMetrics::new(false, 8.333, 5);
+    let mut state = gameplay_state();
+    let stopping = AtomicBool::new(false);
+    for _ in 0..2 {
+        let frame = sealed_frame(&mut phone, &mut connection, 0, ACTION_CANCEL);
+        process_gameplay_frame(
+            &mut connection,
+            &mut ordered,
+            &mut sink,
+            &mut metrics,
+            &mut state,
+            frame,
+            Instant::now(),
+            &stopping,
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        drain_acks(&mut phone),
+        [0, 0],
+        "the twin must not add a third ACK"
+    );
+
+    // A repair arrives at least 2 ms after its copy; model that age directly.
+    let (acknowledged, at) = state.last_ack.unwrap();
+    state.last_ack = Some((acknowledged, at - DUPLICATE_ACK_HOLDOFF));
+    let frame = sealed_frame(&mut phone, &mut connection, 0, ACTION_CANCEL);
+    process_gameplay_frame(
+        &mut connection,
+        &mut ordered,
+        &mut sink,
+        &mut metrics,
+        &mut state,
+        frame,
+        Instant::now(),
+        &stopping,
+    )
+    .unwrap();
+    assert_eq!(
+        drain_acks(&mut phone),
+        [0],
+        "a repair recovers lost feedback"
+    );
+    assert_eq!(sink.sequences, [0]);
+}
+
+#[test]
+fn host_failure_sends_an_authenticated_abort() {
+    let (connection, mut phone) = pair();
+    let mut sink = MeasuredSink::new(phone.epoch);
+    sink.reject = Some(1);
+    let worker = start(connection, sink);
+    phone.touch(0, ACTION_CANCEL);
+    phone.ack(0).unwrap();
+    phone.touch(1, ACTION_DOWN);
+    let (_, result) = worker.join().unwrap();
+    assert!(result.is_err());
+    let mut aborted = false;
+    while let Ok(length) = phone.socket.recv(&mut phone.bytes) {
+        let header = phone
+            .cipher
+            .open_in_place(Direction::HostToPhone, &mut phone.bytes[..length])
+            .unwrap();
+        if header.message_type == HOST_AUTH_ABORT {
+            assert_eq!(header.session_id, 9);
+            aborted = true;
+            break;
+        }
+    }
+    assert!(
+        aborted,
+        "Android must learn of a host failure without its watchdog"
+    );
 }
 
 #[test]
@@ -258,6 +404,9 @@ fn lost_ack_pairs_recover_on_replay_without_reinjecting_input() {
         // Discard both ACKs as if neither reached Android's retained queue.
         phone.ack(sequence).unwrap();
         phone.ack(sequence).unwrap();
+        // Android's repair timer is 2 ms; an earlier copy is the immediate
+        // twin, which the host deliberately does not acknowledge again.
+        thread::sleep(ANDROID_REPAIR_INTERVAL);
         // A fresh packet number carrying the same logical frame repairs that
         // lost feedback, including the initial CANCEL boundary and a held key.
         phone.touch(sequence, action);
@@ -363,6 +512,7 @@ fn authenticated_receive_commit_and_ack_allocate_nothing_after_setup() {
         last_committed_frame: Instant::now(),
         last_idle_activity: Instant::now(),
         last_ping: None,
+        last_ack: None,
     };
     let stopping = AtomicBool::new(false);
     let mut apply = |sequence: u64| {

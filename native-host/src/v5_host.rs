@@ -348,6 +348,11 @@ const ACTIVE_INPUT_SILENCE_TIMEOUT: Duration = Duration::from_millis(32);
 const IDLE_PEER_SILENCE_TIMEOUT: Duration = Duration::from_secs(2);
 const V5_SESSION_START_TIMEOUT: Duration = Duration::from_secs(5);
 const V5_CONTROL_REPAIR_INTERVAL: Duration = Duration::from_millis(2);
+const V5_HELLO_REPAIR_MAX_INTERVAL: Duration = Duration::from_millis(32);
+/// Android's earliest repair is 2 ms after a copy. A logical duplicate that
+/// arrives sooner than this after the same cumulative ACK is the immediate
+/// redundant twin, which cannot have observed that ACK's loss.
+const DUPLICATE_ACK_HOLDOFF: Duration = Duration::from_millis(1);
 const V5_SESSION_START_POLL: Duration = Duration::from_millis(1);
 const V5_GAMEPLAY_READ_TIMEOUT: Duration = Duration::from_millis(4);
 const V5_INTERFACE_REVALIDATE_INTERVAL: Duration = Duration::from_millis(500);
@@ -357,6 +362,7 @@ struct GameplayState {
     last_committed_frame: Instant,
     last_idle_activity: Instant,
     last_ping: Option<u64>,
+    last_ack: Option<(Option<u64>, Instant)>,
 }
 
 pub fn serve_gameplay(
@@ -369,6 +375,10 @@ pub fn serve_gameplay(
 ) -> Result<(), HostV5Error> {
     ordered.require_fresh_session();
     let result = serve_gameplay_inner(connection, ordered, sink, metrics, lane_count, stopping);
+    // On Stop or failure, tell Android immediately instead of leaving it to
+    // its 64 ms active or 2 s idle watchdog. Best effort: the socket may be
+    // the failure.
+    notify_session_end(connection, ordered.session_id(), stopping);
     metrics.note(
         crate::diagnostics::BOUNDARY,
         ordered.session_id().unwrap_or(0),
@@ -379,6 +389,29 @@ pub fn serve_gameplay(
     ordered.require_fresh_session();
     cancel_with_deadline(sink, metrics)?;
     result
+}
+
+fn notify_session_end(
+    connection: &mut V5Connection,
+    session_id: Option<u64>,
+    stopping: &AtomicBool,
+) {
+    if connection.peer_aborted {
+        return;
+    }
+    let reason: u16 = if stopping.load(Ordering::Relaxed) {
+        1
+    } else {
+        4
+    };
+    let _ = connection.send_record_redundant(
+        Direction::HostToPhone,
+        HOST_AUTH_ABORT,
+        session_id.unwrap_or(0),
+        0,
+        0,
+        &reason.to_le_bytes(),
+    );
 }
 
 fn serve_gameplay_inner(
@@ -392,6 +425,7 @@ fn serve_gameplay_inner(
     let mut control = GameplayState {
         last_idle_activity: Instant::now(),
         last_ping: None,
+        last_ack: None,
         lane_count,
         last_committed_frame: Instant::now(),
     };
@@ -405,6 +439,7 @@ fn serve_gameplay_inner(
         metrics.clock_nanos(Instant::now())
     })?;
     let mut last_hello_send = Instant::now();
+    let mut hello_interval = V5_CONTROL_REPAIR_INTERVAL;
     while !stopping.load(Ordering::Relaxed) {
         if interface_monitor.changed() {
             metrics.note(
@@ -428,7 +463,7 @@ fn serve_gameplay_inner(
                 )
                 .into());
             }
-            if last_hello_send.elapsed() >= V5_CONTROL_REPAIR_INTERVAL {
+            if last_hello_send.elapsed() >= hello_interval {
                 connection.send_control_once(
                     HOST_HELLO,
                     0,
@@ -438,6 +473,8 @@ fn serve_gameplay_inner(
                     metrics.clock_nanos(Instant::now()),
                 )?;
                 last_hello_send = Instant::now();
+                // First repair stays at 2 ms; an absent phone is not flooded.
+                hello_interval = (hello_interval * 2).min(V5_HELLO_REPAIR_MAX_INTERVAL);
             }
         }
         if sink.has_active_input()
@@ -487,6 +524,7 @@ fn serve_gameplay_inner(
             continue;
         };
         if header.message_type == PHONE_AUTH_ABORT {
+            connection.peer_aborted = true;
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 "phone ended the authenticated session",
@@ -584,6 +622,18 @@ fn process_gameplay_frame(
     }
     let acknowledged = ordered.acknowledged_sequence();
     let ack_started = Instant::now();
+    if !progressed
+        && control.last_ack.is_some_and(|(sent, at)| {
+            sent == acknowledged
+                && ack_started.saturating_duration_since(at) < DUPLICATE_ACK_HOLDOFF
+        })
+    {
+        // The redundant twin (or a hole behind it) arrived right after this
+        // exact ACK was sent. A real repair is at least 2 ms later and still
+        // gets its own ACK, so lost feedback recovers without extra traffic.
+        return Ok(());
+    }
+    control.last_ack = Some((acknowledged, ack_started));
     let ack_result = if progressed {
         connection.send_control(
             HOST_ACK,
@@ -677,6 +727,7 @@ pub struct V5Connection {
     cached_handshake: Option<(Vec<u8>, Vec<u8>)>,
     send_buffer: [u8; MAX_DATAGRAM_SIZE],
     last_diagnostic_discard: Option<(u64, Instant)>,
+    peer_aborted: bool,
 }
 
 pub struct InterfaceMonitor {
@@ -714,6 +765,7 @@ impl V5Connection {
             cached_handshake,
             send_buffer: [0; MAX_DATAGRAM_SIZE],
             last_diagnostic_discard: None,
+            peer_aborted: false,
         }
     }
 
@@ -1074,6 +1126,7 @@ fn bind_socket(
 fn bind_listener_socket(listener: &ListenerInterface, port: u16) -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))?;
     confine_socket(&socket, listener)?;
+    request_expedited_forwarding(&socket);
     enable_receive_interface(&socket)?;
     socket.set_broadcast(true)?;
     socket.set_read_timeout(Some(DISCOVERY_SLICE))?;
@@ -1208,6 +1261,27 @@ fn confine_socket(socket: &UdpSocket, listener: &ListenerInterface) -> io::Resul
         Err(io::Error::last_os_error())
     }
 }
+
+/// Mark host ACKs DSCP EF (the phone already marks its frames) so Wi-Fi WMM
+/// can carry feedback in the voice access category. Best effort: a refusal
+/// changes queueing priority only, never correctness. Windows ignores
+/// `IP_TOS` without an administrator QoS policy, so it is not requested there.
+#[cfg(target_os = "linux")]
+fn request_expedited_forwarding(socket: &UdpSocket) {
+    let tos: libc::c_int = 0xB8;
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_TOS,
+            (&raw const tos).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn request_expedited_forwarding(_socket: &UdpSocket) {}
 
 #[cfg(not(any(windows, target_os = "linux")))]
 fn confine_socket(_socket: &UdpSocket, _listener: &ListenerInterface) -> io::Result<()> {

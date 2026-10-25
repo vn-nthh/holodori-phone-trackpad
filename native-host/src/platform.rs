@@ -38,9 +38,14 @@ pub fn diagnostic_environment() -> String {
 #[cfg(not(windows))]
 pub fn diagnostic_environment() -> String {
     format!(
-        "os={} priority_readback=unavailable socket_1ms_timeout_us={} thermal=unavailable nic_rssi=unavailable dscp=not_requested ap_wmm=unverified",
+        "os={} priority_readback=unavailable socket_1ms_timeout_us={} thermal=unavailable nic_rssi=unavailable dscp={} ap_wmm=unverified",
         std::env::consts::OS,
         socket_timeout_probe_us(),
+        if cfg!(target_os = "linux") {
+            "ef_requested_v5"
+        } else {
+            "not_requested"
+        },
     )
 }
 

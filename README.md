@@ -263,7 +263,7 @@ cargo test --manifest-path native-host/Cargo.toml --all-targets
 See the [Linux setup guide](LINUX_SETUP.md),
 [architecture guide](EXPERIMENTAL_ARCHITECTURE.md), and
 [protocol v5 specification](PROTOCOL_V5.md) for current source-build details.
-The [protocol v4 specification](PROTOCOL_V4.md) documents the published v0.4.1
+The [protocol v4 specification](PROTOCOL_V4.md) documents the published v0.4.x
 transport and the explicit legacy migration mode.
 
 ## License

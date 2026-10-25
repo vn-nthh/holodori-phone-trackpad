@@ -109,6 +109,14 @@ final class V5NetworkBinding implements AutoCloseable {
         if (!isOnSelectedSubnet(source)) return false;
         if (peer == null) {
             peer = source;
+            // A connected socket skips the per-send route lookup and lets the
+            // kernel drop datagrams from any other sender. Best effort: the
+            // pinned-peer checks remain the authority either way.
+            try {
+                socket.connect(source);
+            } catch (RuntimeException | SocketException error) {
+                Log.w("HolodoriUDP5", "Could not connect the pinned V5 socket", error);
+            }
             return true;
         }
         return peer.equals(source);
@@ -127,7 +135,17 @@ final class V5NetworkBinding implements AutoCloseable {
     }
 
     void sendDiscovery(byte[] bytes) throws IOException {
+        sendDiscovery(bytes, null);
+    }
+
+    /** Unicast to the last authenticated host first, then broadcast as before. */
+    void sendDiscovery(byte[] bytes, InetSocketAddress preferredHost) throws IOException {
         DatagramPacket packet = new DatagramPacket(bytes, bytes.length);
+        if (preferredHost != null && isOnSelectedSubnet(preferredHost)) {
+            packet.setSocketAddress(preferredHost);
+            socket.send(packet);
+            socket.send(packet);
+        }
         for (InetAddress destination : destinations) {
             packet.setSocketAddress(new InetSocketAddress(destination, V5Protocol.PORT));
             socket.send(packet);

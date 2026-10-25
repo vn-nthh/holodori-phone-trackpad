@@ -1,14 +1,14 @@
 # Holodori lossless touch protocol v5
 
-Protocol v5 is the authenticated transport implemented by current source builds
-of Doritrack. It adds
+Protocol v5 is the authenticated transport implemented by Doritrack since
+v0.5.0. It adds
 explicit USB or Wi-Fi/local-network selection, first-use pairing through the
 six phone lanes, authenticated encryption, transport-independent remembered
 peers, Wi-Fi path measurement, and a thumb-friendly phone layout without
 weakening the existing lossless input rules.
 
-This specification is normative for current protocol work. The published
-v0.4.1 release still implements [protocol v4](PROTOCOL_V4.md). Version 5 is not
+This specification is normative for current protocol work. Published v0.4.x
+releases implement [protocol v4](PROTOCOL_V4.md). Version 5 is not
 wire-compatible with version 4. A v5 implementation MUST NOT silently
 downgrade, MUST NOT accept v4 gameplay on a Wi-Fi listener, and MUST treat a
 transport or authenticated session change as a clean input boundary.
@@ -106,7 +106,13 @@ IK handshake and session-start `CANCEL` before input resumes.
 
 Initial discovery sends `HPP5` probes to the selected interface's IPv4 directed
 broadcast address on UDP port `42825`; the host replies by unicast to the source
-address and port. The initial implementation does not require IPv6 discovery.
+address and port. A remembered-peer reconnect within one Start first sends IK
+message 1 by unicast to the host that last completed IK on the selected subnet,
+then to the broadcast address as before. Wi-Fi broadcast uses the basic rate,
+has no MAC retry, and may be held until a DTIM beacon for a power-saving
+receiver, so it must not be the only recovery path. That IK request retries
+after 4 ms and doubles to the ordinary 100 ms discovery interval. Unicast
+reveals nothing a broadcast does not: IK encrypts the initiator identity. The initial implementation does not require IPv6 discovery.
 Guest-network or client-isolation settings may block discovery even when both
 devices show the same Wi-Fi name, and the UI SHOULD explain that case rather
 than suggesting a weaker listener.
@@ -413,7 +419,9 @@ Commitment and reveal payloads are exactly 32 bytes. `PAIR_CONFIRM` and
 `PAIR_COMPLETE` have empty payloads. Authenticated abort has one `u16` reason:
 user cancellation `1`, comparison failure `2`, timeout `3`, or protocol failure
 `4`. The reason is diagnostic only and never allows another attempt inside the
-same pairing window.
+same pairing window. During gameplay a host abort carries the current gameplay
+session ID, or zero before a session exists, and ends the connection at once on
+the phone: it is never a reason to keep input alive.
 
 Implementations MUST reject message types that are invalid for the current
 handshake role, state, or session kind.
@@ -439,6 +447,15 @@ and acknowledges sequence zero only after that release is accepted. Sequence
 one may then reconstruct the phone's latest still-held complete snapshot. Any
 other first action, sequence, or session transition fails closed.
 
+The phone pipelines this boundary: it queues sequence zero, the reconstruction
+(when a contact is held), and then live input as soon as HELLO arrives, without
+waiting a round trip for sequence zero's ACK. The host still applies nothing
+before it commits sequence zero, and discards later sequences that arrive
+first, so ordinary repair restores them. Idle PING waits for that first ACK,
+because the host owns no gameplay session until sequence zero commits. Before
+sequence zero arrives, the host repairs HELLO after 2 ms and then doubles the
+interval up to 32 ms rather than flooding an absent phone.
+
 All later gameplay controls carry that nonzero session ID. A fresh IK handshake
 is required before another gameplay session starts on the connection; session
 IDs are not changed in place.
@@ -462,8 +479,12 @@ V5 keeps the v4 delivery semantics after authentication:
   sink accepts the complete ordered frame. Each advancement sends two immediate,
   independently encrypted ACK copies. A valid logical duplicate or future frame
   behind an ordering hole sends one immediate ACK with the unchanged cumulative
-  sequence, so lost feedback can recover without another redundant pair. ACKs
-  are never delayed to collect more frames. Initial HELLO and PONG responses
+  sequence, so lost feedback can recover without another redundant pair. The
+  exception is a duplicate or hole that arrives less than 1 ms after that same
+  cumulative ACK was sent: it is the immediate redundant twin, which cannot have
+  observed the ACK's loss, and acknowledging it only spends airtime. A real
+  repair is at least 2 ms later and is always acknowledged. ACKs are never
+  delayed to collect more frames. Initial HELLO and PONG responses
   retain two copies; HELLO repairs remain single-copy.
 - An 8 ms acknowledged full-state heartbeat sustains active stationary
   contacts. Idle sessions do not manufacture touch frames.
@@ -478,8 +499,10 @@ V5 keeps the v4 delivery semantics after authentication:
 - Any transport, authentication, read, write, or sink failure releases input.
   Recovery performs a fresh IK handshake, creates a new gameplay session, and
   requires logical sequence zero to be a session-start `CANCEL`. Live failure
-  recovery adds no fixed 100 ms delay. Stop sends a best-effort authenticated
-  abort before closing; the idle deadline covers a lost abort or process death.
+  recovery adds no fixed 100 ms delay. Stop or any host-side gameplay failure
+  sends two best-effort authenticated aborts before closing, so the peer
+  restarts without waiting for its watchdog; the watchdogs cover a lost abort
+  or process death.
 - Android retains only the latest complete contact snapshot across recovery.
   After the fresh `CANCEL`, it reconstructs still-held contacts from that
   snapshot without replaying old transitions.
