@@ -1,12 +1,12 @@
 HOLODORI LOSSLESS TOUCH - AUTHENTICATED LOCAL UDP (LINUX)
 =========================================================
 
-This bundle defaults to authenticated protocol v5 over explicitly selected USB
+This bundle defaults to authenticated protocol v6 over explicitly selected USB
 tethering or Wi-Fi/local network. Your distribution supplies the network
 device. USB still accepts only the kernel's rndis_host driver so a generic USB
 Ethernet/NCM adapter cannot masquerade as the chosen phone route.
 
-V5 authenticates the paired phone with Noise before Linux uinput is reachable.
+Protocol v6 authenticates the paired phone with Noise before Linux uinput is reachable.
 Legacy protocol v4 remains an explicit unpaired USB migration option; treat
 that mode's tether subnet as trusted and never expose it to LAN or Wi-Fi.
 
@@ -34,7 +34,7 @@ One-time setup:
        sudo firewall-cmd --reload
 
 Install:
-  1. Copy Android/Doritrack-v5.apk to the phone (if this bundle
+  1. Copy Android/Doritrack.apk to the phone (if this bundle
      includes an Android build; the experimental build script skips the APK
      when no Android SDK is available).
   2. Open the APK on the phone and approve installation from that source.
@@ -53,7 +53,7 @@ Start the Linux app:
      both peers on one private subnet.
   3. Press Pair on both. Replicate all eight numbered host lanes on the phone,
      then approve on the host only while the real phone says "Pattern matched".
-  4. Set the lane keys if needed. V5 uses UDP port 42825 on the selected path.
+  4. Set the lane keys if needed. Protocol v6 uses UDP port 42825 on the selected path.
   5. Leave "Save latency report when stopped" checked unless you do not want
      a report.
   6. USB NetworkManager users can enable "Stop the PC from using the phone's
@@ -120,7 +120,7 @@ Connection diagnostics:
     option is checked. One report is written under
     $XDG_STATE_HOME/holodori/logs (or ~/.local/state/holodori/logs) after
     Stop. Nothing is formatted, sorted, or written mid-play.
-  - V5 and explicit legacy v4 use fixed UDP port 42825. V4 never runs on the
+  - Protocol v6 and explicit legacy v4 use fixed UDP port 42825. V4 never runs on the
     Wi-Fi listener. The 8.333 ms warning budget is applied automatically.
 
 Metrics include:
@@ -142,7 +142,7 @@ Safety and scope:
     replayed late. Duplicate controls do not hide an ordering stall.
 
 See Docs/LINUX_SETUP.md for expanded setup and troubleshooting.
-See Docs/EXPERIMENTAL_ARCHITECTURE.md, Docs/PROTOCOL_V5.md, and
-Docs/PROTOCOL_V5_TEST_VECTORS.md for current internals. PROTOCOL_V4.md documents
+See Docs/EXPERIMENTAL_ARCHITECTURE.md, Docs/PROTOCOL_V6.md, and
+Docs/PROTOCOL_V6_TEST_VECTORS.md for current internals. PROTOCOL_V4.md documents
 the explicit legacy migration mode.
 Verify every packaged file against SHA256SUMS.txt.

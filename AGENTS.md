@@ -64,13 +64,13 @@ ownership of one lane explains every missed tap.
    complete snapshot.
 8. **Never replay seconds-old gameplay.** Reliability repairs short packet loss;
    it must not turn an outage into late notes after reconnection.
-9. **V5 input is authenticated before it is actionable.** Discovery and an
+9. **Network input is authenticated before it is actionable.** Discovery and an
    incomplete pairing handshake can never reach an OS input sink. Do not
    silently downgrade, and never accept v4 gameplay on a Wi-Fi listener. A
    remote `PAIR_CONFIRM` never replaces the required local host approval.
-10. **An AEAD nonce belongs to one datagram.** In v5, every immediate copy and
-    repair gets a new packet number and nonce even when it carries the same
-    logical frame. Never patch timestamps and re-encrypt under a reused nonce.
+10. **An AEAD nonce belongs to one datagram.** Every immediate copy and repair
+    gets a new packet number and nonce even when it carries the same logical
+    frames. Never patch timestamps and re-encrypt under a reused nonce.
 11. **Transport selection is explicit.** Pair and Start operate only on the USB
     or local-network interface chosen by the user. An interface change is a
     clean authenticated-session boundary.
@@ -86,12 +86,14 @@ USB controller, RNDIS, Windows scheduling, and the game all contribute.
 
 Changes must preserve these properties:
 
-- no intentional batching, debounce, frame-age wait, or polling bridge;
+- no intentional batching, debounce, frame-age wait, or polling bridge. A
+  record may carry several frames only if they were already queued; a send is
+  never delayed to collect more;
 - no UI rendering, logging, report formatting, sorting, or file I/O on the hot
   path;
 - no JSON or per-frame process boundary in the native path;
-- first send is immediate, its redundant copy is immediate, and repair begins
-  after 2 ms;
+- a new sample's first send is immediate, its redundant copy is immediate, a
+  full-state heartbeat is sent once, and repair begins after 2 ms;
 - every datagram remains below the selected local transport's MTU;
 - watchdog and recovery logic observes state without delaying transmission;
 - metrics remain bounded in memory and are written only when play stops.
@@ -104,12 +106,12 @@ that frame through the 2 ms replay.
 ## Why the architecture looks this way
 
 - **Selected local transport:** USB tethering uses the phone's normal cable and
-  inbox networking without a custom driver. V5 may instead use an explicitly
-  selected same-subnet Wi-Fi/local-network path.
-- **Authenticated UDP datagrams:** provide low-overhead atomic framing. V5 adds
+  inbox networking without a custom driver. The authenticated protocol may
+  instead use an explicitly selected same-subnet Wi-Fi/local-network path.
+- **Authenticated UDP datagrams:** provide low-overhead atomic framing. V6 adds
   Noise-authenticated identities and AEAD while retaining session IDs, logical
-  sequences, reorder, deduplication, cumulative ACKs, redundant sends, and
-  replay. V4 remains the current CRC-protected USB implementation.
+  sequences, reorder, deduplication, cumulative and selective ACKs, redundant
+  sends, and replay. V4 remains the current CRC-protected USB implementation.
 - **First-use lane comparison:** a transcript-bound eight-step, six-lane
   pattern gives about 20.68 bits with one attempt per Pair click. It is a short
   authentication string, never an encryption key or logged credential.
@@ -169,6 +171,6 @@ Reviewed 2026-09-01:
   community evidence, not an official specification.
 
 The repository's normative target specifications are
-`EXPERIMENTAL_ARCHITECTURE.md` and `PROTOCOL_V5.md`. V5 has shipped since
-v0.5.0; `PROTOCOL_V4.md` is the reference for the explicitly selected USB-only
-legacy mode and the published v0.4.x builds.
+`EXPERIMENTAL_ARCHITECTURE.md` and `PROTOCOL_V6.md`. `PROTOCOL_V5.md` describes
+the published v0.5.x builds; `PROTOCOL_V4.md` is the reference for the
+explicitly selected USB-only legacy mode and the published v0.4.x builds.

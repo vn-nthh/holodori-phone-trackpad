@@ -1,30 +1,33 @@
 # Lossless touch architecture
 
-This document separates the protocol-v5 implementation in this branch from
-the protocol-v4 code in the published v0.4.1 release. The gameplay invariants
-and latency budget apply to both. New builds default to
-[protocol v5](PROTOCOL_V5.md); [protocol v4](PROTOCOL_V4.md) remains available
-only through the explicit legacy USB option during migration.
+This document separates the authenticated protocol-v6 implementation in this
+branch from the protocol-v4 code in the published v0.4.1 release. The gameplay
+invariants and latency budget apply to both. New builds default to
+[protocol v6](PROTOCOL_V6.md) (v0.5.x shipped [protocol v5](PROTOCOL_V5.md));
+[protocol v4](PROTOCOL_V4.md) remains available only through the explicit
+legacy USB option during migration.
 
-## Protocol v5 data path
+## Protocol v6 data path
 
 ```text
 Android MotionEvent
   -> optional thumb-mode physical-to-logical transform
   -> complete chronological contact frame
   -> retained logical-frame queue with benchmark timestamps
-  -> HPT5 AEAD datagram over explicitly selected USB or local network
+  -> HPT6 AEAD record over explicitly selected USB or local network
+     (one or more already-queued consecutive frames per datagram)
   -> authenticated Rust receiver + sequence reorder/dedup
   -> selected host OS sink (Windows Touch/keys or Linux uinput keys)
-  -> HPA5 authenticated cumulative ACK datagram
-  -> Android retires acknowledged logical frames
+  -> HPA6 authenticated cumulative + selective ACK datagram
+  -> Android retires acknowledged frames and stops repairing held ones
 ```
 
 The host and phone select USB or Wi-Fi/local network before pairing or Start.
 First use authenticates a Noise XX exchange by comparing an eight-step pattern
 on the six phone lanes and requiring local host approval while the real phone
 shows a match. Later sessions use the remembered identities and a fresh Noise
-IK exchange. Every send attempt has a unique AEAD packet number, while
+IK exchange whose reply carries the session parameters, so input starts without
+a further round trip. Every send attempt has a unique AEAD packet number, while
 redundant copies and repair retain the logical frame sequence that the host
 applies exactly once.
 
@@ -84,7 +87,7 @@ Protocol v4 has no cryptographic pairing. The interface/subnet checks narrow
 the intended trust boundary, but any sender able to reach the host from the
 accepted tether subnet can impersonate the phone and inject input. CRC protects
 integrity against corruption, not identity. Authenticated pairing is specified
-in [protocol v5](PROTOCOL_V5.md).
+in [protocol v6](PROTOCOL_V6.md).
 
 ## Optional local-only tethering
 
@@ -247,7 +250,7 @@ The native host reports stable Waiting, Connected, Recovering, and Stopping
 transitions from a background reporter. The launcher drains that stream and
 shows the matching phase without doing UI, logging, or formatting on the
 gameplay path. An idle peer disappears from Connected after two seconds
-without a valid pinned-peer hello or frame in v4. V5 uses authenticated idle
+without a valid pinned-peer hello or frame in v4. V6 uses authenticated idle
 PING/PONG every 500 ms and expires after two seconds without a fresh idle
 control ID or committed frame. Active input still uses the 32 ms
 committed-progress watchdog; idle controls cannot sustain held input.
@@ -262,17 +265,20 @@ binary datagrams, stack buffers, direct native OS input calls, immediate
 redundant sends, and a 2 ms replay threshold. It accepts and sustains at least
 120 updates per second; the keepalive period is 8 ms.
 
-V5 decrypts into a reused datagram buffer, stores contacts inline, and uses a
+V6 decrypts into a reused datagram buffer, stores contacts inline, and uses a
 fixed reorder ring. Lane planning and native event encoding reuse buffers
 sized for the maximum contact count, including cancellation. Optional metrics
 use bounded arrival storage and allocate no histograms when disabled. Android
 uses independent cipher locks for send and receive, reusable control buffers,
-and a retained-frame ring with deadline waits and fair 2 ms repairs. Network
+and a retained-frame ring with deadline waits and fair 2 ms repairs. It packs
+frames that are already queued into one record and never waits to fill one. Network
 interface checks run on watchdog workers, outside gameplay send/receive work.
 
-V5 sends two ACK copies when ordered OS acceptance advances, and one immediate
-ACK when a logical duplicate or ordering hole leaves progress unchanged. This
-reduces redundant feedback without delaying ACKs or changing phone repair timing.
+V6 sends one ACK per received record: when ordered OS acceptance advances, and
+also when a logical duplicate or ordering hole leaves progress unchanged, unless
+that record is the immediate twin of the identical ACK sent under 1 ms earlier.
+Its selective bitmap stops repairs of frames the host already holds. A lost ACK
+costs one 2 ms repair, never input latency, and ACKs are never delayed.
 Android 10+ Wi-Fi bindings request a low-latency Wi-Fi lock during pairing and
 play, including rests, and release it with the binding. USB does not acquire it.
 The Windows native host requests HighQoS to disable execution-speed throttling
@@ -342,4 +348,4 @@ gradlew.bat assembleRelease
 
 On the phone, enable USB tethering before launching the host. The app uses
 normal `INTERNET`, `ACCESS_NETWORK_STATE`, and `ACCESS_WIFI_STATE` permissions,
-plus `WAKE_LOCK` for the v5 Wi-Fi low-latency request.
+plus `WAKE_LOCK` for the Wi-Fi low-latency request.

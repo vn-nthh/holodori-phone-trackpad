@@ -1,7 +1,7 @@
 # Android companion app
 
 This module is the phone side of Holodori Phone Trackpad. It defaults to
-authenticated protocol v5 over an explicitly selected USB-tether or
+authenticated protocol v6 over an explicitly selected USB-tether or
 Wi-Fi/local-network path. First use compares an eight-step six-lane pattern and
 later sessions authenticate the remembered host with Noise IK. Protocol v4
 remains available only through the explicit legacy USB option.
@@ -9,8 +9,8 @@ remains available only through the explicit legacy USB option.
 Android's normal USB tethering feature provides the physical USB path; neither
 transport needs USB debugging, root, a custom driver, location, SSID/BSSID
 access, or nearby-network scanning. See
-[`../PROTOCOL_V5.md`](../PROTOCOL_V5.md) and the
-[`../PROTOCOL_V5_TEST_VECTORS.md`](../PROTOCOL_V5_TEST_VECTORS.md) byte vectors.
+[`../PROTOCOL_V6.md`](../PROTOCOL_V6.md) and the
+[`../PROTOCOL_V6_TEST_VECTORS.md`](../PROTOCOL_V6_TEST_VECTORS.md) byte vectors.
 
 ## Build
 
@@ -45,11 +45,11 @@ settings are unsigned; debug builds continue to use the normal debug key.
 Legacy-v4 discovery deliberately excludes normal Wi-Fi, cellular, VPN, and
 upstream Ethernet networks. It accepts an `HPTD` acknowledgement only from a
 selected USB-tether subnet, validates the advertised port, and pins the first
-host socket address for that session. V5 instead confines discovery to the
+host socket address for that session. The authenticated protocol instead confines discovery to the
 transport selected before Pair or Start; its Wi-Fi path must be a physical
 Wi-Fi `Network`, never cellular or a VPN.
 
-On Android 15 and newer, v5 also recognizes USB tethering exposed as a
+On Android 15 and newer, the authenticated protocol also recognizes USB tethering exposed as a
 `TRANSPORT_USB` / `NET_CAPABILITY_LOCAL_NETWORK` network and binds the socket
 to that exact Android `Network`. Older devices retain the USB interface
 fallback. An upstream USB network or a VPN is not a tether candidate, and a
@@ -82,16 +82,22 @@ documented fallback for unknown pressure is 1.0 during contact:
 [Android touch device calibration](https://source.android.com/docs/core/interaction/input/touch-devices#pressure-field).
 Install phone and host v0.5.1-alpha3 or newer together before enabling the filter.
 
-## Protocol v5 behavior
+## Protocol v6 behavior
 
-Every touch snapshot is carried by one HPT5 ChaCha20-Poly1305 datagram. Android
-sends two independently encrypted immediate copies; repair begins after 2 ms
-with a fresh packet number and nonce. The host reorders by logical sequence,
-submits each snapshot exactly once, and sends an authenticated cumulative ACK
-only after the OS sink accepts it. A 1,024-packet replay window rejects reused
-packet numbers without allowing a bad tag to consume a window position.
+Touch snapshots travel in HPT6 ChaCha20-Poly1305 records. A record carries one
+snapshot, or several consecutive snapshots that were already queued together;
+the writer never waits to fill one. Android sends two independently encrypted
+immediate copies of each new snapshot; repair begins after 2 ms with a fresh
+packet number and nonce. The host reorders by logical sequence, submits each
+snapshot exactly once, and sends one authenticated ACK only after the OS sink
+accepts it. The ACK's selective bitmap names snapshots the host already holds
+behind a gap, and Android stops repairing those. A 1,024-packet replay window
+rejects reused packet numbers without allowing a bad tag to consume a window
+position. The host's Noise IK reply carries the session parameters, so input
+starts the moment the handshake completes.
 
-Stationary holds use acknowledged 8 ms full-state heartbeats. A 64 ms pending
+Stationary holds use acknowledged 8 ms full-state heartbeats, sent as a single
+copy. A 64 ms pending
 boundary abandons the entire session, performs a fresh IK handshake and
 session-start `CANCEL`, then reconstructs only the latest still-held snapshot.
 Idle sessions exchange authenticated PING/PONG every 500 ms and expire after
@@ -140,7 +146,7 @@ and subnet confinement are its trust boundary, so it is USB-only and requires
 an explicit legacy selection.
 
 See [`../PROTOCOL_V4.md`](../PROTOCOL_V4.md) for the byte layout and
-acknowledgement semantics, and [`../PROTOCOL_V5.md`](../PROTOCOL_V5.md) for the
+acknowledgement semantics, and [`../PROTOCOL_V6.md`](../PROTOCOL_V6.md) for the
 default authenticated transport.
 
 The JVM tests exercise replay authentication, independent send/receive locks,

@@ -1,4 +1,4 @@
-# Packaging protocol-v5 builds
+# Packaging protocol-v6 builds
 
 Set up the persistent [Android release signing key](ANDROID_SIGNING.md) before
 building a distributable APK or bundle. `build-signed-apk.ps1 -InitializeKey`
@@ -30,7 +30,7 @@ real Windows PC that:
 
 - pairing and remembered sessions stay on the explicitly selected USB or
   local-network interface;
-- V5 never accepts legacy-v4 gameplay on the Wi-Fi listener;
+- protocol v6 never accepts legacy-v4 gameplay on the Wi-Fi listener;
 - the launcher shows Waiting, Connected, Recovering, and Stopping;
 - killing the host during local-only mode leaves a recovery snapshot, and the
   next launcher start restores it (requesting elevation when required);

@@ -1,7 +1,7 @@
 # Doritrack diagnostics, schema 2
 
 Diagnostics observe gameplay; they never control delivery, ACK progress, replay,
-watchdogs, pairing, input ownership, or an OS sink. V5 wire records, authentication,
+watchdogs, pairing, input ownership, or an OS sink. Wire records, authentication,
 nonce allocation, immediate copies, 2 ms repair, MTU limits and failure boundaries
 are unchanged. Keyboard mode remains the gameplay baseline.
 
@@ -45,7 +45,7 @@ python tools/generate_diagnostic_examples.py --java-home .android-sdk/jdk17/jdk-
 ## Pipeline audit and ownership
 
 The audit covered `TrackpadView`, `TouchTransport`, both Android transports,
-`SendQueue`, `NetworkBinding`, V5 encryption/control handling, Rust datagram
+`SendQueue`, `NetworkBinding`, encryption/control handling, Rust datagram
 receive/authentication, `OrderedFrames`, `input::commit_ready`, keyboard planning
 and partial native submission, the touch sink, the controller/report lifecycle,
 and pairing quality reporting.
@@ -65,7 +65,7 @@ and pairing quality reporting.
 | Per-frame histograms on the native receive thread | The input thread publishes numeric events. Worker owns histograms, correlation, clock model, incident classification and storage. Report formatting and I/O occur after Stop. |
 
 Legacy USB v4 uses the new host reporting path and local clock caveats, including
-parser counters. Android's new sender telemetry is V5-only; a v4 report must not
+parser counters. Android's new sender telemetry covers only the authenticated protocol; a v4 report must not
 be interpreted as having sender-side coverage. Existing v4 CRC/interface behavior
 is preserved.
 
@@ -107,7 +107,7 @@ Heartbeats may inform the clock model, but their forward timing is in separate
 control-frame distributions, never gameplay latency/cadence.
 
 Event-to-sink intervals add the phone-local event-to-winning-attempt duration and
-host-local receive-to-sink duration to these forward bounds. Since V5 carries no
+host-local receive-to-sink duration to these forward bounds. Since the protocol carries no
 Android timestamp-resolution field, the host conservatively allows 1 ms event
 quantization plus the stated phone rate allowance. The report separates:
 
@@ -174,7 +174,7 @@ The worker's 4 ms sleep only schedules diagnostics. It never batches, polls for,
 or delays gameplay delivery. Disabled host diagnostics allocate no storage and
 spawn no worker. Android diagnostics default off. The enabled writer adds one
 conditional post-send timestamp; existing callback, enqueue, selection, receive
-and sink-ready timestamps are reused. No V5 extension, telemetry datagram, live
+and sink-ready timestamps are reused. No protocol extension, telemetry datagram, live
 JSON, network probe, UI update, file write or synchronous analysis is added to
 gameplay. Histograms/counts cover all **observed** records, not just retained
 incident context. If recording overflows, whole-run coverage is explicitly

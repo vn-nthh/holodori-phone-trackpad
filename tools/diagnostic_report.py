@@ -18,7 +18,7 @@ MAX_BYTES = 64 * 1024 * 1024
 MAX_EVENTS = 300_000
 BUDGET = 8_333_333
 ANDROID_REASONS = {
-    1: "Android dispatch timestamp age", 2: "V5 repair attempted (forward or ACK loss possible)",
+    1: "Android dispatch timestamp age", 2: "Repair attempted (forward or ACK loss possible)",
     4: "Android queue/send/repair deadline budget", 8: "Android seal/socket send failed",
     16: "sender event-to-ACK budget (return path included)", 32: "invalid future ACK",
     64: "frame discarded/not queued or watchdog expired", 128: "authenticated session failed",

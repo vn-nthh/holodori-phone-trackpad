@@ -1,5 +1,9 @@
 # Protocol V5 test vectors
 
+> **Status:** these vectors describe the published v0.5.x builds. The current
+> source implements [protocol v6](PROTOCOL_V6_TEST_VECTORS.md); the test code
+> named below now asserts the v6 vectors.
+
 These vectors freeze the byte-level interoperability contract between the Rust
 host and Android implementations. All integers in protocol headers are little
 endian, all hexadecimal strings are contiguous bytes, and all private keys in

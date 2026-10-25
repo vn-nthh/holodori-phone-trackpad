@@ -103,7 +103,7 @@ touches after reconnection.
 The tool sends normal keyboard input to the PC. It does not open, read, or
 change the game process.
 
-Protocol V5 authenticates the paired devices and encrypts input. The first-use
+Protocol v6 authenticates the paired devices and encrypts input. The first-use
 lane pattern must match, and pairing requires approval on the PC. Allow the
 controller through the firewall on your selected USB or private local network.
 Use a trusted PC and keep the UDP listener off public networks. Legacy protocol
@@ -111,8 +111,9 @@ v4 is available only through the explicit USB option and has no authenticated
 pairing.
 
 Developers can read the [architecture guide](EXPERIMENTAL_ARCHITECTURE.md) and
-[protocol v5 specification](PROTOCOL_V5.md) and
-[interoperability vectors](PROTOCOL_V5_TEST_VECTORS.md) for the shipping transport.
+[protocol v6 specification](PROTOCOL_V6.md) and
+[interoperability vectors](PROTOCOL_V6_TEST_VECTORS.md) for the current transport.
+[Protocol v5](PROTOCOL_V5.md) documents the published v0.5.x builds.
 The [protocol v4 specification](PROTOCOL_V4.md) documents the legacy USB mode.
 
 ## Controller options
@@ -262,7 +263,7 @@ cargo test --manifest-path native-host/Cargo.toml --all-targets
 
 See the [Linux setup guide](LINUX_SETUP.md),
 [architecture guide](EXPERIMENTAL_ARCHITECTURE.md), and
-[protocol v5 specification](PROTOCOL_V5.md) for current source-build details.
+[protocol v6 specification](PROTOCOL_V6.md) for current source-build details.
 The [protocol v4 specification](PROTOCOL_V4.md) documents the published v0.4.x
 transport and the explicit legacy migration mode.
 

@@ -139,8 +139,8 @@ Copy-Item (Join-Path $ProjectRoot "packaging\experimental\README.txt") $BundleDi
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-touch.cmd") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "packaging\experimental\run-keys.cmd") $BundleDir
 Copy-Item (Join-Path $ProjectRoot "EXPERIMENTAL_ARCHITECTURE.md") $DocsDir
-Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V5.md") $DocsDir
-Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V5_TEST_VECTORS.md") $DocsDir
+Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V6.md") $DocsDir
+Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V6_TEST_VECTORS.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "PROTOCOL_V4.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "LATENCY_VALIDATION.md") $DocsDir
 Copy-Item (Join-Path $ProjectRoot "DIAGNOSTICS.md") $DocsDir

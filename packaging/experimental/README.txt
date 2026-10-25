@@ -1,7 +1,7 @@
 HOLODORI LOSSLESS TOUCH - AUTHENTICATED LOCAL UDP
 =================================================
 
-This bundle defaults to authenticated protocol v5 over an explicitly selected
+This bundle defaults to authenticated protocol v6 over an explicitly selected
 USB-tether or Wi-Fi/local-network path. USB uses Android's normal tethering
 network and Windows' inbox RNDIS driver; Wi-Fi requires the phone and PC on the
 same private subnet. Legacy protocol v4 is available only as an explicit,
@@ -23,7 +23,7 @@ Start the Windows app:
   2. Choose USB or Wi-Fi / local network on both the phone and host.
   3. Press Pair on both. Replicate all eight numbered host lanes on the phone.
      Approve on the host only while the real phone says "Pattern matched".
-  4. Set the lane keys if needed. V5 uses UDP port 42825 only on the selected
+  4. Set the lane keys if needed. Protocol v6 uses UDP port 42825 only on the selected
      interface.
   5. Leave "Save latency report when stopped" checked unless you do not want
      a report.
@@ -74,7 +74,7 @@ Connection diagnostics:
     folder, or paste this path into File Explorer. Nothing is formatted, sorted,
     or written mid-play. Reports stay here when the app folder is upgraded.
     Older releases left reports under Windows\Logs in their extracted folder.
-  - V5 and explicit legacy v4 use fixed UDP port 42825. V4 never runs on the
+  - Protocol v6 and explicit legacy v4 use fixed UDP port 42825. V4 never runs on the
     Wi-Fi listener. The 8.333 ms 120 Hz warning budget is applied automatically.
 
 Metrics include:
@@ -97,7 +97,7 @@ Safety and scope:
     drop queued gameplay and require fresh Noise IK plus session-start CANCEL,
     so old input is not replayed late. Duplicate controls do not hide a stall.
 
-See Docs\EXPERIMENTAL_ARCHITECTURE.md, Docs\PROTOCOL_V5.md, and
-Docs\PROTOCOL_V5_TEST_VECTORS.md for current details. PROTOCOL_V4.md documents
+See Docs\EXPERIMENTAL_ARCHITECTURE.md, Docs\PROTOCOL_V6.md, and
+Docs\PROTOCOL_V6_TEST_VECTORS.md for current details. PROTOCOL_V4.md documents
 the explicit legacy migration mode.
 Verify every packaged file against SHA256SUMS.txt.

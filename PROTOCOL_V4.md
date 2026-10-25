@@ -1,6 +1,7 @@
 # Holodori lossless touch protocol v4
 
-> **Implementation status:** [protocol v5](PROTOCOL_V5.md) is the default
+> **Implementation status:** the authenticated protocol
+> ([v6](PROTOCOL_V6.md), [v5](PROTOCOL_V5.md) in v0.5.x) is the default
 > transport from v0.5.0. This USB-only protocol remains the exact reference for
 > the published v0.4.x builds, the explicitly selected legacy mode, and its
 > migration tests.

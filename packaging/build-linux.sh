@@ -202,8 +202,8 @@ cp "${PROJECT_ROOT}/packaging/experimental/run-keys.sh" "${BUNDLE_DIR}/"
 chmod +x "${LINUX_DIR}/holodori-native-host" "${BUNDLE_DIR}/HolodoriUsbController" "${BUNDLE_DIR}/run-keys.sh"
 cp "${PROJECT_ROOT}/EXPERIMENTAL_ARCHITECTURE.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/LINUX_SETUP.md" "${DOCS_DIR}/"
-cp "${PROJECT_ROOT}/PROTOCOL_V5.md" "${DOCS_DIR}/"
-cp "${PROJECT_ROOT}/PROTOCOL_V5_TEST_VECTORS.md" "${DOCS_DIR}/"
+cp "${PROJECT_ROOT}/PROTOCOL_V6.md" "${DOCS_DIR}/"
+cp "${PROJECT_ROOT}/PROTOCOL_V6_TEST_VECTORS.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/PROTOCOL_V4.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/LATENCY_VALIDATION.md" "${DOCS_DIR}/"
 cp "${PROJECT_ROOT}/DIAGNOSTICS.md" "${DOCS_DIR}/"
@@ -215,7 +215,7 @@ cp "${PROJECT_ROOT}/LICENSE" "${DOCS_DIR}/"
 if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
     ANDROID_OUTPUT_DIR="${BUNDLE_DIR}/Android"
     mkdir -p "${ANDROID_OUTPUT_DIR}"
-    cp "${APK_SRC}" "${ANDROID_OUTPUT_DIR}/Doritrack-v5.apk"
+    cp "${APK_SRC}" "${ANDROID_OUTPUT_DIR}/Doritrack.apk"
 fi
 
 BRANCH="$(git -C "${PROJECT_ROOT}" branch --show-current)"
@@ -266,5 +266,5 @@ git -C "${PROJECT_ROOT}" diff --check
 echo "Bundle: ${BUNDLE_DIR}"
 echo "Archive: ${ARCHIVE_PATH}"
 if [[ "${BUILD_ANDROID}" -eq 1 ]]; then
-    echo "Android package: ${ANDROID_OUTPUT_DIR}/Doritrack-v5.apk"
+    echo "Android package: ${ANDROID_OUTPUT_DIR}/Doritrack.apk"
 fi

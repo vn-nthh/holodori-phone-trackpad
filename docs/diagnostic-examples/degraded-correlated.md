@@ -17,7 +17,7 @@ Clustered incidents: 3. Retained frame records: 110.
 
 ## Incident 1 — session 0000000000000007, sequences 500–501
 
-V5 repair attempted (forward or ACK loss possible); bounded_event_to_sink_budget_violation; forward_transport_or_endpoint_stall_bounded; protocol_ordering_hole_loss_or_reorder; sender event-to-ACK budget (return path included)
+Repair attempted (forward or ACK loss possible); bounded_event_to_sink_budget_violation; forward_transport_or_endpoint_stall_bounded; protocol_ordering_hole_loss_or_reorder; sender event-to-ACK budget (return path included)
 
 - android: {"id": "degraded-android.txt:1", "at_phone_ns": 5001330000, "last_anomaly_phone_ns": 5012200000, "session": 7, "first_sequence": 500, "last_sequence": 500, "recovery_to_later_ack_ns": 10870000, "evidence_omitted": 0, "post_context_complete": true}
 - host: {"id": "degraded-host.json:1", "at_host_ns": 4008000000, "last_anomaly_host_ns": 4012050000, "session": 7, "first_sequence": 501, "last_sequence": 500, "recovery_to_os_commit_ns": 4100000, "evidence_omitted": 0, "fresh_session_commit_ns": null, "reconstructed_snapshot_ns": null, "affected_frame_keys": [[7, 500], [7, 501]], "post_context_complete": true}

@@ -107,7 +107,7 @@ can show it.
 ## Start a play session
 
 1. Unpack the Linux bundle.
-2. Install `Android/Doritrack-v5.apk` on the phone if the bundle
+2. Install `Android/Doritrack.apk` on the phone if the bundle
    includes it. Otherwise use the separately supplied Android APK.
 3. Run `./HolodoriUsbController` from the bundle directory and open the phone
    app.
@@ -183,7 +183,7 @@ profile by itself.
 
 ## Supported tether and pairing limits
 
-Protocol v5 authenticates the paired phone before any frame can reach Linux
+The authenticated protocol (v6) verifies the paired phone before any frame can reach Linux
 `uinput`. Its USB listener still accepts only Android tether interfaces backed
 by the kernel's `rndis_host` driver; generic USB Ethernet and NCM adapters are
 rejected. Wi-Fi/local-network mode is separately selected, confines the socket
@@ -257,5 +257,5 @@ also turn the option off, but the PC may then use the phone for internet access.
 
 - [Experimental architecture](EXPERIMENTAL_ARCHITECTURE.md)
 - [Protocol v4 specification](PROTOCOL_V4.md)
-- [Protocol v5 specification](PROTOCOL_V5.md)
-- [Protocol v5 interoperability vectors](PROTOCOL_V5_TEST_VECTORS.md)
+- [Protocol v6 specification](PROTOCOL_V6.md)
+- [Protocol v6 interoperability vectors](PROTOCOL_V6_TEST_VECTORS.md)

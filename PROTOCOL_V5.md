@@ -1,13 +1,19 @@
 # Holodori lossless touch protocol v5
 
-Protocol v5 is the authenticated transport implemented by Doritrack since
-v0.5.0. It adds
+> **Implementation status:** superseded by [protocol v6](PROTOCOL_V6.md) from
+> v0.6.0. This document remains the exact reference for the published v0.5.x
+> builds. Source file and class names it mentions (`v5_host.rs`,
+> `V5SendQueue`) were renamed to version-neutral names (`secure_host.rs`,
+> `SendQueue`) in v0.6.
+
+Protocol v5 is the authenticated transport implemented by Doritrack
+v0.5.0 through v0.5.2. It adds
 explicit USB or Wi-Fi/local-network selection, first-use pairing through the
 six phone lanes, authenticated encryption, transport-independent remembered
 peers, Wi-Fi path measurement, and a thumb-friendly phone layout without
 weakening the existing lossless input rules.
 
-This specification is normative for current protocol work. Published v0.4.x
+This specification was normative for the v0.5.x releases. Published v0.4.x
 releases implement [protocol v4](PROTOCOL_V4.md). Version 5 is not
 wire-compatible with version 4. A v5 implementation MUST NOT silently
 downgrade, MUST NOT accept v4 gameplay on a Wi-Fi listener, and MUST treat a

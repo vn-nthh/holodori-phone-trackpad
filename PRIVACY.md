@@ -48,9 +48,9 @@ local network. Device discovery may use broadcasts on that local network.
 Controller input is sent between your phone and computer, not through a
 CattWorks server.
 
-The default protocol V5 authenticates paired devices and encrypts session
+The default authenticated protocol (v6) authenticates paired devices and encrypts session
 traffic. Pairing credentials are protected using operating-system security
-features. The optional legacy USB protocol does not provide V5 authentication
+features. The optional legacy USB protocol does not provide this authentication
 or encryption.
 
 On Android 10 and newer, the app uses the `WAKE_LOCK` permission to request
