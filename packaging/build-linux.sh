@@ -237,7 +237,7 @@ fi
     echo "working_tree_dirty=${DIRTY}"
     echo "transport=explicit-usb-tether-or-local-network-udp"
     echo "udp_port=42825"
-    echo "protocol=5"
+    echo "protocol=6"
     echo "legacy_protocol=4-usb-explicit"
     echo "linux_arch=x86_64"
     echo "linux_launcher=tauri"

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Name = "Doritrack-protocol-v5-dev",
+    [string]$Name = "Doritrack-protocol-v6-dev",
     [string]$CargoHome = "F:\.cargo",
     [string]$JavaHome = "",
     [string]$AndroidSdk = ""
@@ -57,7 +57,7 @@ try {
         secure_host::gameplay_tests::production_loopback_latency `
         -- --ignored --exact --nocapture --test-threads=1
     if ($LASTEXITCODE -ne 0) {
-        throw "Protocol-v5 loopback recovery check failed."
+        throw "Protocol-v6 loopback recovery check failed."
     }
     cargo build --locked --release
     if ($LASTEXITCODE -ne 0) {
@@ -163,7 +163,7 @@ $BuildInfo = @(
     "working_tree_dirty=$Dirty",
     "transport=explicit-usb-tether-or-local-network-udp",
     "udp_port=42825",
-    "protocol=5",
+    "protocol=6",
     "legacy_protocol=4-usb-explicit",
     "windows_arch=x86_64",
     "windows_crt=static",
