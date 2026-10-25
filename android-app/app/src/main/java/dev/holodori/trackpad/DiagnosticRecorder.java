@@ -221,7 +221,7 @@ final class DiagnosticRecorder {
         File summary = new File(directory, name + ".txt.tmp");
         File trace = new File(directory, name + ".csv.tmp");
         try (PrintWriter out = new PrintWriter(summary, "UTF-8")) {
-            out.println("Doritrack Android diagnostic report schema=2 protocol=5");
+            out.println("Doritrack Android diagnostic report schema=2 protocol=" + SecureProtocol.VERSION);
             out.println(environment);
             out.println("observed=" + observed + " dropped=" + dropped() + " incidents=" + incidents
                     + " omitted_incident_triggers=" + omittedIncidents + " evidence_omitted=" + omittedEvidence

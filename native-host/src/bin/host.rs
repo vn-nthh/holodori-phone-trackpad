@@ -20,11 +20,12 @@ use holodori_native_host::protocol::{
     CONTROL_ACK, CONTROL_HELLO, FrameParser, OrderedFrames, ProtocolError, TouchFrame,
     encode_control,
 };
-use holodori_native_host::secure::TransportKind;
+use holodori_native_host::secure::{PROTOCOL_VERSION, TransportKind};
 use holodori_native_host::secure_host::{
-    PairCommand, PairEvent, SecureConnection, SecureHostError, accept_remembered, pair,
-    serve_gameplay,
+    PairCommand, PairEvent, SecureHostError, accept_remembered, pair, serve_gameplay,
+    session_parameters,
 };
+use holodori_native_host::tether::TetherBinding;
 #[cfg(windows)]
 use holodori_native_host::tether_policy::{
     RecoveryOutcome, TetherRoutePolicy, recover_orphaned_policy,
@@ -241,7 +242,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     // Held for the controller's lifetime, before diagnostics read it back.
     let _timer_resolution = platform::request_timer_resolution();
     if !options.legacy_v4 {
-        let result = run_v5_controller(&options);
+        let result = run_secure_controller(&options);
         SHUTDOWN_COMPLETE.store(true, Ordering::Release);
         return result;
     }
@@ -284,12 +285,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         #[cfg(windows)]
         if let Some(policy) = tether_policy.as_mut() {
             policy.refresh().map_err(|error| {
-                let hint = if error.kind() == io::ErrorKind::PermissionDenied {
-                    "; run the launcher as administrator"
-                } else {
-                    ""
-                };
-                format!("could not enable local-only USB tethering: {error}{hint}")
+                format!(
+                    "could not enable local-only USB tethering: {error}{}",
+                    administrator_hint(&error)
+                )
             })?;
         }
         if sink.has_active_input() {
@@ -404,12 +403,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn run_pairing_mode(options: &Options) -> Result<(), Box<dyn Error>> {
     let transport = options
         .transport
-        .ok_or("--transport usb|wifi is required for protocol v5 pairing")?;
+        .ok_or("--transport usb|wifi is required for pairing")?;
     let commands = install_pair_command_thread()?;
     let status = StatusReporter::start();
     status.publish(HostPhase::Pairing);
     println!(
-        "Holodori native host - protocol v5 pairing over {}",
+        "Holodori native host - protocol v6 pairing over {}",
         transport.label()
     );
     println!("HPT_PAIR WINDOW 60");
@@ -441,13 +440,14 @@ fn run_pairing_mode(options: &Options) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
+fn run_secure_controller(options: &Options) -> Result<(), Box<dyn Error>> {
     let transport = options
         .transport
-        .ok_or("--transport usb|wifi is required for protocol v5")?;
+        .ok_or("--transport usb|wifi is required for protocol v6")?;
     let mut sink = build_sink(options)?;
     let lane_count = sink.lane_count(options);
-    let mut metrics = HostMetrics::new(options.metrics, options.warning_budget_ms, 5);
+    let mut metrics =
+        HostMetrics::new(options.metrics, options.warning_budget_ms, PROTOCOL_VERSION);
     metrics.configure(transport.label(), platform::diagnostic_environment());
     #[cfg(windows)]
     let mut tether_policy =
@@ -461,7 +461,7 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
     install_exit_command_thread()?;
     let status = StatusReporter::start();
     println!(
-        "Holodori native host - authenticated UDP protocol v5 over {}",
+        "Holodori native host - authenticated UDP protocol v6 over {}",
         transport.label()
     );
     println!(
@@ -476,12 +476,10 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
         #[cfg(windows)]
         if let Some(policy) = tether_policy.as_mut() {
             policy.refresh().map_err(|error| {
-                let hint = if error.kind() == io::ErrorKind::PermissionDenied {
-                    "; run the launcher as administrator"
-                } else {
-                    ""
-                };
-                format!("could not enable local-only USB tethering: {error}{hint}")
+                format!(
+                    "could not enable local-only USB tethering: {error}{}",
+                    administrator_hint(&error)
+                )
             })?;
         }
         if sink.has_active_input()
@@ -493,8 +491,8 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
         }
         status.publish(HostPhase::Waiting);
         let deadline = Instant::now() + Duration::from_secs(1);
-        let mut connection = match accept_remembered(transport, options.udp_port, deadline) {
-            Ok(connection) => connection,
+        let pending = match accept_remembered(transport, options.udp_port, deadline) {
+            Ok(pending) => pending,
             Err(SecureHostError::TimedOut(_)) => continue,
             Err(SecureHostError::NotPaired) => {
                 return Err("no paired phone; use Pair before Start".into());
@@ -505,37 +503,44 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
                 continue;
             }
         };
-        verify_v5_local_only(&connection, options.local_only_tether)?;
+        // Vet the route before answering IK: the reply starts the session on
+        // the phone, so a path refused here must never see one.
+        verify_local_only_routes(pending.tether_binding(), options.local_only_tether)?;
         #[cfg(windows)]
         if let Some(policy) = tether_policy.as_mut() {
-            let binding = connection
+            let binding = pending
                 .tether_binding()
-                .ok_or("local-only tethering requires the selected protocol-v5 USB transport")?;
+                .ok_or("local-only tethering requires the selected USB transport")?;
             policy
-                .protect_peer(connection.peer(), binding)
+                .protect_peer(pending.peer(), binding)
                 .map_err(|error| {
-                    let hint = if error.kind() == io::ErrorKind::PermissionDenied {
-                        "; run the launcher as administrator"
-                    } else {
-                        ""
-                    };
                     format!(
-                        "could not protect the USB tether route for {}: {error}{hint}",
-                        connection.peer()
+                        "could not protect the USB tether route for {}: {error}{}",
+                        pending.peer(),
+                        administrator_hint(&error)
                     )
                 })?;
         }
-        if let Err(error) = connection.revalidate_interface() {
+        if let Err(error) = pending.revalidate_interface() {
             status.publish(HostPhase::Recovering);
             eprintln!(
                 "selected interface changed after authentication: {error}; retrying fresh IK"
             );
             continue;
         }
+        let parameters = session_parameters(lane_count);
+        let mut connection = match pending.complete(parameters, metrics.clock_nanos(Instant::now()))
+        {
+            Ok(connection) => connection,
+            Err(error) => {
+                eprintln!("{error}; retrying authenticated discovery");
+                continue;
+            }
+        };
         metrics.begin_connection();
         status.publish(HostPhase::Connected);
         println!(
-            "Authenticated v5 link ready from {} (connection {:016x})",
+            "Authenticated v6 link ready from {} (connection {:016x})",
             connection.peer(),
             connection.connection_id()
         );
@@ -580,7 +585,7 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
 fn install_pair_command_thread() -> io::Result<Receiver<PairCommand>> {
     let (sender, receiver) = channel();
     thread::Builder::new()
-        .name("v5 pairing command".to_owned())
+        .name("pairing command".to_owned())
         .spawn(move || {
             let stdin = io::stdin();
             for line in stdin.lock().lines() {
@@ -606,17 +611,24 @@ fn install_pair_command_thread() -> io::Result<Receiver<PairCommand>> {
     Ok(receiver)
 }
 
+#[cfg(windows)]
+fn administrator_hint(error: &io::Error) -> &'static str {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        "; run the launcher as administrator"
+    } else {
+        ""
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn verify_v5_local_only(
-    connection: &SecureConnection,
+fn verify_local_only_routes(
+    binding: Option<&TetherBinding>,
     local_only_tether: bool,
 ) -> Result<(), Box<dyn Error>> {
     if !local_only_tether {
         return Ok(());
     }
-    let binding = connection
-        .tether_binding()
-        .ok_or("local-only tethering requires the selected USB transport")?;
+    let binding = binding.ok_or("local-only tethering requires the selected USB transport")?;
     let (ipv4, ipv6) = binding.default_routes_present()?;
     if ipv4 || ipv6 {
         return Err(
@@ -627,8 +639,8 @@ fn verify_v5_local_only(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn verify_v5_local_only(
-    _connection: &SecureConnection,
+fn verify_local_only_routes(
+    _binding: Option<&TetherBinding>,
     _local_only_tether: bool,
 ) -> Result<(), Box<dyn Error>> {
     Ok(())
@@ -1073,7 +1085,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         }
         options.transport = Some(TransportKind::Usb);
     } else if options.transport.is_none() {
-        return Err("protocol v5 requires --transport usb or --transport wifi".into());
+        return Err("protocol v6 requires --transport usb or --transport wifi".into());
     }
     if options.local_only_tether && options.transport != Some(TransportKind::Usb) {
         return Err("--local-only-tether requires --transport usb".into());

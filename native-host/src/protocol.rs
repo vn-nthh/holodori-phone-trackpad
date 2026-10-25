@@ -398,6 +398,19 @@ impl OrderedFrames {
             .is_some_and(|frame| frame.sequence == sequence)
     }
 
+    /// Selective ACK: bit `i` set means frame `expected + 1 + i` is buffered
+    /// behind the missing expected frame, so the sender need not repair it.
+    pub fn selective_ack(&self) -> u64 {
+        (0..u64::BITS).fold(0, |bits, offset| {
+            let sequence = self.next_sequence.wrapping_add(1 + u64::from(offset));
+            if self.contains_sequence(sequence) {
+                bits | 1 << offset
+            } else {
+                bits
+            }
+        })
+    }
+
     pub fn push(&mut self, frame: TouchFrame) {
         if self.requires_session_start && !frame.session_start() {
             return;

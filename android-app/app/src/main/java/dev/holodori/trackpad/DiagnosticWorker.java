@@ -23,7 +23,7 @@ final class DiagnosticWorker {
         NetworkBinding current();
     }
 
-    private static final String TAG = "HolodoriUDP5";
+    private static final String TAG = "HolodoriSecure";
     private static final long ENVIRONMENT_INTERVAL_NANOS = 2_000_000_000L;
     private static final int MAX_REPORT_FILES = 16;
 
@@ -63,7 +63,7 @@ final class DiagnosticWorker {
     void start() {
         if (thread != null) return;
         stopping = false;
-        thread = new Thread(this::run, "V5 diagnostic analysis");
+        thread = new Thread(this::run, "Diagnostic analysis");
         thread.start();
     }
 

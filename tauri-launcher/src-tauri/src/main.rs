@@ -181,7 +181,7 @@ fn start_host(
         state.paired =
             holodori_native_host::credentials::is_paired().map_err(|error| error.to_string())?;
         if !state.paired {
-            return Err("Pair this host and phone before starting protocol v5.".to_owned());
+            return Err("Pair this host and phone before starting.".to_owned());
         }
     }
     ensure_route_recovery(&mut state)?;

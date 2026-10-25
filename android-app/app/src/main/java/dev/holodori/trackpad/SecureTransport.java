@@ -24,7 +24,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-/** Authenticated protocol-v5 transport for pairing and lossless touch input. */
+/** Authenticated protocol-v6 transport for pairing and lossless touch input. */
 final class SecureTransport implements TouchTransport {
     interface PairingListener {
         void onPairingStatus(String message);
@@ -40,7 +40,7 @@ final class SecureTransport implements TouchTransport {
         void onPairingFailed(String message);
     }
 
-    private static final String TAG = "HolodoriUDP5";
+    private static final String TAG = "HolodoriSecure";
     private static final String XX_NAME = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
     private static final String IK_NAME = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
     private static final long DISCOVERY_INTERVAL_NANOS = 100_000_000L;
@@ -60,7 +60,7 @@ final class SecureTransport implements TouchTransport {
     private static final int INITIAL_SEND_COPIES = 2;
     private static final int DEFAULT_HOST_WINDOW = 64;
     private static final int MAX_HOST_WINDOW = 256;
-    private static final int MAX_TOUCH_PAYLOAD = SecureProtocol.TOUCH_PAYLOAD_HEADER_SIZE
+    private static final int MAX_TOUCH_FRAME = SecureProtocol.TOUCH_FRAME_HEADER_SIZE
             + TouchSample.MAX_CONTACTS * SecureProtocol.CONTACT_SIZE;
     private static final int WRITER_READY_TIMEOUT_MILLIS = 1_000;
 
@@ -72,7 +72,7 @@ final class SecureTransport implements TouchTransport {
     private final SecureRandom random = new SecureRandom();
     private final Object lifecycleLock = new Object();
     private final Object queueLock = new Object();
-    private final SendQueue unacknowledged = new SendQueue(MAX_HOST_WINDOW, MAX_TOUCH_PAYLOAD);
+    private final SendQueue unacknowledged = new SendQueue(MAX_HOST_WINDOW, MAX_TOUCH_FRAME);
     private final ArrayBlockingQueue<int[]> submittedPattern = new ArrayBlockingQueue<>(1);
     private final int[] retainedPointerIds = new int[TouchSample.MAX_CONTACTS];
     private final float[] retainedX = new float[TouchSample.MAX_CONTACTS];
@@ -92,7 +92,6 @@ final class SecureTransport implements TouchTransport {
     private Thread writerThread;
     private Thread watchdogThread;
     private Thread pairingThread;
-    private boolean hostReady;
     private boolean sessionStarted;
     private int hostWindow = DEFAULT_HOST_WINDOW;
     private int hostLaneCount = 6;
@@ -150,7 +149,7 @@ final class SecureTransport implements TouchTransport {
             int pairGeneration = ++generation;
             pairingThread = new Thread(
                     () -> pairingLoop(pairGeneration, callback),
-                    "UDP5 secure pairing"
+                    "Secure pairing"
             );
             pairingThread.start();
         }
@@ -195,15 +194,15 @@ final class SecureTransport implements TouchTransport {
             int sessionGeneration = ++generation;
             controlThread = new Thread(
                     traced(() -> controlLoop(sessionGeneration)),
-                    "UDP5 handshake and acknowledgements"
+                    "Secure handshake and ACKs"
             );
             writerThread = new Thread(
                     traced(() -> writerLoop(sessionGeneration, writerReady)),
-                    "UDP5 touch writer"
+                    "Secure touch writer"
             );
             watchdogThread = new Thread(
                     traced(() -> watchdogLoop(sessionGeneration)),
-                    "UDP5 liveness watchdog"
+                    "Secure liveness watchdog"
             );
             controlThread.start();
             writerThread.start();
@@ -213,22 +212,16 @@ final class SecureTransport implements TouchTransport {
             if (!writerReady.await(WRITER_READY_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
                     || !running) {
                 closeInternal(0, false);
-                listener.onConnectionChanged(false, "V5 writer did not become ready");
+                listener.onConnectionChanged(false, "Touch writer did not become ready");
                 return false;
             }
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             closeInternal(0, false);
-            listener.onConnectionChanged(false, "V5 connection interrupted");
+            listener.onConnectionChanged(false, "Connection interrupted");
             return false;
         }
-        listener.onConnectionChanged(
-                false,
-                "Searching for the paired host over "
-                        + (transport == SecureProtocol.TransportKind.WIFI
-                        ? "Wi-Fi / local network"
-                        : "USB tethering")
-        );
+        listener.onConnectionChanged(false, "Searching for the paired host over " + transportLabel());
         return true;
     }
 
@@ -297,7 +290,8 @@ final class SecureTransport implements TouchTransport {
         }
     }
 
-    private void enqueueFrameLocked(
+    /** Queues one frame; returns null, flagging overflow, when the window is full. */
+    private Frame enqueueFrameLocked(
             int action,
             int actionPointerId,
             boolean locked,
@@ -321,18 +315,15 @@ final class SecureTransport implements TouchTransport {
             if (diagnostics != null) recordLocked(DiagnosticRecorder.NOT_QUEUED, callbackNanos, -1,
                     eventNanos, historical ? 1 : 0, 2, unacknowledged.size(), hostWindow, 0, 0, 0);
             queueLock.notifyAll();
-            return;
+            return null;
         }
         long sequence = nextSequence++;
-        int payloadLength = SecureProtocol.TOUCH_PAYLOAD_HEADER_SIZE
+        int payloadLength = SecureProtocol.TOUCH_FRAME_HEADER_SIZE
                 + contactCount * SecureProtocol.CONTACT_SIZE;
         Frame pending = unacknowledged.add(sequence, payloadLength, System.nanoTime());
         ByteBuffer packet = pending.writer;
         packet.putLong(eventNanos);
         packet.putLong(callbackNanos);
-        packet.putLong(0L);
-        packet.putLong(0L);
-        packet.putLong(0L);
         packet.put((byte) action);
         packet.put((byte) (actionPointerId & 0xFF));
         packet.put((byte) contactCount);
@@ -358,51 +349,37 @@ final class SecureTransport implements TouchTransport {
             packet.putShort((short) normalizeUnsigned(pressure[index]));
             packet.putShort((short) normalizeUnsigned(touchMajor[index]));
         }
+        return pending;
     }
 
     private void controlLoop(int sessionGeneration) {
         try {
             NetworkBinding sessionBinding = NetworkBinding.open(context, transport);
             if (!installBinding(sessionGeneration, sessionBinding)) return;
-            SecureProtocol.Channel sessionChannel = establishRemembered(
+            SecureProtocol.HostControl control = new SecureProtocol.HostControl();
+            EstablishedChannel established = establishRemembered(
                     sessionGeneration,
-                    sessionBinding
+                    sessionBinding,
+                    control
             );
-            if (!installChannel(sessionGeneration, sessionChannel)) return;
+            if (!installChannel(sessionGeneration, established.channel)) return;
+            startSession(sessionGeneration, control, established.receivedNanos);
 
-            long helloDeadline = System.nanoTime() + HANDSHAKE_TIMEOUT_NANOS;
             SecureProtocol.RecordHeader header = new SecureProtocol.RecordHeader();
             byte[] controlPayload = new byte[SecureProtocol.CONTROL_PAYLOAD_SIZE];
-            ByteBuffer control = ByteBuffer.wrap(controlPayload).order(ByteOrder.LITTLE_ENDIAN);
             byte[] receiveBytes = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
             DatagramPacket incoming = new DatagramPacket(receiveBytes, receiveBytes.length);
-            while (isGameplayActive(sessionGeneration) && !hostReady) {
-                if (System.nanoTime() >= helloDeadline) {
-                    throw new IOException("Authenticated host HELLO timed out");
-                }
-                boolean received = receiveAuthenticated(
-                        sessionGeneration,
-                        sessionBinding,
-                        sessionChannel,
-                        receiveBytes,
-                        incoming,
-                        header,
-                        controlPayload
-                );
-                if (received) handleHostControl(sessionGeneration, header, control);
-            }
-
             while (isGameplayActive(sessionGeneration)) {
                 boolean received = receiveAuthenticated(
                         sessionGeneration,
                         sessionBinding,
-                        sessionChannel,
+                        established.channel,
                         receiveBytes,
                         incoming,
                         header,
                         controlPayload
                 );
-                if (received) handleHostControl(sessionGeneration, header, control);
+                if (received) handleHostControl(sessionGeneration, header, controlPayload, control);
                 checkHostTimeout(sessionGeneration);
             }
         } catch (Exception error) {
@@ -410,9 +387,25 @@ final class SecureTransport implements TouchTransport {
         }
     }
 
-    private SecureProtocol.Channel establishRemembered(
+    /** A remembered-peer channel and when its IK response arrived. */
+    private static final class EstablishedChannel {
+        final SecureProtocol.Channel channel;
+        final long receivedNanos;
+
+        EstablishedChannel(SecureProtocol.Channel channel, long receivedNanos) {
+            this.channel = channel;
+            this.receivedNanos = receivedNanos;
+        }
+    }
+
+    /**
+     * Runs Noise IK with the paired host. IK message 2 carries the host's session
+     * parameters, decoded into {@code parameters}, so the session starts at once.
+     */
+    private EstablishedChannel establishRemembered(
             int sessionGeneration,
-            NetworkBinding sessionBinding
+            NetworkBinding sessionBinding,
+            SecureProtocol.HostControl parameters
     ) throws Exception {
         CredentialStore.Identity identity = rememberedIdentity();
         if (identity == null || !identity.hasPairedHost()) {
@@ -460,6 +453,7 @@ final class SecureTransport implements TouchTransport {
                 } catch (SocketTimeoutException ignored) {
                     continue;
                 }
+                long receivedNanos = System.nanoTime();
                 InetSocketAddress source = (InetSocketAddress) incoming.getSocketAddress();
                 SecureProtocol.PairEnvelope envelope;
                 try {
@@ -484,14 +478,19 @@ final class SecureTransport implements TouchTransport {
                         payload,
                         0
                 );
-                if (decrypted != 0 || handshake.getAction() != HandshakeState.SPLIT) {
+                if (decrypted != SecureProtocol.SESSION_PARAMETERS_SIZE
+                        || handshake.getAction() != HandshakeState.SPLIT) {
                     throw new IOException("Malformed Noise IK response");
                 }
+                SecureProtocol.decodeHostControl(payload, decrypted, MAX_HOST_WINDOW, parameters);
                 byte[] handshakeHash = handshake.getHandshakeHash().clone();
                 CipherStatePair split = handshake.split();
                 lastHost = source;
                 try {
-                    return new SecureProtocol.Channel(split, handshakeHash);
+                    return new EstablishedChannel(
+                            new SecureProtocol.Channel(split, handshakeHash),
+                            receivedNanos
+                    );
                 } finally {
                     Arrays.fill(handshakeHash, (byte) 0);
                 }
@@ -503,6 +502,43 @@ final class SecureTransport implements TouchTransport {
             Arrays.fill(payload, (byte) 0);
             if (handshake != null) handshake.destroy();
         }
+    }
+
+    /**
+     * Opens a fresh gameplay session: sequence zero is the session-start CANCEL,
+     * then a reconstruction of any held contacts. The host applies sequences in
+     * order, so neither waits for an ACK, and taps meanwhile are sent rather than
+     * collapsing into the retained snapshot.
+     */
+    private void startSession(
+            int sessionGeneration,
+            SecureProtocol.HostControl parameters,
+            long receivedNanos
+    ) {
+        synchronized (queueLock) {
+            if (!isGameplayActive(sessionGeneration)) return;
+            hostWindow = parameters.receiveWindow;
+            hostLaneCount = parameters.laneCount;
+            lastHostSendNanos = parameters.hostSendNanos;
+            lastControlReceiveNanos = receivedNanos;
+            lastIdleResponseNanos = receivedNanos;
+            sessionId = nextSessionId();
+            nextSequence = 0;
+            highestAcknowledged = SecureProtocol.NO_ACK;
+            clearUnacknowledgedLocked();
+            long now = System.nanoTime();
+            enqueueFrameLocked(TouchSample.ACTION_CANCEL, 0, false, true, now, now, false,
+                    0, null, null, null, null, null, null);
+            sessionStarted = true;
+            if (activeContactCount > 0) {
+                activePathStartedNanos = now;
+                lastHeartbeatNanos = now;
+                enqueueRetainedSnapshotLocked(now, false);
+            }
+            queueLock.notifyAll();
+        }
+        listener.onHostLaneCountChanged(hostLaneCount);
+        listener.onConnectionChanged(true, "Authenticated " + transportLabel() + " connected");
     }
 
     private boolean receiveAuthenticated(
@@ -545,86 +581,36 @@ final class SecureTransport implements TouchTransport {
     private void handleHostControl(
             int sessionGeneration,
             SecureProtocol.RecordHeader header,
-            ByteBuffer control
+            byte[] payload,
+            SecureProtocol.HostControl control
     ) throws IOException {
         if (header.messageType == SecureProtocol.HOST_AUTH_ABORT) {
             // The host already released input; restart now rather than after
             // the 64 ms active or 2 s idle watchdog.
             throw new IOException("Host ended the authenticated session");
         }
-        if (header.flags != 0
-                || header.payloadLength != SecureProtocol.CONTROL_PAYLOAD_SIZE) {
+        if (header.flags != 0 || header.payloadLength != SecureProtocol.CONTROL_PAYLOAD_SIZE) {
             throw new IOException("Malformed authenticated host control");
         }
-        control.clear();
-        long window = Integer.toUnsignedLong(control.getInt());
-        int lanes = Byte.toUnsignedInt(control.get());
-        int controlFlags = Byte.toUnsignedInt(control.get());
-        int reserved = Short.toUnsignedInt(control.getShort());
-        long hostSendNanos = control.getLong();
-        if (window < 1 || window > MAX_HOST_WINDOW || lanes != 6
-                || controlFlags != 0 || reserved != 0) {
-            throw new IOException("Invalid authenticated host control values");
+        try {
+            SecureProtocol.decodeHostControl(payload, header.payloadLength, MAX_HOST_WINDOW, control);
+        } catch (SecureProtocol.ProtocolException error) {
+            throw new IOException("Invalid authenticated host control values", error);
         }
-
-        boolean becameReady = false;
         synchronized (queueLock) {
             if (!isGameplayActive(sessionGeneration)) return;
+            if (header.sessionId != sessionId) {
+                throw new IOException("Host control belongs to the wrong session");
+            }
             long receiveNanos = header.receivedNanos;
-            if (header.messageType == SecureProtocol.HOST_HELLO) {
-                if (header.sessionId != 0
-                        || header.logicalId != SecureProtocol.NO_ACK) {
-                    throw new IOException("Invalid authenticated HELLO");
-                }
-                if (!hostReady) {
-                    hostWindow = (int) window;
-                    hostLaneCount = lanes;
-                    hostReady = true;
-                    lastIdleResponseNanos = receiveNanos;
-                    sessionStarted = false;
-                    sessionId = nextSessionId();
-                    nextSequence = 0;
-                    highestAcknowledged = SecureProtocol.NO_ACK;
-                    clearUnacknowledgedLocked();
-                    long now = System.nanoTime();
-                    enqueueFrameLocked(
-                            TouchSample.ACTION_CANCEL,
-                            0,
-                            false,
-                            true,
-                            now,
-                            now,
-                            false,
-                            0,
-                            null,
-                            null,
-                            null,
-                            null,
-                            null,
-                            null
-                    );
-                    // Pipeline the boundary: the host applies sequences in
-                    // order, so reconstruction and live input need not wait a
-                    // round trip for the CANCEL's ACK. Taps in that window are
-                    // now sent instead of collapsing into the retained snapshot.
-                    sessionStarted = true;
-                    if (activeContactCount > 0) {
-                        activePathStartedNanos = now;
-                        lastHeartbeatNanos = now;
-                        enqueueRetainedSnapshotLocked(now);
-                    }
-                    becameReady = true;
-                }
-            } else if (header.messageType == SecureProtocol.HOST_ACK) {
-                if (!hostReady || header.sessionId != sessionId) {
-                    throw new IOException("ACK belongs to the wrong V5 session");
-                }
-                if (acknowledgeLocked(header.logicalId, receiveNanos, hostSendNanos)) {
+            if (header.messageType == SecureProtocol.HOST_ACK) {
+                if (acknowledgeLocked(header.logicalId, receiveNanos, control.hostSendNanos)) {
                     lastAcknowledgementProgressNanos = receiveNanos;
                     lastIdleResponseNanos = receiveNanos;
                 }
+                markHeldLocked(header.logicalId, control.selectiveAck);
             } else if (header.messageType == SecureProtocol.HOST_PONG) {
-                if (!sessionStarted || header.sessionId != sessionId
+                if (control.selectiveAck != 0
                         || Long.compareUnsigned(header.logicalId, nextPingId) >= 0) {
                     throw new IOException("Invalid authenticated PONG");
                 }
@@ -636,30 +622,29 @@ final class SecureTransport implements TouchTransport {
             } else {
                 throw new IOException("Unexpected authenticated host message");
             }
-            lastHostSendNanos = hostSendNanos;
+            lastHostSendNanos = control.hostSendNanos;
             lastControlReceiveNanos = receiveNanos;
             queueLock.notifyAll();
         }
-        if (becameReady) {
-            listener.onHostLaneCountChanged(hostLaneCount);
-            listener.onConnectionChanged(
-                    true,
-                    "Authenticated V5 over "
-                            + (transport == SecureProtocol.TransportKind.WIFI
-                            ? "Wi-Fi / local network"
-                            : "USB tethering")
-                            + " connected"
-            );
+    }
+
+    /** Selective ACK: stop repairing frames the host already holds behind a hole. */
+    private void markHeldLocked(long cumulative, long selectiveAck) {
+        // Bit i reports frame cumulative + 2 + i; NO_ACK (-1) makes that 1 + i.
+        for (long remaining = selectiveAck; remaining != 0; remaining &= remaining - 1) {
+            long sequence = cumulative + 2 + Long.numberOfTrailingZeros(remaining);
+            if (Long.compareUnsigned(sequence, nextSequence) < 0) unacknowledged.markHeld(sequence);
         }
     }
 
     private void writerLoop(int sessionGeneration, CountDownLatch writerReady) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
         writerReady.countDown();
-        byte[] attemptPayload = new byte[MAX_TOUCH_PAYLOAD];
-        ByteBuffer attempt = ByteBuffer.wrap(attemptPayload).order(ByteOrder.LITTLE_ENDIAN);
+        byte[] recordPayload = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
+        ByteBuffer record = ByteBuffer.wrap(recordPayload).order(ByteOrder.LITTLE_ENDIAN);
         byte[] sendBuffer = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
         DatagramPacket outgoing = new DatagramPacket(sendBuffer, 0);
+        BatchDiagnostics batch = new BatchDiagnostics();
         boolean recordWriter = diagnostics != null && diagnostics.recorder.writer.claimed.compareAndSet(false, true);
         if (diagnostics != null && !recordWriter) diagnostics.recorder.writerCoverageUnavailable++;
         try {
@@ -669,78 +654,54 @@ final class SecureTransport implements TouchTransport {
                 int payloadLength;
                 int messageType;
                 long frameSession;
-                long sequence;
-                long queuedNanos = 0, ordinal = 0, repairLate = 0, selectedAt = 0;
+                long logicalId;
                 synchronized (queueLock) {
                     if (!isGameplayActive(sessionGeneration)) break;
                     long now = System.nanoTime();
                     maybeEnqueueHeartbeatLocked(now);
                     sessionBinding = binding;
                     sessionChannel = channel;
-                    if (!hostReady || sessionBinding == null || sessionChannel == null) {
+                    if (!sessionStarted || sessionBinding == null || sessionChannel == null) {
                         queueLock.wait();
                         continue;
                     }
-                    Frame pending = unacknowledged.next(now, hostWindow);
                     frameSession = sessionId;
-                    if (pending != null) {
-                        payloadLength = pending.payloadLength;
-                        System.arraycopy(pending.payload, 0, attemptPayload, 0, payloadLength);
-                        attempt.putLong(24, lastHostSendNanos);
-                        attempt.putLong(32, lastControlReceiveNanos);
-                        sequence = pending.sequence;
+                    Frame first = unacknowledged.nextBatch(now, hostWindow,
+                            SecureProtocol.MAX_FRAMES_PER_RECORD, SecureProtocol.MAX_TOUCH_FRAME_BYTES);
+                    if (first != null) {
+                        payloadLength = writeRecordLocked(record, batch, now);
+                        logicalId = first.sequence;
                         messageType = SecureProtocol.PHONE_TOUCH;
-                        queuedNanos = pending.queuedNanos;
-                        ordinal = pending.sendAttempts;
-                        repairLate = pending.repairLatenessNanos;
-                        selectedAt = now;
-                    } else if (sessionStarted && !hasActiveDataPathLocked()
-                            // The host owns the session only once CANCEL commits.
-                            && highestAcknowledged != SecureProtocol.NO_ACK
-                            && now - lastPingNanos >= IDLE_PING_NANOS) {
+                    } else if (isPingDueLocked(now)) {
                         payloadLength = 0;
-                        sequence = nextPingId++;
+                        logicalId = nextPingId++;
                         lastPingNanos = now;
                         messageType = SecureProtocol.PHONE_PING;
                     } else {
-                        long delay = unacknowledged.nanosUntilSend(now, hostWindow);
-                        if (sessionStarted && unacknowledged.isEmpty()) {
-                            delay = Math.min(delay, activeContactCount > 0
-                                    ? ACTIVE_HEARTBEAT_NANOS - (now - lastHeartbeatNanos)
-                                    : IDLE_PING_NANOS - (now - lastPingNanos));
-                        }
+                        long delay = writerDelayLocked(now);
                         if (delay == Long.MAX_VALUE) queueLock.wait();
                         else if (delay > 0) TimeUnit.NANOSECONDS.timedWait(queueLock, delay);
                         continue;
                     }
                 }
-                long sendStarted = payloadLength != 0 ? System.nanoTime() : 0;
-                if (payloadLength != 0) attempt.putLong(16, sendStarted);
-                int sendLength;
-                boolean sendFailed = true;
-                try {
-                    sendLength = sessionChannel.sealInto(
-                        messageType, frameSession, sequence, 0,
-                        attemptPayload, payloadLength, sendBuffer
-                    );
-                    outgoing.setData(sendBuffer, 0, sendLength);
-                    sessionBinding.sendToPeer(outgoing);
-                    sendFailed = false;
-                } finally {
-                    if (recordWriter && payloadLength != 0) {
-                        long returned = System.nanoTime();
-                        diagnostics.recorder.writer.offer(DiagnosticRecorder.ATTEMPT, returned, frameSession,
-                                sequence, sendStarted, queuedNanos, ordinal, sendFailed ? 1 : 0,
-                                returned, repairLate, selectedAt, Byte.toUnsignedInt(attempt.get(43)));
+                boolean touch = messageType == SecureProtocol.PHONE_TOUCH;
+                // An idle ping is the only record still sent as a redundant pair here;
+                // touch twins are separate selections so a repair can slot between pairs.
+                for (int copy = 0; copy < (touch ? 1 : INITIAL_SEND_COPIES); copy++) {
+                    long sendStarted = System.nanoTime();
+                    if (touch) record.putLong(0, sendStarted);
+                    boolean sendFailed = true;
+                    try {
+                        int sendLength = sessionChannel.sealInto(messageType, frameSession, logicalId, 0,
+                                recordPayload, payloadLength, sendBuffer);
+                        outgoing.setData(sendBuffer, 0, sendLength);
+                        sessionBinding.sendToPeer(outgoing);
+                        sendFailed = false;
+                    } finally {
+                        if (recordWriter && touch) {
+                            batch.record(diagnostics.recorder.writer, frameSession, sendStarted, sendFailed);
+                        }
                     }
-                }
-                if (messageType == SecureProtocol.PHONE_PING) {
-                    sendLength = sessionChannel.sealInto(
-                            messageType, frameSession, sequence, 0,
-                            attemptPayload, payloadLength, sendBuffer
-                    );
-                    outgoing.setData(sendBuffer, 0, sendLength);
-                    sessionBinding.sendToPeer(outgoing);
                 }
             }
         } catch (InterruptedException ignored) {
@@ -752,19 +713,89 @@ final class SecureTransport implements TouchTransport {
         }
     }
 
+    /**
+     * Copies the selected batch into one touch record: the per-datagram prefix,
+     * then each frame. Returns the payload length; the send time is set per attempt.
+     */
+    private int writeRecordLocked(ByteBuffer record, BatchDiagnostics batch, long selectedAt) {
+        int count = unacknowledged.batchSize();
+        record.clear();
+        record.putLong(0L);
+        record.putLong(lastHostSendNanos);
+        record.putLong(lastControlReceiveNanos);
+        record.put((byte) count);
+        while (record.position() < SecureProtocol.TOUCH_RECORD_PREFIX_SIZE) record.put((byte) 0);
+        batch.count = count;
+        batch.selectedAt = selectedAt;
+        for (int index = 0; index < count; index++) {
+            Frame frame = unacknowledged.batchFrame(index);
+            record.put(frame.payload, 0, frame.payloadLength);
+            batch.capture(index, frame);
+        }
+        return record.position();
+    }
+
+    private boolean isPingDueLocked(long now) {
+        return !hasActiveDataPathLocked()
+                // The host owns the session only once CANCEL commits.
+                && highestAcknowledged != SecureProtocol.NO_ACK
+                && now - lastPingNanos >= IDLE_PING_NANOS;
+    }
+
+    /** How long the writer may sleep before a repair, heartbeat, or ping is due. */
+    private long writerDelayLocked(long now) {
+        long delay = unacknowledged.nanosUntilSend(now, hostWindow);
+        if (unacknowledged.isEmpty()) {
+            delay = Math.min(delay, activeContactCount > 0
+                    ? ACTIVE_HEARTBEAT_NANOS - (now - lastHeartbeatNanos)
+                    : IDLE_PING_NANOS - (now - lastPingNanos));
+        }
+        return delay;
+    }
+
+    /** Per-frame writer diagnostics for one batch, captured under the queue lock. */
+    private static final class BatchDiagnostics {
+        final long[] sequences = new long[SecureProtocol.MAX_FRAMES_PER_RECORD];
+        final long[] queuedNanos = new long[SecureProtocol.MAX_FRAMES_PER_RECORD];
+        final long[] ordinals = new long[SecureProtocol.MAX_FRAMES_PER_RECORD];
+        final long[] repairLateness = new long[SecureProtocol.MAX_FRAMES_PER_RECORD];
+        final int[] frameFlags = new int[SecureProtocol.MAX_FRAMES_PER_RECORD];
+        int count;
+        long selectedAt;
+
+        void capture(int index, Frame frame) {
+            sequences[index] = frame.sequence;
+            queuedNanos[index] = frame.queuedNanos;
+            ordinals[index] = frame.sendAttempts;
+            repairLateness[index] = frame.repairLatenessNanos;
+            frameFlags[index] = Byte.toUnsignedInt(frame.payload[SecureProtocol.FRAME_FLAGS_OFFSET]);
+        }
+
+        void record(DiagnosticRecorder.Ring writer, long session, long sendStarted, boolean failed) {
+            long returned = System.nanoTime();
+            for (int index = 0; index < count; index++) {
+                writer.offer(DiagnosticRecorder.ATTEMPT, returned, session, sequences[index],
+                        sendStarted, queuedNanos[index], ordinals[index], failed ? 1 : 0,
+                        returned, repairLateness[index], selectedAt, frameFlags[index]);
+            }
+        }
+    }
+
     private void maybeEnqueueHeartbeatLocked(long nowNanos) {
-        if (!hostReady || !sessionStarted || activeContactCount == 0
+        if (!sessionStarted || activeContactCount == 0
                 || !unacknowledged.isEmpty()
                 || nowNanos - lastHeartbeatNanos < ACTIVE_HEARTBEAT_NANOS) {
             return;
         }
         lastHeartbeatNanos = nowNanos;
-        enqueueRetainedSnapshotLocked(nowNanos);
+        // A heartbeat restates held contacts: one copy suffices, and a lost
+        // one is repaired at 2 ms, far inside the host's 32 ms watchdog.
+        enqueueRetainedSnapshotLocked(nowNanos, true);
     }
 
     /** Full-state frame from the latest snapshot: heartbeat and fresh-session reconstruction. */
-    private void enqueueRetainedSnapshotLocked(long nowNanos) {
-        enqueueFrameLocked(
+    private void enqueueRetainedSnapshotLocked(long nowNanos, boolean singleCopy) {
+        Frame frame = enqueueFrameLocked(
                 TouchSample.ACTION_HEARTBEAT,
                 0,
                 true,
@@ -780,6 +811,7 @@ final class SecureTransport implements TouchTransport {
                 retainedTouchMajor,
                 retainedTouching
         );
+        if (frame != null) frame.singleCopy = singleCopy;
     }
 
     private boolean acknowledgeLocked(long acknowledgedSequence, long receivedNanos, long ackHostSendNanos) {
@@ -812,7 +844,7 @@ final class SecureTransport implements TouchTransport {
         boolean overflowed = false;
         int staleFrames = 0;
         synchronized (queueLock) {
-            if (!isGameplayActive(sessionGeneration) || !hostReady) return;
+            if (!isGameplayActive(sessionGeneration) || !sessionStarted) return;
             long now = System.nanoTime();
             boolean active = hasActiveDataPathLocked();
             backlogExpired = gameplayBacklogExpiredLocked(now);
@@ -869,11 +901,7 @@ final class SecureTransport implements TouchTransport {
     private void pairingLoop(int pairGeneration, PairingListener callback) {
         CredentialStore.Identity identity = null;
         try {
-            callback.onPairingStatus("Opening selected "
-                    + (transport == SecureProtocol.TransportKind.WIFI
-                    ? "Wi-Fi / local network"
-                    : "USB tether")
-                    + " interface");
+            callback.onPairingStatus("Opening selected " + transportLabel() + " interface");
             NetworkBinding pairBinding = NetworkBinding.open(context, transport);
             if (!installBinding(pairGeneration, pairBinding)) return;
             identity = credentials.loadOrCreate();
@@ -885,7 +913,7 @@ final class SecureTransport implements TouchTransport {
             }
         } catch (Exception error) {
             if (closeSession(pairGeneration)) {
-                Log.e(TAG, "V5 pairing failed", error);
+                Log.e(TAG, "Secure pairing failed", error);
                 callback.onPairingFailed(safePairingMessage(error));
             }
         } finally {
@@ -1475,6 +1503,10 @@ final class SecureTransport implements TouchTransport {
         lastHost = null;
     }
 
+    private String transportLabel() {
+        return transport == SecureProtocol.TransportKind.WIFI ? "Wi-Fi / local network" : "USB tethering";
+    }
+
     static long nextRememberedRetry(long currentNanos) {
         return Math.min(DISCOVERY_INTERVAL_NANOS, currentNanos * 2);
     }
@@ -1532,7 +1564,7 @@ final class SecureTransport implements TouchTransport {
                     previousBinding.close();
                     previousChannel.close();
                 }
-            }, "UDP5 authenticated stop");
+            }, "Secure stop");
             cleanup.setDaemon(true);
             cleanup.start();
         } else {
@@ -1548,7 +1580,6 @@ final class SecureTransport implements TouchTransport {
 
     private void resetSessionStateLocked() {
         clearUnacknowledgedLocked();
-        hostReady = false;
         sessionStarted = false;
         hostWindow = DEFAULT_HOST_WINDOW;
         hostLaneCount = 6;
@@ -1609,8 +1640,8 @@ final class SecureTransport implements TouchTransport {
     }
 
     private static long diagnosticFlags(Frame frame) {
-        int flags = Byte.toUnsignedInt(frame.writer.get(43));
-        return diagnosticFlags(Byte.toUnsignedInt(frame.writer.get(40)),
+        int flags = Byte.toUnsignedInt(frame.payload[SecureProtocol.FRAME_FLAGS_OFFSET]);
+        return diagnosticFlags(Byte.toUnsignedInt(frame.payload[SecureProtocol.FRAME_ACTION_OFFSET]),
                 (flags & TouchSample.FRAME_FLAG_SESSION_START) != 0,
                 (flags & TouchSample.FRAME_FLAG_HISTORICAL) != 0);
     }

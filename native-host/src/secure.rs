@@ -1,4 +1,4 @@
-//! Protocol-v5 framing, authenticated records, replay defense, and SAS logic.
+//! Protocol-v6 framing, authenticated records, replay defense, and SAS logic.
 //!
 //! Noise owns handshake key derivation. This module only consumes the two
 //! split keys so the public UDP header can be authenticated as AEAD associated
@@ -18,18 +18,28 @@ use crate::protocol::{
     FRAME_FLAG_LOCKED, FRAME_FLAG_SESSION_START, MAX_CONTACTS, TouchFrame,
 };
 
-pub const PROTOCOL_VERSION: u8 = 5;
+pub const PROTOCOL_VERSION: u8 = 6;
 pub const UDP_PORT: u16 = 42_825;
-pub const PAIR_MAGIC: [u8; 4] = *b"HPP5";
-pub const PHONE_MAGIC: [u8; 4] = *b"HPT5";
-pub const HOST_MAGIC: [u8; 4] = *b"HPA5";
+pub const PAIR_MAGIC: [u8; 4] = *b"HPP6";
+pub const PHONE_MAGIC: [u8; 4] = *b"HPT6";
+pub const HOST_MAGIC: [u8; 4] = *b"HPA6";
 pub const PAIR_HEADER_SIZE: usize = 32;
 pub const RECORD_HEADER_SIZE: usize = 48;
 pub const TAG_SIZE: usize = 16;
 pub const MAX_DATAGRAM_SIZE: usize = 1_200;
-pub const TOUCH_PAYLOAD_HEADER_SIZE: usize = 44;
+/// Per-datagram fields that precede the frames of one touch record.
+pub const TOUCH_RECORD_PREFIX_SIZE: usize = 32;
+/// Per-sample fields that precede that sample's contacts.
+pub const TOUCH_FRAME_HEADER_SIZE: usize = 20;
 pub const CONTACT_SIZE: usize = 10;
-pub const CONTROL_PAYLOAD_SIZE: usize = 16;
+/// A touch record carries at most this many consecutive logical frames.
+pub const MAX_FRAMES_PER_RECORD: usize = 16;
+/// IK message 2 payload: receive window, lane count, flags, host clock.
+pub const SESSION_PARAMETERS_SIZE: usize = 16;
+/// ACK and PONG payload: the session parameters plus a selective-ACK bitmap.
+pub const CONTROL_PAYLOAD_SIZE: usize = 24;
+/// Bit `i` of the selective-ACK bitmap reports frame `cumulative + 2 + i`.
+pub const SELECTIVE_ACK_FRAMES: usize = 64;
 pub const REPLAY_WINDOW_BITS: usize = 1_024;
 
 pub const PAIR_PROBE: u8 = 1;
@@ -47,7 +57,7 @@ pub const PHONE_PAIR_CONFIRM: u8 = 5;
 pub const PHONE_AUTH_ABORT: u8 = 6;
 pub const PHONE_PING: u8 = 7;
 
-pub const HOST_HELLO: u8 = 1;
+// Host type 1 was the v5 HELLO; IK message 2 now carries its parameters.
 pub const HOST_ACK: u8 = 2;
 pub const HOST_QUALITY_PROBE: u8 = 3;
 pub const HOST_SAS_COMMITMENT: u8 = 4;
@@ -62,7 +72,9 @@ pub const NO_ACK: u64 = u64::MAX;
 const VALID_FRAME_FLAGS: u8 = FRAME_FLAG_LOCKED | FRAME_FLAG_SESSION_START | FRAME_FLAG_HISTORICAL;
 const VALID_CONTACT_FLAGS: u8 =
     CONTACT_FLAG_INSIDE | CONTACT_FLAG_TIP | CONTACT_FLAG_KEY_SUPPRESSED;
-const NOISE_PROLOGUE_PREFIX: &[u8] = b"holodori-phone-trackpad-v5\0";
+const NOISE_PROLOGUE_PREFIX: &[u8] = b"holodori-phone-trackpad-v6\0";
+// These labels are unchanged from v5: the prologue already binds every
+// transcript to its protocol version.
 const CONNECTION_DOMAIN: &[u8] = b"holodori-v5-connection";
 const SAS_COMMIT_DOMAIN: &[u8] = b"holodori-v5-sas-commit";
 const SAS_DOMAIN: &[u8] = b"holodori-v5-sas";
@@ -490,76 +502,155 @@ impl Default for ReplayWindow {
     }
 }
 
-pub fn decode_touch_record(record: &OpenedRecord) -> Result<TouchFrame, WireError> {
-    decode_touch_payload(&record.header, &record.payload)
+/// One authenticated touch record: consecutive logical frames, starting at the
+/// header's logical sequence, that share this datagram's send and clock-echo
+/// fields. `parse` validates every frame, so nothing is applied from a record
+/// that is malformed anywhere.
+#[derive(Clone, Copy, Debug)]
+pub struct TouchRecord<'a> {
+    session_id: u64,
+    first_sequence: u64,
+    send_nanos: u64,
+    echo_host_send_nanos: u64,
+    control_receive_nanos: u64,
+    count: usize,
+    frames: &'a [u8],
 }
 
-pub fn decode_touch_payload(
-    header: &RecordHeader,
-    payload: &[u8],
-) -> Result<TouchFrame, WireError> {
-    if header.direction != Direction::PhoneToHost
-        || header.message_type != PHONE_TOUCH
-        || header.session_id == 0
-        || header.flags != 0
-        || payload.len() < TOUCH_PAYLOAD_HEADER_SIZE
-    {
-        return Err(WireError::BadMessage);
-    }
-    let action = payload[40];
-    if !matches!(
-        action,
-        ACTION_HEARTBEAT | ACTION_DOWN | ACTION_MOVE | ACTION_UP | ACTION_CANCEL
-    ) {
-        return Err(WireError::BadAction(action));
-    }
-    let contact_count = payload[42] as usize;
-    if contact_count > MAX_CONTACTS
-        || payload.len() != TOUCH_PAYLOAD_HEADER_SIZE + contact_count * CONTACT_SIZE
-    {
-        return Err(WireError::BadContactCount(contact_count));
-    }
-    let flags = payload[43];
-    if flags & !VALID_FRAME_FLAGS != 0 {
-        return Err(WireError::ReservedBits);
-    }
-    let mut seen = [false; 256];
-    let mut contacts = Contacts::default();
-    for index in 0..contact_count {
-        let offset = TOUCH_PAYLOAD_HEADER_SIZE + index * CONTACT_SIZE;
-        let pointer_id = payload[offset];
-        if seen[pointer_id as usize] {
-            return Err(WireError::DuplicatePointer(pointer_id));
+impl<'a> TouchRecord<'a> {
+    pub fn parse(header: &RecordHeader, payload: &'a [u8]) -> Result<Self, WireError> {
+        if header.direction != Direction::PhoneToHost
+            || header.message_type != PHONE_TOUCH
+            || header.session_id == 0
+            || header.flags != 0
+            || payload.len() < TOUCH_RECORD_PREFIX_SIZE
+        {
+            return Err(WireError::BadMessage);
         }
-        seen[pointer_id as usize] = true;
-        let contact_flags = payload[offset + 1];
-        if contact_flags & !VALID_CONTACT_FLAGS != 0 {
+        let count = payload[24] as usize;
+        if !(1..=MAX_FRAMES_PER_RECORD).contains(&count)
+            || header.logical_id.checked_add(count as u64 - 1).is_none()
+        {
+            return Err(WireError::BadFrameCount(count));
+        }
+        if payload[25..TOUCH_RECORD_PREFIX_SIZE]
+            .iter()
+            .any(|&byte| byte != 0)
+        {
             return Err(WireError::ReservedBits);
         }
-        contacts.push(Contact {
-            pointer_id,
-            flags: contact_flags,
-            x: read_i16(payload, offset + 2) as f32 / 10_000.0,
-            y: read_i16(payload, offset + 4) as f32 / 10_000.0,
-            pressure: read_u16(payload, offset + 6) as f32 / 65_535.0,
-            touch_major: read_u16(payload, offset + 8) as f32 / 65_535.0,
-        });
+        let record = Self {
+            session_id: header.session_id,
+            first_sequence: header.logical_id,
+            send_nanos: read_u64(payload, 0),
+            echo_host_send_nanos: read_u64(payload, 8),
+            control_receive_nanos: read_u64(payload, 16),
+            count,
+            frames: &payload[TOUCH_RECORD_PREFIX_SIZE..],
+        };
+        let mut offset = 0;
+        for index in 0..count {
+            offset = record.decode_frame(index, offset)?.1;
+        }
+        if offset != record.frames.len() {
+            return Err(WireError::BadLength(payload.len()));
+        }
+        Ok(record)
     }
-    let frame = TouchFrame {
-        session_id: header.session_id,
-        sequence: header.logical_id,
-        phone_event_nanos: read_u64(payload, 0),
-        phone_callback_nanos: read_u64(payload, 8),
-        phone_send_nanos: read_u64(payload, 16),
-        echo_host_send_nanos: read_u64(payload, 24),
-        phone_control_receive_nanos: read_u64(payload, 32),
-        action,
-        action_pointer_id: payload[41],
-        flags,
-        contacts,
-    };
-    validate_session_start(&frame)?;
-    Ok(frame)
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    pub fn frames(&self) -> TouchFrames<'a> {
+        TouchFrames {
+            record: *self,
+            index: 0,
+            offset: 0,
+        }
+    }
+
+    fn decode_frame(&self, index: usize, offset: usize) -> Result<(TouchFrame, usize), WireError> {
+        let bytes = &self.frames[offset.min(self.frames.len())..];
+        if bytes.len() < TOUCH_FRAME_HEADER_SIZE {
+            return Err(WireError::BadLength(bytes.len()));
+        }
+        let action = bytes[16];
+        if !matches!(
+            action,
+            ACTION_HEARTBEAT | ACTION_DOWN | ACTION_MOVE | ACTION_UP | ACTION_CANCEL
+        ) {
+            return Err(WireError::BadAction(action));
+        }
+        let contact_count = bytes[18] as usize;
+        let length = TOUCH_FRAME_HEADER_SIZE + contact_count * CONTACT_SIZE;
+        if contact_count > MAX_CONTACTS || bytes.len() < length {
+            return Err(WireError::BadContactCount(contact_count));
+        }
+        let flags = bytes[19];
+        if flags & !VALID_FRAME_FLAGS != 0 {
+            return Err(WireError::ReservedBits);
+        }
+        let mut seen = [false; 256];
+        let mut contacts = Contacts::default();
+        for contact in bytes[TOUCH_FRAME_HEADER_SIZE..length].chunks_exact(CONTACT_SIZE) {
+            let pointer_id = contact[0];
+            if std::mem::replace(&mut seen[pointer_id as usize], true) {
+                return Err(WireError::DuplicatePointer(pointer_id));
+            }
+            let contact_flags = contact[1];
+            if contact_flags & !VALID_CONTACT_FLAGS != 0 {
+                return Err(WireError::ReservedBits);
+            }
+            contacts.push(Contact {
+                pointer_id,
+                flags: contact_flags,
+                x: read_i16(contact, 2) as f32 / 10_000.0,
+                y: read_i16(contact, 4) as f32 / 10_000.0,
+                pressure: read_u16(contact, 6) as f32 / 65_535.0,
+                touch_major: read_u16(contact, 8) as f32 / 65_535.0,
+            });
+        }
+        let frame = TouchFrame {
+            session_id: self.session_id,
+            sequence: self.first_sequence + index as u64,
+            phone_event_nanos: read_u64(bytes, 0),
+            phone_callback_nanos: read_u64(bytes, 8),
+            phone_send_nanos: self.send_nanos,
+            echo_host_send_nanos: self.echo_host_send_nanos,
+            phone_control_receive_nanos: self.control_receive_nanos,
+            action,
+            action_pointer_id: bytes[17],
+            flags,
+            contacts,
+        };
+        validate_session_start(&frame)?;
+        Ok((frame, offset + length))
+    }
+}
+
+/// The frames of a parsed [`TouchRecord`], in sequence order.
+pub struct TouchFrames<'a> {
+    record: TouchRecord<'a>,
+    index: usize,
+    offset: usize,
+}
+
+impl Iterator for TouchFrames<'_> {
+    type Item = TouchFrame;
+
+    fn next(&mut self) -> Option<TouchFrame> {
+        if self.index == self.record.count {
+            return None;
+        }
+        let (frame, offset) = self
+            .record
+            .decode_frame(self.index, self.offset)
+            .expect("TouchRecord::parse validated every frame");
+        self.index += 1;
+        self.offset = offset;
+        Some(frame)
+    }
 }
 
 fn validate_session_start(frame: &TouchFrame) -> Result<(), WireError> {
@@ -577,16 +668,35 @@ fn validate_session_start(frame: &TouchFrame) -> Result<(), WireError> {
     Ok(())
 }
 
-pub fn encode_control_payload(
-    receive_window: u32,
-    lane_count: u8,
-    host_send_nanos: u64,
-) -> [u8; CONTROL_PAYLOAD_SIZE] {
-    let mut payload = [0_u8; CONTROL_PAYLOAD_SIZE];
-    payload[..4].copy_from_slice(&receive_window.to_le_bytes());
-    payload[4] = lane_count;
-    payload[8..16].copy_from_slice(&host_send_nanos.to_le_bytes());
-    payload
+/// What the host fixes for a gameplay session. IK message 2 carries these
+/// (replacing the v5 HELLO round trip), and every ACK and PONG repeats them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionParameters {
+    pub receive_window: u32,
+    pub lane_count: u8,
+}
+
+impl SessionParameters {
+    pub fn encode(&self, host_send_nanos: u64) -> [u8; SESSION_PARAMETERS_SIZE] {
+        let mut payload = [0_u8; SESSION_PARAMETERS_SIZE];
+        payload[..4].copy_from_slice(&self.receive_window.to_le_bytes());
+        payload[4] = self.lane_count;
+        payload[8..16].copy_from_slice(&host_send_nanos.to_le_bytes());
+        payload
+    }
+
+    /// ACK/PONG payload. `selective_ack` bit `i` reports that the host holds
+    /// frame `cumulative + 2 + i`; it is always zero in a PONG.
+    pub fn encode_control(
+        &self,
+        host_send_nanos: u64,
+        selective_ack: u64,
+    ) -> [u8; CONTROL_PAYLOAD_SIZE] {
+        let mut payload = [0_u8; CONTROL_PAYLOAD_SIZE];
+        payload[..SESSION_PARAMETERS_SIZE].copy_from_slice(&self.encode(host_send_nanos));
+        payload[SESSION_PARAMETERS_SIZE..].copy_from_slice(&selective_ack.to_le_bytes());
+        payload
+    }
 }
 
 pub fn decode_quality_reply(record: &OpenedRecord) -> Result<QualityReply, WireError> {
@@ -743,6 +853,7 @@ pub enum WireError {
     BadMessage,
     BadAction(u8),
     BadContactCount(usize),
+    BadFrameCount(usize),
     DuplicatePointer(u8),
     BadSessionStart,
     RandomUnavailable,
@@ -751,23 +862,24 @@ pub enum WireError {
 impl fmt::Display for WireError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BadMagic => formatter.write_str("invalid v5 magic"),
+            Self::BadMagic => formatter.write_str("invalid record magic"),
             Self::BadVersion(version) => write!(formatter, "unsupported protocol v{version}"),
-            Self::BadSuite(suite) => write!(formatter, "unsupported v5 suite {suite}"),
+            Self::BadSuite(suite) => write!(formatter, "unsupported cipher suite {suite}"),
             Self::BadTransport(transport) => write!(formatter, "invalid transport {transport}"),
-            Self::BadLength(length) => write!(formatter, "invalid v5 datagram length {length}"),
-            Self::ReservedBits => formatter.write_str("reserved v5 field is nonzero"),
+            Self::BadLength(length) => write!(formatter, "invalid datagram length {length}"),
+            Self::ReservedBits => formatter.write_str("reserved field is nonzero"),
             Self::WrongConnection => formatter.write_str("record belongs to another connection"),
             Self::Replay => formatter.write_str("replayed or expired packet number"),
-            Self::BadTag => formatter.write_str("v5 authentication tag failed"),
-            Self::EncryptFailed => formatter.write_str("v5 encryption failed"),
-            Self::PacketNumberExhausted => formatter.write_str("v5 packet number exhausted"),
+            Self::BadTag => formatter.write_str("authentication tag failed"),
+            Self::EncryptFailed => formatter.write_str("record encryption failed"),
+            Self::PacketNumberExhausted => formatter.write_str("packet number exhausted"),
             Self::HandshakeIncomplete => formatter.write_str("Noise handshake is incomplete"),
-            Self::BadMessage => formatter.write_str("invalid v5 message for this record"),
+            Self::BadMessage => formatter.write_str("invalid message for this record"),
             Self::BadAction(action) => write!(formatter, "invalid touch action {action}"),
             Self::BadContactCount(count) => write!(formatter, "invalid contact count {count}"),
+            Self::BadFrameCount(count) => write!(formatter, "invalid frame count {count}"),
             Self::DuplicatePointer(pointer) => write!(formatter, "duplicate pointer {pointer}"),
-            Self::BadSessionStart => formatter.write_str("invalid v5 session-start CANCEL"),
+            Self::BadSessionStart => formatter.write_str("invalid session-start CANCEL"),
             Self::RandomUnavailable => formatter.write_str("secure random source unavailable"),
         }
     }
@@ -779,6 +891,69 @@ impl Drop for RecordCipher {
     fn drop(&mut self) {
         self.next_packet_number.zeroize();
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct TestContact {
+    pub pointer_id: u8,
+    pub flags: u8,
+    pub x: i16,
+    pub y: i16,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct TestFrame<'a> {
+    pub action: u8,
+    pub flags: u8,
+    pub event_nanos: u64,
+    pub contacts: &'a [TestContact],
+}
+
+#[cfg(test)]
+impl<'a> TestFrame<'a> {
+    pub fn new(action: u8, flags: u8, contacts: &'a [TestContact]) -> Self {
+        Self {
+            action,
+            flags,
+            event_nanos: 0,
+            contacts,
+        }
+    }
+}
+
+/// Encodes a touch record payload the way Android's writer does, without
+/// allocating, so host tests exercise the production decoder.
+#[cfg(test)]
+pub(crate) fn encode_test_record(
+    send_nanos: u64,
+    frames: &[TestFrame<'_>],
+    output: &mut [u8],
+) -> usize {
+    output[..TOUCH_RECORD_PREFIX_SIZE].fill(0);
+    output[..8].copy_from_slice(&send_nanos.to_le_bytes());
+    output[24] = frames.len() as u8;
+    let mut offset = TOUCH_RECORD_PREFIX_SIZE;
+    for frame in frames {
+        let bytes = &mut output[offset..];
+        bytes[..8].copy_from_slice(&frame.event_nanos.to_le_bytes());
+        bytes[8..16].copy_from_slice(&frame.event_nanos.to_le_bytes());
+        bytes[16] = frame.action;
+        bytes[17] = 0;
+        bytes[18] = frame.contacts.len() as u8;
+        bytes[19] = frame.flags;
+        for (index, contact) in frame.contacts.iter().enumerate() {
+            let at = TOUCH_FRAME_HEADER_SIZE + index * CONTACT_SIZE;
+            bytes[at] = contact.pointer_id;
+            bytes[at + 1] = contact.flags;
+            bytes[at + 2..at + 4].copy_from_slice(&contact.x.to_le_bytes());
+            bytes[at + 4..at + 6].copy_from_slice(&contact.y.to_le_bytes());
+            bytes[at + 6..at + 10].fill(0);
+        }
+        offset += TOUCH_FRAME_HEADER_SIZE + frame.contacts.len() * CONTACT_SIZE;
+    }
+    offset
 }
 
 #[cfg(test)]
@@ -872,27 +1047,134 @@ mod tests {
         assert_ne!(first, second);
     }
 
+    fn parse_sealed(
+        phone: &mut RecordCipher,
+        host: &mut RecordCipher,
+        sequence: u64,
+        payload: &[u8],
+    ) -> Result<Vec<TouchFrame>, WireError> {
+        let wire = phone
+            .seal(Direction::PhoneToHost, PHONE_TOUCH, 9, sequence, 0, payload)
+            .unwrap();
+        let record = host.open(Direction::PhoneToHost, &wire).unwrap();
+        TouchRecord::parse(&record.header, &record.payload).map(|touch| touch.frames().collect())
+    }
+
+    fn tip(pointer_id: u8, flags: u8) -> TestContact {
+        TestContact {
+            pointer_id,
+            flags,
+            x: 5_000,
+            y: 5_000,
+        }
+    }
+
     #[test]
     fn authenticated_pressure_suppression_keeps_physical_tip_and_rejects_reserved_flags() {
         let (mut phone, mut host) = cipher_pair();
-        let mut payload = vec![0_u8; TOUCH_PAYLOAD_HEADER_SIZE + CONTACT_SIZE];
-        payload[40] = ACTION_DOWN;
-        payload[42] = 1;
-        payload[43] = FRAME_FLAG_LOCKED;
-        payload[45] = CONTACT_FLAG_TIP | CONTACT_FLAG_KEY_SUPPRESSED;
-        let wire = phone
-            .seal(Direction::PhoneToHost, PHONE_TOUCH, 9, 1, 0, &payload)
-            .unwrap();
-        let record = host.open(Direction::PhoneToHost, &wire).unwrap();
-        let frame = decode_touch_record(&record).unwrap();
-        assert!(frame.contacts[0].touching());
-        assert!(frame.contacts[0].key_suppressed());
-        payload[45] |= 0x08;
-        let wire = phone
-            .seal(Direction::PhoneToHost, PHONE_TOUCH, 9, 2, 0, &payload)
-            .unwrap();
-        let record = host.open(Direction::PhoneToHost, &wire).unwrap();
-        assert_eq!(decode_touch_record(&record), Err(WireError::ReservedBits));
+        let contacts = [tip(0, CONTACT_FLAG_TIP | CONTACT_FLAG_KEY_SUPPRESSED)];
+        let frame = TestFrame::new(ACTION_DOWN, FRAME_FLAG_LOCKED, &contacts);
+        let mut payload = [0_u8; MAX_DATAGRAM_SIZE];
+        let length = encode_test_record(0, &[frame], &mut payload);
+        let frames = parse_sealed(&mut phone, &mut host, 1, &payload[..length]).unwrap();
+        assert!(frames[0].contacts[0].touching());
+        assert!(frames[0].contacts[0].key_suppressed());
+        payload[TOUCH_RECORD_PREFIX_SIZE + TOUCH_FRAME_HEADER_SIZE + 1] |= 0x08;
+        assert_eq!(
+            parse_sealed(&mut phone, &mut host, 2, &payload[..length]),
+            Err(WireError::ReservedBits)
+        );
+    }
+
+    #[test]
+    fn a_record_carries_consecutive_frames_with_shared_send_fields() {
+        let (mut phone, mut host) = cipher_pair();
+        let one = [tip(3, CONTACT_FLAG_TIP)];
+        let two = [tip(3, CONTACT_FLAG_TIP), tip(4, CONTACT_FLAG_TIP)];
+        let frames = [
+            TestFrame::new(ACTION_DOWN, FRAME_FLAG_LOCKED, &one),
+            TestFrame::new(ACTION_DOWN, FRAME_FLAG_LOCKED, &two),
+            TestFrame::new(ACTION_UP, FRAME_FLAG_LOCKED, &[]),
+        ];
+        let mut payload = [0_u8; MAX_DATAGRAM_SIZE];
+        let length = encode_test_record(77, &frames, &mut payload);
+        let decoded = parse_sealed(&mut phone, &mut host, 40, &payload[..length]).unwrap();
+        let sequences: Vec<u64> = decoded.iter().map(|frame| frame.sequence).collect();
+        assert_eq!(sequences, [40, 41, 42]);
+        assert_eq!(decoded[1].contacts.len(), 2);
+        assert!(decoded.iter().all(|frame| frame.phone_send_nanos == 77));
+    }
+
+    #[test]
+    fn a_record_is_rejected_whole_when_any_frame_is_malformed() {
+        let (mut phone, mut host) = cipher_pair();
+        let frames = [
+            TestFrame::new(ACTION_HEARTBEAT, FRAME_FLAG_LOCKED, &[]),
+            TestFrame::new(9, FRAME_FLAG_LOCKED, &[]),
+        ];
+        let mut payload = [0_u8; MAX_DATAGRAM_SIZE];
+        let length = encode_test_record(0, &frames, &mut payload);
+        assert_eq!(
+            parse_sealed(&mut phone, &mut host, 1, &payload[..length]),
+            Err(WireError::BadAction(9))
+        );
+        // Trailing bytes after the declared frames are not ignored either.
+        let frames = [TestFrame::new(ACTION_HEARTBEAT, FRAME_FLAG_LOCKED, &[])];
+        let length = encode_test_record(0, &frames, &mut payload);
+        assert!(parse_sealed(&mut phone, &mut host, 2, &payload[..length + 1]).is_err());
+        // A session-start CANCEL is only valid as sequence zero.
+        let frames = [
+            TestFrame::new(ACTION_CANCEL, FRAME_FLAG_SESSION_START, &[]),
+            TestFrame::new(ACTION_CANCEL, FRAME_FLAG_SESSION_START, &[]),
+        ];
+        let length = encode_test_record(0, &frames, &mut payload);
+        assert_eq!(
+            parse_sealed(&mut phone, &mut host, 0, &payload[..length]),
+            Err(WireError::BadSessionStart)
+        );
+    }
+
+    #[test]
+    fn frame_counts_outside_one_to_sixteen_are_rejected() {
+        let (mut phone, mut host) = cipher_pair();
+        let mut payload = [0_u8; MAX_DATAGRAM_SIZE];
+        let heartbeat = TestFrame::new(ACTION_HEARTBEAT, FRAME_FLAG_LOCKED, &[]);
+        let length = encode_test_record(0, &[heartbeat; MAX_FRAMES_PER_RECORD], &mut payload);
+        assert_eq!(
+            parse_sealed(&mut phone, &mut host, 1, &payload[..length])
+                .unwrap()
+                .len(),
+            MAX_FRAMES_PER_RECORD
+        );
+        payload[24] = 0;
+        assert_eq!(
+            parse_sealed(
+                &mut phone,
+                &mut host,
+                1,
+                &payload[..TOUCH_RECORD_PREFIX_SIZE]
+            ),
+            Err(WireError::BadFrameCount(0))
+        );
+        payload[24] = MAX_FRAMES_PER_RECORD as u8 + 1;
+        assert_eq!(
+            parse_sealed(&mut phone, &mut host, 1, &payload[..length]),
+            Err(WireError::BadFrameCount(MAX_FRAMES_PER_RECORD + 1))
+        );
+    }
+
+    #[test]
+    fn control_payload_appends_the_selective_ack_bitmap() {
+        let parameters = SessionParameters {
+            receive_window: 128,
+            lane_count: 6,
+        };
+        let payload = parameters.encode_control(0x0102, 1 << 63 | 5);
+        assert_eq!(
+            payload[..SESSION_PARAMETERS_SIZE],
+            parameters.encode(0x0102)
+        );
+        assert_eq!(read_u64(&payload, 16), 1 << 63 | 5);
     }
 
     #[test]

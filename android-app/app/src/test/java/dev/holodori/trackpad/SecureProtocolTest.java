@@ -42,7 +42,11 @@ public final class SecureProtocolTest {
             record[record.length - 1] ^= 1;
             channel.openInto(record, record.length, header, plaintext);
             assertEquals(0, header.packetNumber);
-            assertEquals(128, ByteBuffer.wrap(plaintext).order(ByteOrder.LITTLE_ENDIAN).getInt());
+            SecureProtocol.HostControl control = new SecureProtocol.HostControl();
+            SecureProtocol.decodeHostControl(plaintext, header.payloadLength, 256, control);
+            assertEquals(128, control.receiveWindow);
+            assertEquals(42, control.hostSendNanos);
+            assertEquals(0b101, control.selectiveAck);
             assertThrows(SecureProtocol.ReplayException.class,
                     () -> channel.openInto(record, record.length, header, plaintext));
             byte[] next = hostControl(1);
@@ -74,7 +78,8 @@ public final class SecureProtocolTest {
         try {
             byte[] ack = hostControl(0);
             Future<?> receive = workers.submit(() -> {
-                channel.openInto(ack, ack.length, new SecureProtocol.RecordHeader(), new byte[16]);
+                channel.openInto(ack, ack.length, new SecureProtocol.RecordHeader(),
+                        new byte[SecureProtocol.CONTROL_PAYLOAD_SIZE]);
                 return null;
             });
             assertTrue(decryptStarted.await(2, TimeUnit.SECONDS));
@@ -96,13 +101,17 @@ public final class SecureProtocolTest {
     }
 
     private static byte[] hostControl(long packetNumber) throws Exception {
-        byte[] record = new byte[80];
+        int payloadSize = SecureProtocol.CONTROL_PAYLOAD_SIZE;
+        int length = SecureProtocol.RECORD_HEADER_SIZE + payloadSize + SecureProtocol.TAG_SIZE;
+        byte[] record = new byte[length];
         ByteBuffer header = ByteBuffer.wrap(record).order(ByteOrder.LITTLE_ENDIAN);
-        header.put(new byte[]{'H', 'P', 'A', '5'}).put((byte) 5).put((byte) SecureProtocol.HOST_ACK);
-        header.putShort((short) 80).putLong(9).putLong(7).putLong(packetNumber).putLong(0);
-        header.putInt(0).putShort((short) 16).putShort((short) 0);
-        byte[] payload = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
-                .putInt(128).put((byte) 6).put((byte) 0).putShort((short) 0).putLong(42).array();
+        header.put(new byte[]{'H', 'P', 'A', '6'}).put((byte) SecureProtocol.VERSION)
+                .put((byte) SecureProtocol.HOST_ACK);
+        header.putShort((short) length).putLong(9).putLong(7).putLong(packetNumber).putLong(0);
+        header.putInt(0).putShort((short) payloadSize).putShort((short) 0);
+        byte[] payload = ByteBuffer.allocate(payloadSize).order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(128).put((byte) 6).put((byte) 0).putShort((short) 0).putLong(42)
+                .putLong(0b101).array();
         CipherState cipher = cipher();
         try {
             cipher.setNonce(packetNumber);
@@ -241,19 +250,19 @@ public final class SecureProtocolTest {
         assertEquals(
                 "23b7bb8c91ae008711fb12846780bcdf1e065f821bdfec49f57e7c7dcd4c4823"
                         + "f56b5ed019d6b4f7d390bd2416f19670654ee0fdcfd6a275323659d4bc92bd3b"
-                        + "bfa33a1e12cb80ccbaa5fe3be21e12a6cf4b9a56b3cdc11bcb166b362cb1b576",
+                        + "eac7cf12d97459e8bce0f17b8686e1e9c32d8910b963c3f7ab6b51b3fdda186a",
                 toHex(buffer, length)
         );
         assertEquals(0, host.readMessage(buffer, 0, length, payload, 0));
         length = host.writeMessage(buffer, 0, null, 0, 0);
         assertEquals(
                 "f531830cca96c417accf9c7fbb8b15f7eb91cc4ec6e41d779f704ed44dc67f66"
-                        + "d8795cbaffa82eeb78befae0e0cde6c0d922ad90d8718e5c88d2cdcb78ed9563",
+                        + "3bdd1c6d809eb4c5cea8fcc8b37a03f7a58efc53a85d46c286b57342424311c1",
                 toHex(buffer, length)
         );
         assertEquals(0, phone.readMessage(buffer, 0, length, payload, 0));
         assertEquals(
-                "bbd8c76e72aba9685e6855cc0862de61d1d01529342cb8987f23c9a8b65e647e",
+                "6977c5b56b759d9a520bd729380074a5613eae3bf5fe5642158d81e2b9f1b50a",
                 toHex(host.getHandshakeHash())
         );
         assertArrayEquals(host.getHandshakeHash(), phone.getHandshakeHash());
@@ -268,9 +277,9 @@ public final class SecureProtocolTest {
                 "vector".getBytes(StandardCharsets.US_ASCII)
         );
         assertEquals(
-                "4850543505044600b8be365398adc6fe000000000000000000000000000000000"
-                        + "9000000000000000000000006000000eae096ab9385ca84ff8fd2b82c4de6cc"
-                        + "4890137c4c0d",
+                "4850543606044600326fc09cffc2e6c200000000000000000000000000000000"
+                        + "09000000000000000000000006000000eae096ab93850975f72cbd58bf71cc41"
+                        + "c31a0dea4fae",
                 toHex(record)
         );
         byte[] secondRecord = channel.seal(
@@ -281,9 +290,9 @@ public final class SecureProtocolTest {
                 "vector".getBytes(StandardCharsets.US_ASCII)
         );
         assertEquals(
-                "4850543505044600b8be365398adc6fe000000000000000001000000000000000"
-                        + "900000000000000000000000600000033de984324ab289c9dd1f981e60265f9f"
-                        + "f97e2d743e6",
+                "4850543606044600326fc09cffc2e6c200000000000000000100000000000000"
+                        + "0900000000000000000000000600000033de984324ab761f90dcad0d39c3b93a"
+                        + "dcfaeebc7fd0",
                 toHex(secondRecord)
         );
         channel.close();
@@ -314,19 +323,30 @@ public final class SecureProtocolTest {
         assertEquals(
                 "9fd7ad6dcff4298dd3f96d5b1b2af910a0535b1488d7f8fabb349a982880b615"
                         + "ea374cd73714b7bd8d86c36ef4edda85485b3a2b38748dff758fd6ec58a7fb5a"
-                        + "742888fec59468946610d729351f3f31f7693e1d35a73a19431d9b717c57d0fb",
+                        + "8a8e41171e51f08d93b6aa549f14cc552d48f941f2db491d8f61982720b5602d",
                 toHex(buffer, length)
         );
         assertEquals(0, ikHost.readMessage(buffer, 0, length, payload, 0));
-        length = ikHost.writeMessage(buffer, 0, null, 0, 0);
+        // IK message 2 carries the session parameters (replacing v5 HELLO).
+        byte[] parameters = ByteBuffer.allocate(SecureProtocol.SESSION_PARAMETERS_SIZE)
+                .order(ByteOrder.LITTLE_ENDIAN)
+                .putInt(128).put((byte) 6).put((byte) 0).putShort((short) 0)
+                .putLong(0x0807_0605_0403_0201L)
+                .array();
+        length = ikHost.writeMessage(buffer, 0, parameters, 0, parameters.length);
         assertEquals(
                 "3f3e5f6d86926c9c128cf84581574f96840d98ee5ab53b1ec3b76e2bb25b945e"
-                        + "d563e952a259dcdc24aab223c0760b12",
+                        + "512fc5d532d298f88d3122fadeced96e315f4782fef1855fabe09742b9d4dbf7",
                 toHex(buffer, length)
         );
-        assertEquals(0, ikPhone.readMessage(buffer, 0, length, payload, 0));
+        assertEquals(parameters.length, ikPhone.readMessage(buffer, 0, length, payload, 0));
+        assertArrayEquals(parameters, Arrays.copyOf(payload, parameters.length));
+        SecureProtocol.HostControl control = new SecureProtocol.HostControl();
+        SecureProtocol.decodeHostControl(payload, parameters.length, 256, control);
+        assertEquals(128, control.receiveWindow);
+        assertEquals(0x0807_0605_0403_0201L, control.hostSendNanos);
         assertEquals(
-                "217b487f44138992d172c6902fc2ba17c08d0205cb11c9b2e209f9aeeffaf3a8",
+                "45f5c953a9233003fc076d6d069257ec76a04d65af607be74cb70246411d10e7",
                 toHex(ikPhone.getHandshakeHash())
         );
         assertArrayEquals(ikPhone.getHandshakeHash(), ikHost.getHandshakeHash());

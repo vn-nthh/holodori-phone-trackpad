@@ -20,8 +20,9 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
-/** Android-Keystore-wrapped V5 installation identity and paired host key. */
+/** Android-Keystore-wrapped installation identity and paired host key. */
 final class CredentialStore {
+    // Storage names keep their v5 labels so existing pairings survive upgrades.
     private static final String PREFERENCES = "doritrack-v5-credentials";
     private static final String BLOB_KEY = "encrypted-identity";
     private static final String KEY_ALIAS = "doritrack-v5-wrap";
@@ -76,11 +77,11 @@ final class CredentialStore {
         try {
             envelope = Base64.decode(encoded, Base64.NO_WRAP);
         } catch (IllegalArgumentException error) {
-            throw new CredentialException("stored V5 credentials are corrupt", error);
+            throw new CredentialException("stored pairing credentials are corrupt", error);
         }
         if (envelope.length < 1 + NONCE_SIZE + 16 || envelope[0] != FORMAT_VERSION) {
             Arrays.fill(envelope, (byte) 0);
-            throw new CredentialException("stored V5 credentials have an invalid format");
+            throw new CredentialException("stored pairing credentials have an invalid format");
         }
         byte[] nonce = Arrays.copyOfRange(envelope, 1, 1 + NONCE_SIZE);
         byte[] encrypted = Arrays.copyOfRange(envelope, 1 + NONCE_SIZE, envelope.length);
@@ -95,7 +96,7 @@ final class CredentialStore {
             throw error;
         } catch (Exception error) {
             throw new CredentialException(
-                    "could not unlock V5 credentials; use Forget device to reset them",
+                    "could not unlock pairing credentials; use Forget device to reset them",
                     error
             );
         } finally {
@@ -172,11 +173,11 @@ final class CredentialStore {
             boolean committed = preferences.edit()
                     .putString(BLOB_KEY, Base64.encodeToString(envelope, Base64.NO_WRAP))
                     .commit();
-            if (!committed) throw new CredentialException("could not persist V5 credentials");
+            if (!committed) throw new CredentialException("could not persist pairing credentials");
         } catch (CredentialException error) {
             throw error;
         } catch (Exception error) {
-            throw new CredentialException("could not protect V5 credentials", error);
+            throw new CredentialException("could not protect pairing credentials", error);
         } finally {
             Arrays.fill(plaintext, (byte) 0);
             if (nonce != null) Arrays.fill(nonce, (byte) 0);
@@ -201,11 +202,11 @@ final class CredentialStore {
 
     private static Identity decodeIdentity(byte[] plaintext) throws CredentialException {
         if (plaintext.length != PLAINTEXT_SIZE) {
-            throw new CredentialException("stored V5 credentials have an invalid length");
+            throw new CredentialException("stored pairing credentials have an invalid length");
         }
         ByteBuffer bytes = ByteBuffer.wrap(plaintext);
         if (Byte.toUnsignedInt(bytes.get()) != FORMAT_VERSION) {
-            throw new CredentialException("stored V5 credentials have an invalid version");
+            throw new CredentialException("stored pairing credentials have an invalid version");
         }
         byte[] privateKey = new byte[KEY_SIZE];
         byte[] publicKey = new byte[KEY_SIZE];
@@ -217,7 +218,7 @@ final class CredentialStore {
         try {
             if (paired > 1 || isAllZero(privateKey) || isAllZero(publicKey)
                     || (paired == 1 && isAllZero(hostKey))) {
-                throw new CredentialException("stored V5 credentials failed validation");
+                throw new CredentialException("stored pairing credentials failed validation");
             }
             verifyKeyPair(privateKey, publicKey);
             return new Identity(privateKey, publicKey, paired == 1 ? hostKey : null);
@@ -281,7 +282,7 @@ final class CredentialStore {
                 difference |= derived[index] ^ publicKey[index];
             }
             if (difference != 0) {
-                throw new CredentialException("stored V5 identity key pair is inconsistent");
+                throw new CredentialException("stored identity key pair is inconsistent");
             }
         } catch (NoSuchAlgorithmException error) {
             throw new CredentialException("X25519 is unavailable", error);

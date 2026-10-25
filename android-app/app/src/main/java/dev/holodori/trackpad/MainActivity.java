@@ -19,7 +19,7 @@ import java.io.OutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-/** Explicit V5 setup/pairing front end and latency-sensitive play surface. */
+/** Explicit setup/pairing front end and latency-sensitive play surface. */
 public final class MainActivity extends Activity implements
         TouchTransport.Listener,
         SetupView.Listener {
@@ -107,9 +107,9 @@ public final class MainActivity extends Activity implements
     public void onPairRequested(SetupView.Selection selection) {
         stopCurrent();
         setupView.startPairing();
-        SecureTransport v5 = new SecureTransport(this, this, selection.transport);
-        transport = v5;
-        v5.startPairing(pairingListenerFor(v5));
+        SecureTransport secure = new SecureTransport(this, this, selection.transport);
+        transport = secure;
+        secure.startPairing(pairingListenerFor(secure));
     }
 
     @Override

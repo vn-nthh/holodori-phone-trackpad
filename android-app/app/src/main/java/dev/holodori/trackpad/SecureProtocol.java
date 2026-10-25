@@ -14,17 +14,30 @@ import java.util.Arrays;
 import javax.crypto.BadPaddingException;
 import javax.crypto.ShortBufferException;
 
-/** Byte-exact protocol-v5 framing and post-Noise record protection. */
+/** Byte-exact protocol-v6 framing and post-Noise record protection. */
 final class SecureProtocol {
-    static final int VERSION = 5;
+    static final int VERSION = 6;
     static final int PORT = 42_825;
     static final int MAX_DATAGRAM_SIZE = 1_200;
     static final int PAIR_HEADER_SIZE = 32;
     static final int RECORD_HEADER_SIZE = 48;
     static final int TAG_SIZE = 16;
-    static final int CONTROL_PAYLOAD_SIZE = 16;
-    static final int TOUCH_PAYLOAD_HEADER_SIZE = 44;
+    /** IK message 2 payload: receive window, lane count, flags, host clock. */
+    static final int SESSION_PARAMETERS_SIZE = 16;
+    /** ACK and PONG payload: the session parameters plus a selective-ACK bitmap. */
+    static final int CONTROL_PAYLOAD_SIZE = 24;
+    static final int LANE_COUNT = 6;
+    /** Per-datagram fields that precede the frames of one touch record. */
+    static final int TOUCH_RECORD_PREFIX_SIZE = 32;
+    /** Per-sample fields that precede that sample's contacts. */
+    static final int TOUCH_FRAME_HEADER_SIZE = 20;
+    static final int FRAME_ACTION_OFFSET = 16;
+    static final int FRAME_FLAGS_OFFSET = 19;
     static final int CONTACT_SIZE = 10;
+    static final int MAX_FRAMES_PER_RECORD = 16;
+    /** Room for touch frames after the record header, tag, and prefix. */
+    static final int MAX_TOUCH_FRAME_BYTES =
+            MAX_DATAGRAM_SIZE - RECORD_HEADER_SIZE - TAG_SIZE - TOUCH_RECORD_PREFIX_SIZE;
 
     static final int PAIR_PROBE = 1;
     static final int PAIR_OFFER = 2;
@@ -41,7 +54,7 @@ final class SecureProtocol {
     static final int PHONE_AUTH_ABORT = 6;
     static final int PHONE_PING = 7;
 
-    static final int HOST_HELLO = 1;
+    // Host type 1 was the v5 HELLO; IK message 2 now carries its parameters.
     static final int HOST_ACK = 2;
     static final int HOST_QUALITY_PROBE = 3;
     static final int HOST_SAS_COMMITMENT = 4;
@@ -53,11 +66,13 @@ final class SecureProtocol {
     static final int QUALITY_REPAIR_ONLY = 0x01;
     static final long NO_ACK = -1L;
 
-    private static final byte[] PAIR_MAGIC = {'H', 'P', 'P', '5'};
-    private static final byte[] PHONE_MAGIC = {'H', 'P', 'T', '5'};
-    private static final byte[] HOST_MAGIC = {'H', 'P', 'A', '5'};
+    private static final byte[] PAIR_MAGIC = {'H', 'P', 'P', '6'};
+    private static final byte[] PHONE_MAGIC = {'H', 'P', 'T', '6'};
+    private static final byte[] HOST_MAGIC = {'H', 'P', 'A', '6'};
     private static final byte[] PROLOGUE_PREFIX =
-            "holodori-phone-trackpad-v5\0".getBytes(StandardCharsets.US_ASCII);
+            "holodori-phone-trackpad-v6\0".getBytes(StandardCharsets.US_ASCII);
+    // These labels are unchanged from v5: the prologue already binds every
+    // transcript to its protocol version.
     private static final byte[] CONNECTION_DOMAIN =
             "holodori-v5-connection".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] SAS_COMMIT_DOMAIN =
@@ -269,7 +284,7 @@ final class SecureProtocol {
         }
     }
 
-    /** Phone-oriented split ciphers: sender is HPT5 and receiver is HPA5. */
+    /** Phone-oriented split ciphers: sender is HPT6 and receiver is HPA6. */
     static final class Channel implements AutoCloseable {
         private final CipherState sender;
         private final CipherState receiver;
@@ -448,6 +463,35 @@ final class SecureProtocol {
                 }
             }
         }
+    }
+
+    /** Host session parameters, and for an ACK its selective-ACK bitmap. Reused per record. */
+    static final class HostControl {
+        int receiveWindow;
+        int laneCount;
+        long hostSendNanos;
+        /** Bit {@code i}: the host holds frame {@code cumulative + 2 + i}. Zero unless an ACK. */
+        long selectiveAck;
+    }
+
+    /** Decodes the IK message 2 payload or an ACK/PONG payload, rejecting undefined values. */
+    static void decodeHostControl(byte[] bytes, int length, int maxWindow, HostControl control)
+            throws ProtocolException {
+        if (length != SESSION_PARAMETERS_SIZE && length != CONTROL_PAYLOAD_SIZE) {
+            throw new ProtocolException("invalid host control length");
+        }
+        ByteBuffer payload = littleEndian(bytes, length);
+        long window = Integer.toUnsignedLong(payload.getInt());
+        int lanes = Byte.toUnsignedInt(payload.get());
+        int flags = Byte.toUnsignedInt(payload.get());
+        int reserved = Short.toUnsignedInt(payload.getShort());
+        if (window < 1 || window > maxWindow || lanes != LANE_COUNT || flags != 0 || reserved != 0) {
+            throw new ProtocolException("invalid host control values");
+        }
+        control.receiveWindow = (int) window;
+        control.laneCount = lanes;
+        control.hostSendNanos = payload.getLong();
+        control.selectiveAck = length == CONTROL_PAYLOAD_SIZE ? payload.getLong() : 0L;
     }
 
     static RecordHeader decodeRecordHeader(byte[] bytes, int length, byte[] magic)

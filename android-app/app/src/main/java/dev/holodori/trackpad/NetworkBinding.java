@@ -115,7 +115,7 @@ final class NetworkBinding implements AutoCloseable {
             try {
                 socket.connect(source);
             } catch (RuntimeException | SocketException error) {
-                Log.w("HolodoriUDP5", "Could not connect the pinned V5 socket", error);
+                Log.w("HolodoriSecure", "Could not connect the pinned socket", error);
             }
             return true;
         }
@@ -155,14 +155,14 @@ final class NetworkBinding implements AutoCloseable {
 
     void sendToPeer(byte[] bytes) throws IOException {
         InetSocketAddress destination = peer();
-        if (destination == null) throw new IOException("V5 peer is not pinned");
+        if (destination == null) throw new IOException("Peer is not pinned");
         DatagramPacket packet = new DatagramPacket(bytes, bytes.length, destination);
         socket.send(packet);
     }
 
     void sendToPeer(DatagramPacket packet) throws IOException {
         InetSocketAddress destination = peer();
-        if (destination == null) throw new IOException("V5 peer is not pinned");
+        if (destination == null) throw new IOException("Peer is not pinned");
         packet.setSocketAddress(destination);
         socket.send(packet);
     }
@@ -279,7 +279,7 @@ final class NetworkBinding implements AutoCloseable {
         try {
             socket.setTrafficClass(GAMEPLAY_TRAFFIC_CLASS);
         } catch (SocketException error) {
-            Log.w("HolodoriUDP5", "DSCP traffic class unavailable", error);
+            Log.w("HolodoriSecure", "DSCP traffic class unavailable", error);
         }
     }
 
@@ -291,14 +291,14 @@ final class NetworkBinding implements AutoCloseable {
                     .getSystemService(Context.WIFI_SERVICE);
             if (manager == null) return null;
             lock = manager.createWifiLock(
-                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Doritrack:V5WiFi");
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "Doritrack:WiFi");
             lock.setReferenceCounted(false);
             lock.acquire();
             return lock;
         } catch (RuntimeException error) {
             releaseWifiLock(lock);
             // Performance hints must not make an otherwise usable path unavailable.
-            Log.w("HolodoriUDP5", "Wi-Fi low-latency lock unavailable", error);
+            Log.w("HolodoriSecure", "Wi-Fi low-latency lock unavailable", error);
             return null;
         }
     }
@@ -309,7 +309,7 @@ final class NetworkBinding implements AutoCloseable {
             if (lock.isHeld()) lock.release();
         } catch (RuntimeException error) {
             // Keep socket/channel cleanup working even if the Wi-Fi service failed.
-            Log.w("HolodoriUDP5", "Wi-Fi low-latency lock release failed", error);
+            Log.w("HolodoriSecure", "Wi-Fi low-latency lock release failed", error);
         }
     }
 
@@ -433,7 +433,7 @@ final class NetworkBinding implements AutoCloseable {
             }
             candidates.add(candidate);
         }
-        // Ambiguity is a hard boundary: never spray V5 discovery onto multiple
+        // Ambiguity is a hard boundary: never spray discovery onto multiple
         // USB-like adapters and guess which one the user meant.
         return candidates.size() == 1 ? candidates.get(0) : null;
     }

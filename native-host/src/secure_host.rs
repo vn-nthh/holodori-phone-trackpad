@@ -1,4 +1,4 @@
-//! Native-host protocol-v5 pairing and remembered-session setup.
+//! Native-host protocol-v6 pairing, remembered-session setup, and gameplay.
 
 use std::collections::HashSet;
 #[cfg(target_os = "linux")]
@@ -32,18 +32,17 @@ use crate::input::{
     service_deferred,
 };
 use crate::metrics::HostMetrics;
-use crate::protocol::{OrderedFrames, TouchFrame};
-use crate::secure::{PHONE_PING, PHONE_TOUCH, decode_touch_payload};
-
 use crate::network::{enable_receive_interface, receive_datagram};
+use crate::protocol::OrderedFrames;
 use crate::secure::{
-    Direction, HOST_ACK, HOST_AUTH_ABORT, HOST_HELLO, HOST_PAIR_COMPLETE, HOST_PONG,
-    HOST_QUALITY_PROBE, HOST_SAS_COMMITMENT, HOST_SAS_REVEAL, IK_CONTINUE, IK_MESSAGE_1,
-    MAX_DATAGRAM_SIZE, NO_ACK, OpenedRecord, PAIR_ABORT, PAIR_CONTINUE, PAIR_OFFER, PAIR_PROBE,
-    PHONE_AUTH_ABORT, PHONE_PAIR_CONFIRM, PHONE_QUALITY_REPLY, PHONE_SAS_COMMITMENT,
-    PHONE_SAS_REVEAL, QUALITY_REPAIR_ONLY, RECORD_HEADER_SIZE, RecordCipher, RecordHeader,
-    TransportKind, WireError, decode_pair_envelope, decode_quality_reply, encode_control_payload,
-    encode_pair_envelope, fill_random, prologue, sas_commit, sas_digest, sas_pattern,
+    Direction, HOST_ACK, HOST_AUTH_ABORT, HOST_PAIR_COMPLETE, HOST_PONG, HOST_QUALITY_PROBE,
+    HOST_SAS_COMMITMENT, HOST_SAS_REVEAL, IK_CONTINUE, IK_MESSAGE_1, MAX_DATAGRAM_SIZE, NO_ACK,
+    OpenedRecord, PAIR_ABORT, PAIR_CONTINUE, PAIR_OFFER, PAIR_PROBE, PHONE_AUTH_ABORT,
+    PHONE_PAIR_CONFIRM, PHONE_PING, PHONE_QUALITY_REPLY, PHONE_SAS_COMMITMENT, PHONE_SAS_REVEAL,
+    PHONE_TOUCH, QUALITY_REPAIR_ONLY, RECORD_HEADER_SIZE, RecordCipher, RecordHeader,
+    SessionParameters, TouchRecord, TransportKind, WireError, decode_pair_envelope,
+    decode_quality_reply, encode_pair_envelope, fill_random, prologue, sas_commit, sas_digest,
+    sas_pattern,
 };
 use crate::tether::{TetherBinding, current_tether_binding, tether_ipv4_interfaces};
 
@@ -59,6 +58,18 @@ const INTERFACE_REVALIDATE: Duration = Duration::from_millis(500);
 const READ_TIMEOUT: Duration = Duration::from_millis(4);
 const WRITE_TIMEOUT: Duration = Duration::from_millis(2);
 const REDUNDANT_COPIES: usize = 2;
+
+// Authenticated abort reasons.
+const ABORT_CANCELLED: u16 = 1;
+const ABORT_COMPARISON_FAILED: u16 = 2;
+const ABORT_TIMED_OUT: u16 = 3;
+const ABORT_PROTOCOL: u16 = 4;
+
+// Diagnostic INGRESS reasons for a discarded datagram.
+const DISCARD_FOREIGN: u64 = 1;
+const DISCARD_REPLAY: u64 = 2;
+const DISCARD_BAD_TAG: u64 = 3;
+const DISCARD_MALFORMED: u64 = 4;
 
 #[cfg(test)]
 mod gameplay_tests;
@@ -165,14 +176,7 @@ pub fn pair(
     let mut host_random = Zeroizing::new([0_u8; 32]);
     fill_random(host_random.as_mut())?;
     let host_commitment = sas_commit(2, &handshake_hash, &host_random);
-    connection.send_record_redundant(
-        Direction::HostToPhone,
-        HOST_SAS_COMMITMENT,
-        0,
-        0,
-        0,
-        &host_commitment,
-    )?;
+    connection.send_redundant(HOST_SAS_COMMITMENT, 0, 0, 0, || &host_commitment)?;
 
     let phone_reveal = wait_for_application(
         &mut connection,
@@ -189,19 +193,12 @@ pub fn pair(
         .expect("length checked");
     let expected_phone_commitment = sas_commit(1, &handshake_hash, &phone_random);
     if phone_commitment.payload.as_slice() != expected_phone_commitment {
-        connection.send_abort(2)?;
+        connection.send_abort(0, ABORT_COMPARISON_FAILED)?;
         return Err(SecureHostError::Authentication(
             "phone SAS commitment mismatch",
         ));
     }
-    connection.send_record_redundant(
-        Direction::HostToPhone,
-        HOST_SAS_REVEAL,
-        0,
-        0,
-        0,
-        host_random.as_ref(),
-    )?;
+    connection.send_redundant(HOST_SAS_REVEAL, 0, 0, 0, || host_random.as_ref())?;
     let pattern = sas_pattern(sas_digest(&handshake_hash, &phone_random, &host_random));
     report(PairEvent::Pattern(pattern));
 
@@ -217,7 +214,7 @@ pub fn pair(
         match commands.try_recv() {
             Ok(PairCommand::Approve) => local_approved = true,
             Ok(PairCommand::Cancel) => {
-                connection.send_abort(1)?;
+                connection.send_abort(0, ABORT_CANCELLED)?;
                 return Err(SecureHostError::Cancelled);
             }
             Err(TryRecvError::Disconnected) => return Err(SecureHostError::Cancelled),
@@ -237,7 +234,9 @@ pub fn pair(
             } else {
                 0
             };
-            send_quality_probe(&mut connection, next_probe_id, flags, quality_started)?;
+            connection.send_redundant(HOST_QUALITY_PROBE, 0, next_probe_id, flags, || {
+                duration_nanos(quality_started.elapsed()).to_le_bytes()
+            })?;
             quality.sent.insert(next_probe_id);
             next_probe_id += 1;
             next_probe += QUALITY_INTERVAL;
@@ -289,14 +288,7 @@ pub fn pair(
         }
 
         if !remote_confirmed && last_reveal_send.elapsed() >= APPLICATION_RETRY {
-            connection.send_record_redundant(
-                Direction::HostToPhone,
-                HOST_SAS_REVEAL,
-                0,
-                0,
-                0,
-                host_random.as_ref(),
-            )?;
+            connection.send_redundant(HOST_SAS_REVEAL, 0, 0, 0, || host_random.as_ref())?;
             last_reveal_send = Instant::now();
         }
 
@@ -309,29 +301,15 @@ pub fn pair(
             if transport == TransportKind::Wifi {
                 report(PairEvent::Quality(quality.summary()));
             }
-            connection.send_record_redundant(
-                Direction::HostToPhone,
-                HOST_PAIR_COMPLETE,
-                0,
-                0,
-                0,
-                &[],
-            )?;
+            connection.send_redundant(HOST_PAIR_COMPLETE, 0, 0, 0, || &[])?;
             // A third independently encrypted completion slightly reduces the
             // one-sided-record edge case without ever reusing a nonce.
-            connection.send_record_once(
-                Direction::HostToPhone,
-                HOST_PAIR_COMPLETE,
-                0,
-                0,
-                0,
-                &[],
-            )?;
+            connection.send_record(HOST_PAIR_COMPLETE, 0, 0, 0, &[])?;
             report(PairEvent::Complete);
             return Ok(());
         }
     }
-    connection.send_abort(3)?;
+    connection.send_abort(0, ABORT_TIMED_OUT)?;
     Err(SecureHostError::TimedOut("pairing window expired"))
 }
 
@@ -350,23 +328,57 @@ fn persist_pairing_if_authorized<T>(
 const RECEIVE_WINDOW: u32 = 128;
 const ACTIVE_INPUT_SILENCE_TIMEOUT: Duration = Duration::from_millis(32);
 const IDLE_PEER_SILENCE_TIMEOUT: Duration = Duration::from_secs(2);
-const V5_SESSION_START_TIMEOUT: Duration = Duration::from_secs(5);
-const V5_CONTROL_REPAIR_INTERVAL: Duration = Duration::from_millis(2);
-const V5_HELLO_REPAIR_MAX_INTERVAL: Duration = Duration::from_millis(32);
-/// Android's earliest repair is 2 ms after a copy. A logical duplicate that
-/// arrives sooner than this after the same cumulative ACK is the immediate
-/// redundant twin, which cannot have observed that ACK's loss.
+const SESSION_START_TIMEOUT: Duration = Duration::from_secs(5);
+/// Android's earliest repair is 2 ms after a copy. A record that changes
+/// nothing and arrives sooner than this after the identical ACK is the
+/// immediate redundant twin, which cannot have observed that ACK's loss.
 const DUPLICATE_ACK_HOLDOFF: Duration = Duration::from_millis(1);
-const V5_SESSION_START_POLL: Duration = Duration::from_millis(1);
-const V5_GAMEPLAY_READ_TIMEOUT: Duration = Duration::from_millis(4);
-const V5_INTERFACE_REVALIDATE_INTERVAL: Duration = Duration::from_millis(500);
+const GAMEPLAY_READ_TIMEOUT: Duration = Duration::from_millis(4);
+
+/// The parameters a host with `lane_count` lanes announces for a session.
+pub fn session_parameters(lane_count: u8) -> SessionParameters {
+    SessionParameters {
+        receive_window: RECEIVE_WINDOW,
+        lane_count,
+    }
+}
 
 struct GameplayState {
-    lane_count: u8,
+    parameters: SessionParameters,
     last_committed_frame: Instant,
     last_idle_activity: Instant,
     last_ping: Option<u64>,
-    last_ack: Option<(Option<u64>, Instant)>,
+    last_ack: Option<SentAck>,
+}
+
+impl GameplayState {
+    fn new(lane_count: u8) -> Self {
+        let now = Instant::now();
+        Self {
+            parameters: session_parameters(lane_count),
+            last_committed_frame: now,
+            last_idle_activity: now,
+            last_ping: None,
+            last_ack: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SentAck {
+    cumulative: Option<u64>,
+    selective: u64,
+    at: Instant,
+}
+
+impl SentAck {
+    /// Whether `next` is this ACK's immediate twin: same content, sent too
+    /// soon after it for the phone to have repaired anything.
+    fn makes_redundant(&self, next: &SentAck) -> bool {
+        self.cumulative == next.cumulative
+            && self.selective == next.selective
+            && next.at.saturating_duration_since(self.at) < DUPLICATE_ACK_HOLDOFF
+    }
 }
 
 pub fn serve_gameplay(
@@ -382,7 +394,14 @@ pub fn serve_gameplay(
     // On Stop or failure, tell Android immediately instead of leaving it to
     // its 64 ms active or 2 s idle watchdog. Best effort: the socket may be
     // the failure.
-    notify_session_end(connection, ordered.session_id(), stopping);
+    if !connection.peer_aborted {
+        let reason = if stopping.load(Ordering::Relaxed) {
+            ABORT_CANCELLED
+        } else {
+            ABORT_PROTOCOL
+        };
+        let _ = connection.send_abort(ordered.session_id().unwrap_or(0), reason);
+    }
     metrics.note(
         crate::diagnostics::BOUNDARY,
         ordered.session_id().unwrap_or(0),
@@ -395,29 +414,6 @@ pub fn serve_gameplay(
     result
 }
 
-fn notify_session_end(
-    connection: &mut SecureConnection,
-    session_id: Option<u64>,
-    stopping: &AtomicBool,
-) {
-    if connection.peer_aborted {
-        return;
-    }
-    let reason: u16 = if stopping.load(Ordering::Relaxed) {
-        1
-    } else {
-        4
-    };
-    let _ = connection.send_record_redundant(
-        Direction::HostToPhone,
-        HOST_AUTH_ABORT,
-        session_id.unwrap_or(0),
-        0,
-        0,
-        &reason.to_le_bytes(),
-    );
-}
-
 fn serve_gameplay_inner(
     connection: &mut SecureConnection,
     ordered: &mut OrderedFrames,
@@ -426,24 +422,12 @@ fn serve_gameplay_inner(
     lane_count: u8,
     stopping: &AtomicBool,
 ) -> Result<(), SecureHostError> {
-    let mut control = GameplayState {
-        last_idle_activity: Instant::now(),
-        last_ping: None,
-        last_ack: None,
-        lane_count,
-        last_committed_frame: Instant::now(),
-    };
-    let interface_monitor = connection.monitor_interface(V5_INTERFACE_REVALIDATE_INTERVAL)?;
-    let session_start_deadline = Instant::now() + V5_SESSION_START_TIMEOUT;
-    let mut session_established = false;
+    let mut control = GameplayState::new(lane_count);
+    let interface_monitor = connection.monitor_interface(INTERFACE_REVALIDATE)?;
+    let session_start_deadline = Instant::now() + SESSION_START_TIMEOUT;
     let mut receive_buffer = [0_u8; MAX_DATAGRAM_SIZE];
-    let mut read_timeout = V5_SESSION_START_POLL;
+    let mut read_timeout = GAMEPLAY_READ_TIMEOUT;
     connection.set_read_timeout(read_timeout)?;
-    connection.send_control(HOST_HELLO, 0, None, RECEIVE_WINDOW, lane_count, || {
-        metrics.clock_nanos(Instant::now())
-    })?;
-    let mut last_hello_send = Instant::now();
-    let mut hello_interval = V5_CONTROL_REPAIR_INTERVAL;
     while !stopping.load(Ordering::Relaxed) {
         if interface_monitor.changed() {
             metrics.note(
@@ -459,27 +443,13 @@ fn serve_gameplay_inner(
             )
             .into());
         }
-        if ordered.session_id().is_none() {
-            if Instant::now() >= session_start_deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "authenticated session-start CANCEL did not arrive",
-                )
-                .into());
-            }
-            if last_hello_send.elapsed() >= hello_interval {
-                connection.send_control_once(
-                    HOST_HELLO,
-                    0,
-                    None,
-                    RECEIVE_WINDOW,
-                    lane_count,
-                    metrics.clock_nanos(Instant::now()),
-                )?;
-                last_hello_send = Instant::now();
-                // First repair stays at 2 ms; an absent phone is not flooded.
-                hello_interval = (hello_interval * 2).min(V5_HELLO_REPAIR_MAX_INTERVAL);
-            }
+        let established = ordered.session_id().is_some();
+        if !established && Instant::now() >= session_start_deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "authenticated session-start CANCEL did not arrive",
+            )
+            .into());
         }
         if sink.has_active_input()
             && control.last_committed_frame.elapsed() >= ACTIVE_INPUT_SILENCE_TIMEOUT
@@ -497,7 +467,7 @@ fn serve_gameplay_inner(
             )
             .into());
         }
-        if session_established
+        if established
             && !sink.has_active_input()
             && control.last_idle_activity.elapsed() >= IDLE_PEER_SILENCE_TIMEOUT
         {
@@ -506,12 +476,10 @@ fn serve_gameplay_inner(
             );
         }
         service_deferred(sink, stopping)?;
-        if session_established {
-            let wanted = deferred_read_timeout(sink, V5_GAMEPLAY_READ_TIMEOUT);
-            if wanted != read_timeout {
-                connection.set_read_timeout(wanted)?;
-                read_timeout = wanted;
-            }
+        let wanted = deferred_read_timeout(sink, GAMEPLAY_READ_TIMEOUT);
+        if wanted != read_timeout {
+            connection.set_read_timeout(wanted)?;
+            read_timeout = wanted;
         }
         let received = connection.receive_record_into(&mut receive_buffer);
         if let Some((reason, arrival)) = connection.last_diagnostic_discard.take() {
@@ -527,202 +495,257 @@ fn serve_gameplay_inner(
         let Some((header, arrival)) = received? else {
             continue;
         };
-        if header.message_type == PHONE_AUTH_ABORT {
-            connection.peer_aborted = true;
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "phone ended the authenticated session",
-            )
-            .into());
-        }
-        if header.message_type == PHONE_PING {
-            if header.flags != 0
-                || header.payload_length != 0
-                || ordered.session_id() != Some(header.session_id)
-            {
-                return Err(SecureHostError::Authentication("invalid idle ping"));
+        match header.message_type {
+            PHONE_AUTH_ABORT => {
+                connection.peer_aborted = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "phone ended the authenticated session",
+                )
+                .into());
             }
-            if control
-                .last_ping
-                .is_none_or(|previous| header.logical_id > previous)
-            {
-                control.last_ping = Some(header.logical_id);
-                control.last_idle_activity = arrival;
+            PHONE_PING => {
+                answer_ping(connection, ordered, metrics, &mut control, &header, arrival)?
             }
-            connection.send_control(
-                HOST_PONG,
-                header.session_id,
-                Some(header.logical_id),
-                RECEIVE_WINDOW,
-                lane_count,
-                || metrics.clock_nanos(Instant::now()),
-            )?;
-            continue;
-        }
-        if header.message_type != PHONE_TOUCH {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "authenticated record type is invalid during gameplay",
-            )
-            .into());
-        }
-        let frame = decode_touch_payload(
-            &header,
-            &receive_buffer
-                [RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + header.payload_length as usize],
-        )?;
-        process_gameplay_frame(
-            connection,
-            ordered,
-            sink,
-            metrics,
-            &mut control,
-            frame,
-            arrival,
-            stopping,
-        )?;
-        if !session_established && ordered.session_id().is_some() {
-            read_timeout = V5_GAMEPLAY_READ_TIMEOUT;
-            connection.set_read_timeout(read_timeout)?;
-            session_established = true;
+            PHONE_TOUCH => {
+                let payload = &receive_buffer
+                    [RECORD_HEADER_SIZE..RECORD_HEADER_SIZE + header.payload_length as usize];
+                let record = TouchRecord::parse(&header, payload)?;
+                process_touch_record(
+                    connection,
+                    ordered,
+                    sink,
+                    metrics,
+                    &mut control,
+                    &record,
+                    arrival,
+                    stopping,
+                )?;
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "authenticated record type is invalid during gameplay",
+                )
+                .into());
+            }
         }
     }
     Ok(())
 }
 
+fn answer_ping(
+    connection: &mut SecureConnection,
+    ordered: &OrderedFrames,
+    metrics: &mut HostMetrics,
+    control: &mut GameplayState,
+    header: &RecordHeader,
+    arrival: Instant,
+) -> Result<(), SecureHostError> {
+    if header.flags != 0
+        || header.payload_length != 0
+        || ordered.session_id() != Some(header.session_id)
+    {
+        return Err(SecureHostError::Authentication("invalid idle ping"));
+    }
+    // Only a fresh ping ID is idle progress; a re-encrypted repeat is traffic.
+    if control
+        .last_ping
+        .is_none_or(|previous| header.logical_id > previous)
+    {
+        control.last_ping = Some(header.logical_id);
+        control.last_idle_activity = arrival;
+    }
+    let parameters = control.parameters;
+    connection.send_redundant(HOST_PONG, header.session_id, header.logical_id, 0, || {
+        parameters.encode_control(metrics.clock_nanos(Instant::now()), 0)
+    })
+}
+
+/// Apply every frame of one record in order, then send at most one ACK for
+/// the whole record.
 #[allow(clippy::too_many_arguments)]
-fn process_gameplay_frame(
+fn process_touch_record(
     connection: &mut SecureConnection,
     ordered: &mut OrderedFrames,
     sink: &mut impl InputSink,
     metrics: &mut HostMetrics,
     control: &mut GameplayState,
-    frame: TouchFrame,
+    record: &TouchRecord<'_>,
     arrival: Instant,
     stopping: &AtomicBool,
 ) -> Result<(), SecureHostError> {
-    let incoming_session = frame.session_id;
+    let session_id = record.session_id();
     if ordered
         .session_id()
-        .is_some_and(|session| session != incoming_session)
+        .is_some_and(|current| current != session_id)
     {
         return Err(SecureHostError::Authentication(
             "a new gameplay session requires fresh IK",
         ));
     }
-    receive_ordered(ordered, metrics, frame, arrival);
-
-    let progressed = commit_ready(ordered, sink, metrics, stopping)?;
+    let mut progressed = false;
+    for frame in record.frames() {
+        receive_ordered(ordered, metrics, frame, arrival);
+        // Commit per frame: the first sample reaches the OS before the rest
+        // of the record is decoded.
+        progressed |= commit_ready(ordered, sink, metrics, stopping)?;
+    }
     if progressed {
         control.last_committed_frame = Instant::now();
         control.last_idle_activity = control.last_committed_frame;
     }
-
-    let Some(session_id) = ordered.session_id() else {
-        return Ok(());
-    };
-    if session_id != incoming_session {
+    // Frames ahead of the session-start CANCEL are not acknowledged.
+    if ordered.session_id() != Some(session_id) {
         return Ok(());
     }
-    let acknowledged = ordered.acknowledged_sequence();
-    let ack_started = Instant::now();
-    if !progressed
-        && control.last_ack.is_some_and(|(sent, at)| {
-            sent == acknowledged
-                && ack_started.saturating_duration_since(at) < DUPLICATE_ACK_HOLDOFF
-        })
-    {
-        // The redundant twin (or a hole behind it) arrived right after this
-        // exact ACK was sent. A real repair is at least 2 ms later and still
-        // gets its own ACK, so lost feedback recovers without extra traffic.
-        return Ok(());
-    }
-    control.last_ack = Some((acknowledged, ack_started));
-    let ack_result = if progressed {
-        connection.send_control(
-            HOST_ACK,
-            session_id,
-            acknowledged,
-            RECEIVE_WINDOW,
-            control.lane_count,
-            || metrics.clock_nanos(Instant::now()),
-        )
-    } else {
-        // A logical duplicate or ordering hole still needs an immediate ACK
-        // to recover lost feedback, but does not need another redundant pair.
-        connection.send_control_once(
-            HOST_ACK,
-            session_id,
-            acknowledged,
-            RECEIVE_WINDOW,
-            control.lane_count,
-            metrics.clock_nanos(Instant::now()),
-        )
-    };
-    metrics.observe_ack(
-        session_id,
-        acknowledged,
-        ack_started,
-        progressed,
-        ack_result.is_err(),
-    );
-    ack_result?;
-    Ok(())
+    send_ack(
+        connection, ordered, metrics, control, session_id, progressed,
+    )
 }
 
+/// One ACK per record. Progress always gets one; a record that changed
+/// nothing gets one too (its sender may have lost the previous ACK) unless
+/// it is the immediate twin of the identical ACK.
+fn send_ack(
+    connection: &mut SecureConnection,
+    ordered: &OrderedFrames,
+    metrics: &mut HostMetrics,
+    control: &mut GameplayState,
+    session_id: u64,
+    progressed: bool,
+) -> Result<(), SecureHostError> {
+    let ack = SentAck {
+        cumulative: ordered.acknowledged_sequence(),
+        selective: ordered.selective_ack(),
+        at: Instant::now(),
+    };
+    if !progressed
+        && control
+            .last_ack
+            .is_some_and(|last| last.makes_redundant(&ack))
+    {
+        return Ok(());
+    }
+    control.last_ack = Some(ack);
+    let payload = control
+        .parameters
+        .encode_control(metrics.clock_nanos(Instant::now()), ack.selective);
+    let result = connection.send_record(
+        HOST_ACK,
+        session_id,
+        ack.cumulative.unwrap_or(NO_ACK),
+        0,
+        &payload,
+    );
+    metrics.observe_ack(
+        session_id,
+        ack.cumulative,
+        ack.at,
+        progressed,
+        result.is_err(),
+    );
+    result
+}
+
+/// Wait for a remembered phone's IK message 1 and authenticate its identity.
+/// The host has not answered yet: the caller vets the route first, so a
+/// refused path never starts a session on the phone.
 pub fn accept_remembered(
     transport: TransportKind,
     port: u16,
     deadline: Instant,
-) -> Result<SecureConnection, SecureHostError> {
+) -> Result<PendingSession, SecureHostError> {
     let credentials = credentials::load_or_create()?;
     let expected_phone = *credentials
         .paired_phone_public_key()
         .ok_or(SecureHostError::NotPaired)?;
     let (socket, listener) = bind_socket(transport, port)?;
-    let (request_bytes, request, peer, binding) =
+    let (request, envelope, peer, binding) =
         wait_for_envelope_owned(&socket, deadline, transport, &listener, |envelope| {
             envelope.kind == IK_MESSAGE_1 && envelope.step == 1
         })?;
-    let exchange_id = request.exchange_id;
-    let handshake_prologue = prologue(transport, exchange_id);
     let mut handshake = build_handshake(
         IK_NAME,
         false,
         credentials.private_key(),
         None,
-        &handshake_prologue,
+        &prologue(transport, envelope.exchange_id),
     )?;
     let mut payload = [0_u8; MAX_DATAGRAM_SIZE];
-    handshake.read_message(&request.payload, &mut payload)?;
-    let actual_phone = handshake
-        .get_remote_static()
-        .ok_or(SecureHostError::Authentication(
-            "IK initiator identity missing",
-        ))?;
-    if actual_phone != expected_phone {
+    if handshake.read_message(&envelope.payload, &mut payload)? != 0 {
+        return Err(SecureHostError::Authentication(
+            "IK message 1 carried a payload",
+        ));
+    }
+    if handshake.get_remote_static() != Some(expected_phone.as_slice()) {
         return Err(SecureHostError::Authentication("unpaired phone identity"));
     }
-    let response_length = handshake.write_message(&[], &mut payload)?;
-    let response = encode_pair_envelope(
-        IK_CONTINUE,
-        exchange_id,
-        2,
-        transport,
-        &payload[..response_length],
-    )?;
-    send_plain_redundant(&socket, &response, peer)?;
-    let cipher = RecordCipher::from_handshake(&mut handshake, false)?;
-    socket.connect(peer)?;
-    socket.set_read_timeout(Some(READ_TIMEOUT))?;
-    let connection = SecureConnection::new(
+    Ok(PendingSession {
         socket,
         peer,
         binding,
-        cipher,
-        Some((request_bytes, response)),
-    );
-    Ok(connection)
+        handshake,
+        request,
+        exchange_id: envelope.exchange_id,
+        transport,
+    })
+}
+
+/// An authenticated IK message 1 the host has not answered yet.
+pub struct PendingSession {
+    socket: UdpSocket,
+    peer: SocketAddr,
+    binding: NetworkBinding,
+    handshake: HandshakeState,
+    request: Vec<u8>,
+    exchange_id: [u8; 16],
+    transport: TransportKind,
+}
+
+impl PendingSession {
+    pub fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+
+    pub fn tether_binding(&self) -> Option<&TetherBinding> {
+        self.binding.tether()
+    }
+
+    pub fn revalidate_interface(&self) -> Result<(), SecureHostError> {
+        self.binding.revalidate(self.peer)
+    }
+
+    /// Answer with IK message 2. Its encrypted payload carries the session
+    /// parameters, so the phone starts the session without a HELLO round trip.
+    pub fn complete(
+        mut self,
+        parameters: SessionParameters,
+        host_send_nanos: u64,
+    ) -> Result<SecureConnection, SecureHostError> {
+        let mut message = [0_u8; MAX_DATAGRAM_SIZE];
+        let length = self
+            .handshake
+            .write_message(&parameters.encode(host_send_nanos), &mut message)?;
+        let response = encode_pair_envelope(
+            IK_CONTINUE,
+            self.exchange_id,
+            2,
+            self.transport,
+            &message[..length],
+        )?;
+        send_plain_redundant(&self.socket, &response, self.peer)?;
+        let cipher = RecordCipher::from_handshake(&mut self.handshake, false)?;
+        self.socket.connect(self.peer)?;
+        self.socket.set_read_timeout(Some(READ_TIMEOUT))?;
+        Ok(SecureConnection::new(
+            self.socket,
+            self.peer,
+            self.binding,
+            cipher,
+            Some((self.request, response)),
+        ))
+    }
 }
 
 pub struct SecureConnection {
@@ -730,6 +753,8 @@ pub struct SecureConnection {
     peer: SocketAddr,
     binding: NetworkBinding,
     cipher: RecordCipher,
+    /// The handshake request and our reply, resent verbatim until the phone
+    /// proves it holds the split keys.
     cached_handshake: Option<(Vec<u8>, Vec<u8>)>,
     send_buffer: [u8; MAX_DATAGRAM_SIZE],
     last_diagnostic_discard: Option<(u64, Instant)>,
@@ -783,15 +808,6 @@ impl SecureConnection {
         self.cipher.connection_id()
     }
 
-    pub fn tether_binding(&self) -> Option<&TetherBinding> {
-        match &self.binding {
-            #[cfg(test)]
-            NetworkBinding::Loopback => None,
-            NetworkBinding::Usb { binding, .. } => Some(binding),
-            NetworkBinding::Wifi { .. } => None,
-        }
-    }
-
     pub fn revalidate_interface(&self) -> Result<(), SecureHostError> {
         self.binding.revalidate(self.peer)
     }
@@ -807,7 +823,7 @@ impl SecureConnection {
         let monitor_changed = Arc::clone(&changed);
         let monitor_stop = Arc::clone(&stop);
         let handle = thread::Builder::new()
-            .name("v5 interface monitor".to_owned())
+            .name("interface monitor".to_owned())
             .spawn(move || {
                 while !monitor_stop.load(Ordering::Acquire) {
                     thread::park_timeout(interval);
@@ -853,19 +869,12 @@ impl SecureConnection {
         self.last_diagnostic_discard = None;
         let (count, peer, ingress) = match receive_datagram(&self.socket, bytes) {
             Ok(value) => value,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                return Ok(None);
-            }
+            Err(error) if is_timeout(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let arrival = Instant::now();
         if peer != self.peer || !self.binding.accepts_ingress(ingress) {
-            self.last_diagnostic_discard = Some((1, arrival));
+            self.last_diagnostic_discard = Some((DISCARD_FOREIGN, arrival));
             return Ok(None);
         }
         let datagram = &mut bytes[..count];
@@ -882,31 +891,26 @@ impl SecureConnection {
                 self.cached_handshake = None;
                 Ok(Some((record, arrival)))
             }
-            Err(WireError::Replay) => {
-                self.last_diagnostic_discard = Some((2, arrival));
+            Err(error) => {
+                let reason = match error {
+                    WireError::Replay => DISCARD_REPLAY,
+                    WireError::BadTag => DISCARD_BAD_TAG,
+                    WireError::BadMagic
+                    | WireError::BadVersion(_)
+                    | WireError::WrongConnection
+                    | WireError::BadLength(_)
+                    | WireError::ReservedBits => DISCARD_MALFORMED,
+                    error => return Err(error.into()),
+                };
+                self.last_diagnostic_discard = Some((reason, arrival));
                 Ok(None)
             }
-            Err(WireError::BadTag) => {
-                self.last_diagnostic_discard = Some((3, arrival));
-                Ok(None)
-            }
-            Err(
-                WireError::BadMagic
-                | WireError::BadVersion(_)
-                | WireError::WrongConnection
-                | WireError::BadLength(_)
-                | WireError::ReservedBits,
-            ) => {
-                self.last_diagnostic_discard = Some((4, arrival));
-                Ok(None)
-            }
-            Err(error) => Err(error.into()),
         }
     }
 
-    pub fn send_record_once(
+    /// Seal and send one record to the phone under a fresh packet number.
+    pub fn send_record(
         &mut self,
-        direction: Direction,
         message_type: u8,
         session_id: u64,
         logical_id: u64,
@@ -914,7 +918,7 @@ impl SecureConnection {
         payload: &[u8],
     ) -> Result<(), SecureHostError> {
         let length = self.cipher.seal_into(
-            direction,
+            Direction::HostToPhone,
             message_type,
             session_id,
             logical_id,
@@ -926,122 +930,48 @@ impl SecureConnection {
         if sent != length {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
-                format!("short v5 datagram write: {sent}/{length}"),
+                format!("short datagram write: {sent}/{length}"),
             )
             .into());
         }
         Ok(())
     }
 
-    pub fn send_record_redundant(
+    /// Send `REDUNDANT_COPIES` independently encrypted copies. `payload` is
+    /// rebuilt for each copy so timestamps describe that attempt. Succeeds if
+    /// any copy left the socket.
+    pub fn send_redundant<P: AsRef<[u8]>>(
         &mut self,
-        direction: Direction,
         message_type: u8,
         session_id: u64,
         logical_id: u64,
         flags: u32,
-        payload: &[u8],
+        mut payload: impl FnMut() -> P,
     ) -> Result<(), SecureHostError> {
         let mut delivered = false;
         let mut first_error = None;
         for _ in 0..REDUNDANT_COPIES {
-            if let Err(error) = self.send_record_once(
-                direction,
+            match self.send_record(
                 message_type,
                 session_id,
                 logical_id,
                 flags,
-                payload,
+                payload().as_ref(),
             ) {
-                if first_error.is_none() {
-                    first_error = Some(error);
+                Ok(()) => delivered = true,
+                Err(error) => {
+                    first_error.get_or_insert(error);
                 }
-            } else {
-                delivered = true;
             }
         }
-        if delivered {
-            Ok(())
-        } else {
-            Err(first_error.unwrap_or_else(|| {
-                SecureHostError::Io(io::Error::other("v5 redundant send failed"))
-            }))
+        match first_error {
+            Some(error) if !delivered => Err(error),
+            _ => Ok(()),
         }
     }
 
-    pub fn send_control(
-        &mut self,
-        control_type: u8,
-        session_id: u64,
-        acknowledged: Option<u64>,
-        receive_window: u32,
-        lane_count: u8,
-        mut next_host_send_nanos: impl FnMut() -> u64,
-    ) -> Result<(), SecureHostError> {
-        if !matches!(control_type, HOST_HELLO | HOST_ACK | HOST_PONG) {
-            return Err(SecureHostError::Authentication("invalid host control type"));
-        }
-        let mut delivered = false;
-        let mut first_error = None;
-        for _ in 0..REDUNDANT_COPIES {
-            let payload =
-                encode_control_payload(receive_window, lane_count, next_host_send_nanos());
-            if let Err(error) = self.send_record_once(
-                Direction::HostToPhone,
-                control_type,
-                session_id,
-                acknowledged.unwrap_or(NO_ACK),
-                0,
-                &payload,
-            ) {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            } else {
-                delivered = true;
-            }
-        }
-        if delivered {
-            Ok(())
-        } else {
-            Err(first_error.unwrap_or_else(|| {
-                SecureHostError::Io(io::Error::other("v5 redundant control send failed"))
-            }))
-        }
-    }
-
-    pub fn send_control_once(
-        &mut self,
-        control_type: u8,
-        session_id: u64,
-        acknowledged: Option<u64>,
-        receive_window: u32,
-        lane_count: u8,
-        host_send_nanos: u64,
-    ) -> Result<(), SecureHostError> {
-        if !matches!(control_type, HOST_HELLO | HOST_ACK | HOST_PONG) {
-            return Err(SecureHostError::Authentication("invalid host control type"));
-        }
-        let payload = encode_control_payload(receive_window, lane_count, host_send_nanos);
-        self.send_record_once(
-            Direction::HostToPhone,
-            control_type,
-            session_id,
-            acknowledged.unwrap_or(NO_ACK),
-            0,
-            &payload,
-        )
-    }
-
-    fn send_abort(&mut self, reason: u16) -> Result<(), SecureHostError> {
-        self.send_record_redundant(
-            Direction::HostToPhone,
-            HOST_AUTH_ABORT,
-            0,
-            0,
-            0,
-            &reason.to_le_bytes(),
-        )
+    fn send_abort(&mut self, session_id: u64, reason: u16) -> Result<(), SecureHostError> {
+        self.send_redundant(HOST_AUTH_ABORT, session_id, 0, 0, || reason.to_le_bytes())
     }
 }
 
@@ -1057,7 +987,7 @@ fn wait_for_application(
     while Instant::now() < deadline {
         match commands.try_recv() {
             Ok(PairCommand::Cancel) | Err(TryRecvError::Disconnected) => {
-                connection.send_abort(1)?;
+                connection.send_abort(0, ABORT_CANCELLED)?;
                 return Err(SecureHostError::Cancelled);
             }
             Ok(PairCommand::Approve) | Err(TryRecvError::Empty) => {}
@@ -1080,18 +1010,11 @@ fn wait_for_application(
         if let Some((message_type, payload)) = retry.as_ref()
             && last_send.elapsed() >= APPLICATION_RETRY
         {
-            connection.send_record_redundant(
-                Direction::HostToPhone,
-                *message_type,
-                0,
-                0,
-                0,
-                payload,
-            )?;
+            connection.send_redundant(*message_type, 0, 0, 0, || payload.as_slice())?;
             last_send = Instant::now();
         }
     }
-    connection.send_abort(3)?;
+    connection.send_abort(0, ABORT_TIMED_OUT)?;
     Err(SecureHostError::TimedOut(
         "authenticated pairing step expired",
     ))
@@ -1304,7 +1227,7 @@ fn request_expedited_forwarding(_socket: &UdpSocket) {}
 fn confine_socket(_socket: &UdpSocket, _listener: &ListenerInterface) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "v5 interface confinement is unsupported on this host",
+        "interface confinement is unsupported on this host",
     ))
 }
 
@@ -1348,14 +1271,7 @@ fn wait_for_envelope_owned(
         }
         let (count, peer, ingress) = match receive_datagram(socket, &mut bytes) {
             Ok(value) => value,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                continue;
-            }
+            Err(error) if is_timeout(&error) => continue,
             Err(error) => return Err(error.into()),
         };
         if !listener_accepts_ingress(listener, ingress) {
@@ -1410,14 +1326,7 @@ fn wait_for_handshake_step(
         }
         let (count, source, ingress) = match receive_datagram(socket, &mut bytes) {
             Ok(value) => value,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                ) =>
-            {
-                continue;
-            }
+            Err(error) if is_timeout(&error) => continue,
             Err(error) => return Err(error.into()),
         };
         if source != peer {
@@ -1495,40 +1404,6 @@ fn send_plain_connected_redundant(socket: &UdpSocket, bytes: &[u8]) -> Result<()
         }
     }
     Ok(())
-}
-
-fn send_quality_probe(
-    connection: &mut SecureConnection,
-    probe_id: u64,
-    flags: u32,
-    started: Instant,
-) -> Result<(), SecureHostError> {
-    let mut delivered = false;
-    let mut first_error = None;
-    for _ in 0..REDUNDANT_COPIES {
-        let host_send_nanos = duration_nanos(started.elapsed());
-        if let Err(error) = connection.send_record_once(
-            Direction::HostToPhone,
-            HOST_QUALITY_PROBE,
-            0,
-            probe_id,
-            flags,
-            &host_send_nanos.to_le_bytes(),
-        ) {
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
-        } else {
-            delivered = true;
-        }
-    }
-    if delivered {
-        Ok(())
-    } else {
-        Err(first_error.unwrap_or_else(|| {
-            SecureHostError::Io(io::Error::other("v5 quality probe send failed"))
-        }))
-    }
 }
 
 #[derive(Clone)]
@@ -1626,6 +1501,13 @@ impl NetworkBinding {
         }
     }
 
+    fn tether(&self) -> Option<&TetherBinding> {
+        match self {
+            Self::Usb { binding, .. } => Some(binding),
+            _ => None,
+        }
+    }
+
     fn accepts_ingress(&self, ingress: Option<u32>) -> bool {
         match self {
             #[cfg(test)]
@@ -1654,7 +1536,7 @@ impl NetworkBinding {
 fn wifi_binding(peer: SocketAddr) -> Result<NetworkBinding, SecureHostError> {
     let IpAddr::V4(peer_ip) = peer.ip() else {
         return Err(SecureHostError::Interface(
-            "v5 discovery requires IPv4".to_owned(),
+            "discovery requires IPv4".to_owned(),
         ));
     };
     if !private_ipv4(peer_ip) {
@@ -1868,6 +1750,13 @@ fn wifi_band(frequency: u32) -> &'static str {
     }
 }
 
+fn is_timeout(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    )
+}
+
 fn duration_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -1888,13 +1777,13 @@ pub enum SecureHostError {
 impl std::fmt::Display for SecureHostError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(error) => write!(formatter, "v5 network: {error}"),
-            Self::Wire(error) => write!(formatter, "v5 wire: {error}"),
+            Self::Io(error) => write!(formatter, "network: {error}"),
+            Self::Wire(error) => write!(formatter, "wire: {error}"),
             Self::Noise(error) => write!(formatter, "Noise handshake: {error}"),
             Self::Credentials(error) => error.fmt(formatter),
             Self::Interface(message) => formatter.write_str(message),
             Self::Authentication(message) => {
-                write!(formatter, "v5 authentication failed: {message}")
+                write!(formatter, "authentication failed: {message}")
             }
             Self::TimedOut(message) => formatter.write_str(message),
             Self::NotPaired => formatter.write_str("no paired phone; pair this host first"),
@@ -2013,7 +1902,7 @@ mod tests {
 
         assert_eq!(
             hex(&handshake_prologue),
-            "686f6c6f646f72692d70686f6e652d747261636b7061642d76350002000102030405060708090a0b0c0d0e0f"
+            "686f6c6f646f72692d70686f6e652d747261636b7061642d76360002000102030405060708090a0b0c0d0e0f"
         );
         assert_eq!(
             hex(&host_public),
@@ -2032,19 +1921,19 @@ mod tests {
             concat!(
                 "23b7bb8c91ae008711fb12846780bcdf1e065f821bdfec49f57e7c7dcd4c4823",
                 "f56b5ed019d6b4f7d390bd2416f19670654ee0fdcfd6a275323659d4bc92bd3b",
-                "bfa33a1e12cb80ccbaa5fe3be21e12a6cf4b9a56b3cdc11bcb166b362cb1b576"
+                "eac7cf12d97459e8bce0f17b8686e1e9c32d8910b963c3f7ab6b51b3fdda186a"
             )
         );
         assert_eq!(
             hex(&m3),
             concat!(
                 "f531830cca96c417accf9c7fbb8b15f7eb91cc4ec6e41d779f704ed44dc67f66",
-                "d8795cbaffa82eeb78befae0e0cde6c0d922ad90d8718e5c88d2cdcb78ed9563"
+                "3bdd1c6d809eb4c5cea8fcc8b37a03f7a58efc53a85d46c286b57342424311c1"
             )
         );
         assert_eq!(
             hex(&hash),
-            "bbd8c76e72aba9685e6855cc0862de61d1d01529342cb8987f23c9a8b65e647e"
+            "6977c5b56b759d9a520bd729380074a5613eae3bf5fe5642158d81e2b9f1b50a"
         );
 
         let phone_random = sequence(0xa0);
@@ -2054,17 +1943,17 @@ mod tests {
         let digest = crate::secure::sas_digest(&hash, &phone_random, &host_random);
         assert_eq!(
             hex(&phone_commit),
-            "ea96f02ca5508df65cbe4c43e2b03fc4684bb9be33411f3aaa38edc625c112ca"
+            "c6b017e01832c9d7abf45934974870e4a2da962b8e83575607b3b0dcb10a3735"
         );
         assert_eq!(
             hex(&host_commit),
-            "3156cb718322b5695a70a7a4d4097dabf1ffce6f2a5d5bc0fd779617bc10e698"
+            "ab551195b25ad3b763aa5f3feb8ae61097263247319d53b545cdb89ae7d319c5"
         );
         assert_eq!(
             hex(&digest),
-            "95fedb94b066e0ec093efcd8026c8a8d82200248804fa15a8f372d1fc42bbea7"
+            "f0ab28ccbe90d24214154c1d06696aeaa4d09e1ef9721261857a9f5256da1a5b"
         );
-        assert_eq!(crate::secure::sas_pattern(digest), [6, 3, 6, 4, 2, 5, 5, 6]);
+        assert_eq!(crate::secure::sas_pattern(digest), [2, 5, 2, 5, 5, 4, 1, 5]);
 
         let mut phone_cipher = RecordCipher::from_handshake(&mut phone, false).unwrap();
         let record = phone_cipher
@@ -2073,9 +1962,9 @@ mod tests {
         assert_eq!(
             hex(&record),
             concat!(
-                "4850543505044600b8be365398adc6fe000000000000000000000000000000000",
-                "9000000000000000000000006000000eae096ab9385ca84ff8fd2b82c4de6cc",
-                "4890137c4c0d"
+                "4850543606044600326fc09cffc2e6c200000000000000000000000000000000",
+                "09000000000000000000000006000000eae096ab93850975f72cbd58bf71cc41",
+                "c31a0dea4fae"
             )
         );
         let second_record = phone_cipher
@@ -2084,9 +1973,9 @@ mod tests {
         assert_eq!(
             hex(&second_record),
             concat!(
-                "4850543505044600b8be365398adc6fe000000000000000001000000000000000",
-                "900000000000000000000000600000033de984324ab289c9dd1f981e60265f9f",
-                "f97e2d743e6"
+                "4850543606044600326fc09cffc2e6c200000000000000000100000000000000",
+                "0900000000000000000000000600000033de984324ab761f90dcad0d39c3b93a",
+                "dcfaeebc7fd0"
             )
         );
 
@@ -2114,32 +2003,35 @@ mod tests {
         let ik_m1_len = ik_phone.write_message(&[], &mut buffer).unwrap();
         let ik_m1 = buffer[..ik_m1_len].to_vec();
         ik_host.read_message(&ik_m1, &mut payload).unwrap();
-        let ik_m2_len = ik_host.write_message(&[], &mut buffer).unwrap();
+        // IK message 2 carries the session parameters (replacing v5 HELLO).
+        let parameters = session_parameters(6).encode(0x0807_0605_0403_0201);
+        let ik_m2_len = ik_host.write_message(&parameters, &mut buffer).unwrap();
         let ik_m2 = buffer[..ik_m2_len].to_vec();
-        ik_phone.read_message(&ik_m2, &mut payload).unwrap();
+        let ik_payload_len = ik_phone.read_message(&ik_m2, &mut payload).unwrap();
+        assert_eq!(payload[..ik_payload_len], parameters);
         assert_eq!(ik_phone.get_handshake_hash(), ik_host.get_handshake_hash());
         assert_eq!(
             hex(&ik_prologue),
-            "686f6c6f646f72692d70686f6e652d747261636b7061642d76350001f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+            "686f6c6f646f72692d70686f6e652d747261636b7061642d76360001f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
         );
         assert_eq!(
             hex(&ik_m1),
             concat!(
                 "9fd7ad6dcff4298dd3f96d5b1b2af910a0535b1488d7f8fabb349a982880b615",
                 "ea374cd73714b7bd8d86c36ef4edda85485b3a2b38748dff758fd6ec58a7fb5a",
-                "742888fec59468946610d729351f3f31f7693e1d35a73a19431d9b717c57d0fb"
+                "8a8e41171e51f08d93b6aa549f14cc552d48f941f2db491d8f61982720b5602d"
             )
         );
         assert_eq!(
             hex(&ik_m2),
             concat!(
                 "3f3e5f6d86926c9c128cf84581574f96840d98ee5ab53b1ec3b76e2bb25b945e",
-                "d563e952a259dcdc24aab223c0760b12"
+                "512fc5d532d298f88d3122fadeced96e315f4782fef1855fabe09742b9d4dbf7"
             )
         );
         assert_eq!(
             hex(ik_phone.get_handshake_hash()),
-            "217b487f44138992d172c6902fc2ba17c08d0205cb11c9b2e209f9aeeffaf3a8"
+            "45f5c953a9233003fc076d6d069257ec76a04d65af607be74cb70246411d10e7"
         );
     }
 
