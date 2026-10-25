@@ -74,12 +74,8 @@ final class SecureTransport implements TouchTransport {
     private final Object queueLock = new Object();
     private final SendQueue unacknowledged = new SendQueue(MAX_HOST_WINDOW, MAX_TOUCH_FRAME);
     private final ArrayBlockingQueue<int[]> submittedPattern = new ArrayBlockingQueue<>(1);
-    private final int[] retainedPointerIds = new int[TouchSample.MAX_CONTACTS];
-    private final float[] retainedX = new float[TouchSample.MAX_CONTACTS];
-    private final float[] retainedY = new float[TouchSample.MAX_CONTACTS];
-    private final float[] retainedPressure = new float[TouchSample.MAX_CONTACTS];
-    private final float[] retainedTouchMajor = new float[TouchSample.MAX_CONTACTS];
-    private final boolean[] retainedTouching = new boolean[TouchSample.MAX_CONTACTS];
+    /** The latest complete snapshot: every queued frame, heartbeat, and reconstruction. */
+    private final ContactSnapshot retained = new ContactSnapshot();
     private final PressureFilter pressureFilter;
 
     private volatile int generation;
@@ -108,7 +104,6 @@ final class SecureTransport implements TouchTransport {
     private long lastAcknowledgementProgressNanos;
     private long activePathStartedNanos;
     private int activeContactCount;
-    private int retainedContactCount;
     private boolean queueOverflowed;
     private final DiagnosticWorker diagnostics;
     // Unwrapped once per Start: reconnects must not repeat a Keystore unwrap
@@ -252,16 +247,10 @@ final class SecureTransport implements TouchTransport {
         synchronized (queueLock) {
             boolean wasActiveDataPath = hasActiveDataPathLocked();
             pressureFilter.update(action, actionPointerId, contactCount, pointerIds, pressure, touching);
-            activeContactCount = countActiveContacts(touching, contactCount);
-            retainContactsLocked(
-                    contactCount,
-                    pointerIds,
-                    x,
-                    y,
-                    pressure,
-                    touchMajor,
-                    touching
-            );
+            retained.copyFrom(contactCount, pointerIds, x, y, pressure, touchMajor, touching);
+            activeContactCount = retained.activeCount();
+            int frameFlags = (locked ? TouchSample.FRAME_FLAG_LOCKED : 0)
+                    | (historical ? TouchSample.FRAME_FLAG_HISTORICAL : 0);
             // Handshake and sequence-zero CANCEL form a hard boundary. Keep
             // only the latest snapshot until the host commits that boundary.
             if (!running || !sessionStarted) {
@@ -269,22 +258,7 @@ final class SecureTransport implements TouchTransport {
                         eventNanos, historical ? 1 : 0, 1, 0, 0, 0, 0, 0);
                 return;
             }
-            enqueueFrameLocked(
-                    action,
-                    actionPointerId,
-                    locked,
-                    false,
-                    eventNanos,
-                    callbackNanos,
-                    historical,
-                    contactCount,
-                    pointerIds,
-                    x,
-                    y,
-                    pressure,
-                    touchMajor,
-                    touching
-            );
+            enqueueFrameLocked(action, actionPointerId, frameFlags, eventNanos, callbackNanos, retained);
             updateActivePathStateLocked(wasActiveDataPath, System.nanoTime());
             queueLock.notifyAll();
         }
@@ -294,19 +268,12 @@ final class SecureTransport implements TouchTransport {
     private Frame enqueueFrameLocked(
             int action,
             int actionPointerId,
-            boolean locked,
-            boolean sessionStart,
+            int frameFlags,
             long eventNanos,
             long callbackNanos,
-            boolean historical,
-            int contactCount,
-            int[] pointerIds,
-            float[] x,
-            float[] y,
-            float[] pressure,
-            float[] touchMajor,
-            boolean[] touching
+            ContactSnapshot contacts
     ) {
+        boolean historical = (frameFlags & TouchSample.FRAME_FLAG_HISTORICAL) != 0;
         if (unacknowledged.size() >= MAX_HOST_WINDOW) {
             // Never evict or coalesce gameplay. The watchdog turns this into
             // a clean authenticated-session failure and the retained snapshot
@@ -319,35 +286,33 @@ final class SecureTransport implements TouchTransport {
         }
         long sequence = nextSequence++;
         int payloadLength = SecureProtocol.TOUCH_FRAME_HEADER_SIZE
-                + contactCount * SecureProtocol.CONTACT_SIZE;
+                + contacts.count * SecureProtocol.CONTACT_SIZE;
         Frame pending = unacknowledged.add(sequence, payloadLength, System.nanoTime());
         ByteBuffer packet = pending.writer;
         packet.putLong(eventNanos);
         packet.putLong(callbackNanos);
         packet.put((byte) action);
         packet.put((byte) (actionPointerId & 0xFF));
-        packet.put((byte) contactCount);
-        int frameFlags = locked ? TouchSample.FRAME_FLAG_LOCKED : 0;
-        if (sessionStart) frameFlags |= TouchSample.FRAME_FLAG_SESSION_START;
-        if (historical) frameFlags |= TouchSample.FRAME_FLAG_HISTORICAL;
+        packet.put((byte) contacts.count);
         packet.put((byte) frameFlags);
         if (diagnostics != null) recordLocked(DiagnosticRecorder.QUEUED,
                 pending.queuedNanos, sequence, eventNanos, callbackNanos,
-                diagnosticFlags(action, sessionStart, historical), unacknowledged.size(), hostWindow, 0, 0, 0);
-        for (int index = 0; index < contactCount; index++) {
-            float localX = x[index];
-            float localY = y[index];
+                diagnosticFlags(action, frameFlags), unacknowledged.size(), hostWindow, 0, 0, 0);
+        for (int index = 0; index < contacts.count; index++) {
+            float localX = contacts.x[index];
+            float localY = contacts.y[index];
+            boolean touching = contacts.touching[index];
             boolean inside = localX >= 0f && localX <= 1f
                     && localY >= 0f && localY <= 1f;
             int contactFlags = inside ? TouchSample.CONTACT_FLAG_INSIDE : 0;
-            if (touching[index]) contactFlags |= TouchSample.CONTACT_FLAG_TIP;
-            contactFlags |= pressureFilter.contactFlags(pointerIds[index], touching[index]);
-            packet.put((byte) (pointerIds[index] & 0xFF));
+            if (touching) contactFlags |= TouchSample.CONTACT_FLAG_TIP;
+            contactFlags |= pressureFilter.contactFlags(contacts.pointerIds[index], touching);
+            packet.put((byte) (contacts.pointerIds[index] & 0xFF));
             packet.put((byte) contactFlags);
             packet.putShort((short) clampFixed(localX));
             packet.putShort((short) clampFixed(localY));
-            packet.putShort((short) normalizeUnsigned(pressure[index]));
-            packet.putShort((short) normalizeUnsigned(touchMajor[index]));
+            packet.putShort((short) normalizeUnsigned(contacts.pressure[index]));
+            packet.putShort((short) normalizeUnsigned(contacts.touchMajor[index]));
         }
         return pending;
     }
@@ -527,8 +492,8 @@ final class SecureTransport implements TouchTransport {
             highestAcknowledged = SecureProtocol.NO_ACK;
             clearUnacknowledgedLocked();
             long now = System.nanoTime();
-            enqueueFrameLocked(TouchSample.ACTION_CANCEL, 0, false, true, now, now, false,
-                    0, null, null, null, null, null, null);
+            enqueueFrameLocked(TouchSample.ACTION_CANCEL, 0, TouchSample.FRAME_FLAG_SESSION_START,
+                    now, now, ContactSnapshot.NONE);
             sessionStarted = true;
             if (activeContactCount > 0) {
                 activePathStartedNanos = now;
@@ -795,22 +760,8 @@ final class SecureTransport implements TouchTransport {
 
     /** Full-state frame from the latest snapshot: heartbeat and fresh-session reconstruction. */
     private void enqueueRetainedSnapshotLocked(long nowNanos, boolean singleCopy) {
-        Frame frame = enqueueFrameLocked(
-                TouchSample.ACTION_HEARTBEAT,
-                0,
-                true,
-                false,
-                nowNanos,
-                nowNanos,
-                false,
-                retainedContactCount,
-                retainedPointerIds,
-                retainedX,
-                retainedY,
-                retainedPressure,
-                retainedTouchMajor,
-                retainedTouching
-        );
+        Frame frame = enqueueFrameLocked(TouchSample.ACTION_HEARTBEAT, 0,
+                TouchSample.FRAME_FLAG_LOCKED, nowNanos, nowNanos, retained);
         if (frame != null) frame.singleCopy = singleCopy;
     }
 
@@ -1595,7 +1546,7 @@ final class SecureTransport implements TouchTransport {
         lastControlReceiveNanos = 0;
         lastAcknowledgementProgressNanos = 0;
         activePathStartedNanos = 0;
-        activeContactCount = countActiveContacts(retainedTouching, retainedContactCount);
+        activeContactCount = retained.activeCount();
         queueOverflowed = false;
         clearUnacknowledgedLocked();
     }
@@ -1635,15 +1586,15 @@ final class SecureTransport implements TouchTransport {
         unacknowledged.clear();
     }
 
-    private static long diagnosticFlags(int action, boolean start, boolean historical) {
+    private static long diagnosticFlags(int action, int frameFlags) {
+        boolean start = (frameFlags & TouchSample.FRAME_FLAG_SESSION_START) != 0;
+        boolean historical = (frameFlags & TouchSample.FRAME_FLAG_HISTORICAL) != 0;
         return (start ? 8 : action == TouchSample.ACTION_HEARTBEAT ? 4 : 1) | (historical ? 2 : 0);
     }
 
     private static long diagnosticFlags(Frame frame) {
-        int flags = Byte.toUnsignedInt(frame.payload[SecureProtocol.FRAME_FLAGS_OFFSET]);
         return diagnosticFlags(Byte.toUnsignedInt(frame.payload[SecureProtocol.FRAME_ACTION_OFFSET]),
-                (flags & TouchSample.FRAME_FLAG_SESSION_START) != 0,
-                (flags & TouchSample.FRAME_FLAG_HISTORICAL) != 0);
+                Byte.toUnsignedInt(frame.payload[SecureProtocol.FRAME_FLAGS_OFFSET]));
     }
 
     private void diagnosticAckLocked(long sequence, long now, int progress, long hostSend) {
@@ -1668,25 +1619,6 @@ final class SecureTransport implements TouchTransport {
         recordLocked(kind, at, frame.sequence, frame.queuedNanos, frame.writer.getLong(0),
                 frame.writer.getLong(8), diagnosticFlags(frame), frame.firstSelectedNanos,
                 frame.sendAttempts, unacknowledged.size(), acknowledged);
-    }
-
-    private void retainContactsLocked(
-            int contactCount,
-            int[] pointerIds,
-            float[] x,
-            float[] y,
-            float[] pressure,
-            float[] touchMajor,
-            boolean[] touching
-    ) {
-        retainedContactCount = contactCount;
-        if (contactCount == 0) return;
-        System.arraycopy(pointerIds, 0, retainedPointerIds, 0, contactCount);
-        System.arraycopy(x, 0, retainedX, 0, contactCount);
-        System.arraycopy(y, 0, retainedY, 0, contactCount);
-        System.arraycopy(pressure, 0, retainedPressure, 0, contactCount);
-        System.arraycopy(touchMajor, 0, retainedTouchMajor, 0, contactCount);
-        System.arraycopy(touching, 0, retainedTouching, 0, contactCount);
     }
 
     private long nextSessionId() {
@@ -1754,15 +1686,6 @@ final class SecureTransport implements TouchTransport {
         return Math.round(clamped * 65_535f);
     }
 
-    private static int countActiveContacts(boolean[] touching, int contactCount) {
-        if (touching == null) return 0;
-        int active = 0;
-        for (int index = 0; index < contactCount; index++) {
-            if (touching[index]) active++;
-        }
-        return active;
-    }
-
     private static void zeroPairingSecrets(
             byte[] exchangeId,
             byte[] hostPublicKey,
@@ -1785,6 +1708,39 @@ final class SecureTransport implements TouchTransport {
 
     private static void zero(byte[] bytes) {
         if (bytes != null) Arrays.fill(bytes, (byte) 0);
+    }
+
+    /** One complete simultaneous contact snapshot, copied without allocating. */
+    private static final class ContactSnapshot {
+        static final ContactSnapshot NONE = new ContactSnapshot();
+
+        final int[] pointerIds = new int[TouchSample.MAX_CONTACTS];
+        final float[] x = new float[TouchSample.MAX_CONTACTS];
+        final float[] y = new float[TouchSample.MAX_CONTACTS];
+        final float[] pressure = new float[TouchSample.MAX_CONTACTS];
+        final float[] touchMajor = new float[TouchSample.MAX_CONTACTS];
+        final boolean[] touching = new boolean[TouchSample.MAX_CONTACTS];
+        int count;
+
+        void copyFrom(int contactCount, int[] pointerIds, float[] x, float[] y,
+                      float[] pressure, float[] touchMajor, boolean[] touching) {
+            count = contactCount;
+            if (contactCount == 0) return;
+            System.arraycopy(pointerIds, 0, this.pointerIds, 0, contactCount);
+            System.arraycopy(x, 0, this.x, 0, contactCount);
+            System.arraycopy(y, 0, this.y, 0, contactCount);
+            System.arraycopy(pressure, 0, this.pressure, 0, contactCount);
+            System.arraycopy(touchMajor, 0, this.touchMajor, 0, contactCount);
+            System.arraycopy(touching, 0, this.touching, 0, contactCount);
+        }
+
+        int activeCount() {
+            int active = 0;
+            for (int index = 0; index < count; index++) {
+                if (touching[index]) active++;
+            }
+            return active;
+        }
     }
 
     private static final class SignalInfo {

@@ -99,10 +99,14 @@ pub fn pair(
     let mut credentials = credentials::load_or_create()?;
     let (socket, listener) = bind_socket(transport, port)?;
     report(PairEvent::Waiting);
-    let (probe_bytes, probe, peer, binding) =
-        wait_for_envelope_owned(&socket, deadline, transport, &listener, |envelope| {
-            envelope.kind == PAIR_PROBE && envelope.step == 0 && envelope.payload.is_empty()
-        })?;
+    let Discovered {
+        raw: probe_bytes,
+        envelope: probe,
+        peer,
+        binding,
+    } = wait_for_envelope(&socket, deadline, transport, &listener, |envelope| {
+        envelope.kind == PAIR_PROBE && envelope.step == 0 && envelope.payload.is_empty()
+    })?;
     let exchange_id = probe.exchange_id;
     let prologue = prologue(transport, exchange_id);
     let mut handshake = build_handshake(XX_NAME, true, credentials.private_key(), None, &prologue)?;
@@ -333,7 +337,6 @@ const SESSION_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// nothing and arrives sooner than this after the identical ACK is the
 /// immediate redundant twin, which cannot have observed that ACK's loss.
 const DUPLICATE_ACK_HOLDOFF: Duration = Duration::from_millis(1);
-const GAMEPLAY_READ_TIMEOUT: Duration = Duration::from_millis(4);
 
 /// The parameters a host with `lane_count` lanes announces for a session.
 pub fn session_parameters(lane_count: u8) -> SessionParameters {
@@ -426,7 +429,7 @@ fn serve_gameplay_inner(
     let interface_monitor = connection.monitor_interface(INTERFACE_REVALIDATE)?;
     let session_start_deadline = Instant::now() + SESSION_START_TIMEOUT;
     let mut receive_buffer = [0_u8; MAX_DATAGRAM_SIZE];
-    let mut read_timeout = GAMEPLAY_READ_TIMEOUT;
+    let mut read_timeout = READ_TIMEOUT;
     connection.set_read_timeout(read_timeout)?;
     while !stopping.load(Ordering::Relaxed) {
         if interface_monitor.changed() {
@@ -476,7 +479,7 @@ fn serve_gameplay_inner(
             );
         }
         service_deferred(sink, stopping)?;
-        let wanted = deferred_read_timeout(sink, GAMEPLAY_READ_TIMEOUT);
+        let wanted = deferred_read_timeout(sink, READ_TIMEOUT);
         if wanted != read_timeout {
             connection.set_read_timeout(wanted)?;
             read_timeout = wanted;
@@ -661,10 +664,14 @@ pub fn accept_remembered(
         .paired_phone_public_key()
         .ok_or(SecureHostError::NotPaired)?;
     let (socket, listener) = bind_socket(transport, port)?;
-    let (request, envelope, peer, binding) =
-        wait_for_envelope_owned(&socket, deadline, transport, &listener, |envelope| {
-            envelope.kind == IK_MESSAGE_1 && envelope.step == 1
-        })?;
+    let Discovered {
+        raw: request,
+        envelope,
+        peer,
+        binding,
+    } = wait_for_envelope(&socket, deadline, transport, &listener, |envelope| {
+        envelope.kind == IK_MESSAGE_1 && envelope.step == 1
+    })?;
     let mut handshake = build_handshake(
         IK_NAME,
         false,
@@ -1251,13 +1258,22 @@ struct OwnedEnvelope {
     payload: Vec<u8>,
 }
 
-fn wait_for_envelope_owned(
+/// A discovery datagram that matched, and the route it arrived on.
+struct Discovered {
+    /// The exact datagram, kept to recognize a byte-identical retransmission.
+    raw: Vec<u8>,
+    envelope: OwnedEnvelope,
+    peer: SocketAddr,
+    binding: NetworkBinding,
+}
+
+fn wait_for_envelope(
     socket: &UdpSocket,
     deadline: Instant,
     transport: TransportKind,
     listener: &ListenerInterface,
     predicate: impl Fn(&OwnedEnvelope) -> bool,
-) -> Result<(Vec<u8>, OwnedEnvelope, SocketAddr, NetworkBinding), SecureHostError> {
+) -> Result<Discovered, SecureHostError> {
     let mut bytes = [0_u8; MAX_DATAGRAM_SIZE];
     let mut last_interface_check = Instant::now();
     while Instant::now() < deadline {
@@ -1277,8 +1293,7 @@ fn wait_for_envelope_owned(
         if !listener_accepts_ingress(listener, ingress) {
             continue;
         }
-        let raw = bytes[..count].to_vec();
-        let envelope = match decode_pair_envelope(&raw) {
+        let envelope = match decode_pair_envelope(&bytes[..count]) {
             Ok(envelope) if envelope.transport == transport => OwnedEnvelope {
                 kind: envelope.kind,
                 exchange_id: envelope.exchange_id,
@@ -1294,7 +1309,12 @@ fn wait_for_envelope_owned(
             Ok(binding) => binding,
             Err(_) => continue,
         };
-        return Ok((raw, envelope, peer, binding));
+        return Ok(Discovered {
+            raw: bytes[..count].to_vec(),
+            envelope,
+            peer,
+            binding,
+        });
     }
     Err(SecureHostError::TimedOut(
         "no phone found on the selected interface",
