@@ -35,8 +35,8 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY, REG_BINARY,
-    REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumValueW,
-    RegFlushKey, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, RegSetValueExW,
+    REG_MULTI_SZ, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW,
+    RegEnumValueW, RegFlushKey, RegOpenKeyExW, RegQueryInfoKeyW, RegQueryValueExW, RegSetValueExW,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess,
@@ -416,7 +416,7 @@ fn capture_family(
     let policies = persisted_policies()?
         .into_iter()
         .filter(|(_, policy)| {
-            policy.family == family && same_adapter_instance(&policy.adapter, &adapter)
+            policy.family == family && same_recovery_adapter(&policy.adapter, &adapter)
         })
         .collect();
     match recover_policies(policies, recover_policy, remove_policy_value)? {
@@ -591,6 +591,7 @@ fn restore_snapshot(snapshot: &InterfaceSnapshot) -> io::Result<()> {
     // originals are recreated only when the current table is a subset of the
     // captured state (the normal partial-delete/rollback case).
     if let Some(missing) = missing_original_indices(&current_keys, &original_keys) {
+        let configured = configured_gateways(&adapter, snapshot.family)?;
         for index in missing {
             let route = &original_routes[index];
             let Some((next_hop, _)) = sockaddr_inet_ip(&route.NextHop) else {
@@ -599,13 +600,17 @@ fn restore_snapshot(snapshot: &InterfaceSnapshot) -> io::Result<()> {
                     "captured tether route has an unsupported next-hop family",
                 ));
             };
-            if !captured_gateway_is_available(next_hop, &gateways) {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "captured gateway {next_hop} is no longer configured on tether interface {interface_index}; retaining the recovery journal",
-                    ),
-                ));
+            match classify_captured_gateway(next_hop, &gateways, &configured) {
+                CapturedGateway::Available => {}
+                CapturedGateway::Stale => continue,
+                CapturedGateway::Unconfirmed => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "captured gateway {next_hop} is no longer configured on tether interface {interface_index}; retaining the recovery journal",
+                        ),
+                    ));
+                }
             }
             let result = unsafe { CreateIpForwardEntry2(route) };
             if result != ERROR_SUCCESS
@@ -719,8 +724,135 @@ fn same_multiset<T: Eq>(left: &[T], right: &[T]) -> bool {
         )
 }
 
-fn captured_gateway_is_available(next_hop: IpAddr, current_gateways: &[IpAddr]) -> bool {
-    next_hop.is_unspecified() || current_gateways.contains(&next_hop)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CapturedGateway {
+    /// The gateway is still routed or still configured by DHCP/static config.
+    Available,
+    /// Windows now configures a different gateway (a new tether lease), so
+    /// the captured route belongs to a lease that no longer exists.
+    Stale,
+    /// No current gateway can be confirmed; keep the journal and retry.
+    Unconfirmed,
+}
+
+/// `routed` comes from `GetAdaptersAddresses`, which derives gateways from the
+/// default-route table. The policy itself deletes those routes, so a captured
+/// gateway can only be confirmed through `configured` (the adapter's DHCP or
+/// static gateway). A different configured gateway means Android started a
+/// new tether lease; recreating the old route would point at a dead next hop.
+fn classify_captured_gateway(
+    next_hop: IpAddr,
+    routed: &[IpAddr],
+    configured: &[IpAddr],
+) -> CapturedGateway {
+    if next_hop.is_unspecified() || routed.contains(&next_hop) || configured.contains(&next_hop) {
+        CapturedGateway::Available
+    } else if configured.is_empty() {
+        CapturedGateway::Unconfirmed
+    } else {
+        CapturedGateway::Stale
+    }
+}
+
+/// Gateways Windows currently configures for an IPv4 interface, independent
+/// of whether a default route through them exists.
+fn configured_gateways(
+    adapter: &AdapterIdentity,
+    family: ADDRESS_FAMILY,
+) -> io::Result<Vec<IpAddr>> {
+    if family != IPV4 || adapter.adapter_name.is_empty() {
+        return Ok(Vec::new());
+    }
+    let path = format!(
+        r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
+        adapter.adapter_name
+    );
+    let wide_path = wide_null(&path);
+    let mut key = null_mut();
+    let result = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            wide_path.as_ptr(),
+            0,
+            KEY_QUERY_VALUE | KEY_WOW64_64KEY,
+            &mut key,
+        )
+    };
+    if is_missing(result) {
+        return Ok(Vec::new());
+    }
+    check_win32(result, "open the tether interface TCP/IP configuration")?;
+    let key = RegistryKey(key);
+    let mut gateways = Vec::new();
+    for value in ["DhcpDefaultGateway", "DefaultGateway"] {
+        for text in read_registry_strings(&key, value)? {
+            if let Ok(address) = text.trim().parse::<IpAddr>()
+                && !address.is_unspecified()
+                && !gateways.contains(&address)
+            {
+                gateways.push(address);
+            }
+        }
+    }
+    Ok(gateways)
+}
+
+fn read_registry_strings(key: &RegistryKey, name: &str) -> io::Result<Vec<String>> {
+    let wide_name = wide_null(name);
+    let mut value_type = 0;
+    let mut length = 0;
+    let result = unsafe {
+        RegQueryValueExW(
+            key.0,
+            wide_name.as_ptr(),
+            null(),
+            &mut value_type,
+            null_mut(),
+            &mut length,
+        )
+    };
+    if is_missing(result) {
+        return Ok(Vec::new());
+    }
+    check_win32(result, "read the tether interface gateway configuration")?;
+    if value_type != REG_MULTI_SZ && value_type != REG_SZ {
+        return Ok(Vec::new());
+    }
+    let mut buffer = vec![0_u16; (length as usize).div_ceil(2).max(1)];
+    loop {
+        let mut actual_length = (buffer.len() * 2) as u32;
+        let result = unsafe {
+            RegQueryValueExW(
+                key.0,
+                wide_name.as_ptr(),
+                null(),
+                &mut value_type,
+                buffer.as_mut_ptr().cast(),
+                &mut actual_length,
+            )
+        };
+        if result == ERROR_MORE_DATA {
+            buffer.resize((actual_length as usize).div_ceil(2), 0);
+            continue;
+        }
+        if is_missing(result) {
+            return Ok(Vec::new());
+        }
+        check_win32(result, "read the tether interface gateway configuration")?;
+        if value_type != REG_MULTI_SZ && value_type != REG_SZ {
+            return Ok(Vec::new());
+        }
+        buffer.truncate((actual_length as usize) / 2);
+        return Ok(split_registry_strings(&buffer));
+    }
+}
+
+fn split_registry_strings(buffer: &[u16]) -> Vec<String> {
+    buffer
+        .split(|unit| *unit == 0)
+        .filter(|part| !part.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
 }
 
 /// Restores a newly-added suffix in reverse mutation order. Successfully
@@ -1311,7 +1443,7 @@ fn recover_policy(policy: &PersistedPolicy) -> io::Result<PolicyRecovery> {
     let Some((adapter, gateways)) = adapter_details_for_identity(&policy.adapter)? else {
         return Ok(PolicyRecovery::Deferred);
     };
-    // Recovery is bound to the durable GUID/LUID/MAC identity, not today's
+    // Recovery is bound to the durable GUID/LUID identity, not today's
     // display-name heuristic. Otherwise tightening adapter selection could
     // strand a journal written by an older build and leave its owned state
     // unrestored. Only new mutations must pass `is_tether_adapter`.
@@ -1332,16 +1464,21 @@ fn recover_policy(policy: &PersistedPolicy) -> io::Result<PolicyRecovery> {
     let original_keys: Vec<RouteKey> = original_rows.iter().map(route_key).collect();
     let mut verify_keys = Vec::new();
     if let Some(missing) = missing_original_indices(&current_keys, &original_keys) {
+        let configured = configured_gateways(&adapter, family)?;
         for index in missing {
             let route = &policy.routes[index];
-            if !captured_gateway_is_available(route.next_hop, &gateways) {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "captured gateway {} is no longer configured on tether interface {}; retaining the recovery journal",
-                        route.next_hop, adapter.interface_index,
-                    ),
-                ));
+            match classify_captured_gateway(route.next_hop, &gateways, &configured) {
+                CapturedGateway::Available => {}
+                CapturedGateway::Stale => continue,
+                CapturedGateway::Unconfirmed => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "captured gateway {} is no longer configured on tether interface {}; retaining the recovery journal",
+                            route.next_hop, adapter.interface_index,
+                        ),
+                    ));
+                }
             }
             let row = &original_rows[index];
             let result = unsafe { CreateIpForwardEntry2(row) };
@@ -1374,10 +1511,17 @@ fn recover_policy(policy: &PersistedPolicy) -> io::Result<PolicyRecovery> {
 }
 
 fn same_adapter_instance(expected: &AdapterIdentity, actual: &AdapterIdentity) -> bool {
+    same_recovery_adapter(expected, actual) && expected.physical_address == actual.physical_address
+}
+
+/// Restoration binds to the durable Windows interface (GUID/LUID), not the
+/// MAC. Android (notably Samsung) randomizes the RNDIS MAC for every tether
+/// session while Windows keeps the same interface and its route flags, so a
+/// MAC-bound journal could never be completed after re-enabling tethering.
+fn same_recovery_adapter(expected: &AdapterIdentity, actual: &AdapterIdentity) -> bool {
     expected.adapter_name == actual.adapter_name
         && expected.luid == actual.luid
         && expected.network_guid == actual.network_guid
-        && expected.physical_address == actual.physical_address
 }
 
 fn persist_policy(policy: &PersistedPolicy) -> io::Result<String> {
@@ -1764,7 +1908,7 @@ fn adapter_details_for_identity(
 ) -> io::Result<Option<(AdapterIdentity, Vec<IpAddr>)>> {
     let mut matched = None;
     for details in all_adapter_details()? {
-        if !same_adapter_instance(expected, &details.0) {
+        if !same_recovery_adapter(expected, &details.0) {
             continue;
         }
         if matched.is_some() {
@@ -1976,13 +2120,13 @@ unsafe fn ansi_string(pointer: windows_sys::core::PSTR) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterIdentity, IPV4, IPV6, PersistedPolicy, PersistedRoute, PolicyRecovery, ProcessOwner,
-        RecoveryOutcome, TetherBinding, TetherPrefix, TetherSnapshot,
-        captured_gateway_is_available, current_process_owner, decode_policy, encode_policy,
+        AdapterIdentity, CapturedGateway, IPV4, IPV6, PersistedPolicy, PersistedRoute,
+        PolicyRecovery, ProcessOwner, RecoveryOutcome, TetherBinding, TetherPrefix, TetherSnapshot,
+        classify_captured_gateway, current_process_owner, decode_policy, encode_policy,
         interface_identity_matches, is_tether_adapter, missing_original_indices,
         prepare_interface_row_for_set, recover_policies, recover_policy, restore_route_row,
-        rollback_suffix, same_adapter_instance, same_multiset, same_prefix,
-        should_restore_owned_flag, sockaddr_inet_ip, valid_tether_prefix,
+        rollback_suffix, same_adapter_instance, same_multiset, same_prefix, same_recovery_adapter,
+        should_restore_owned_flag, sockaddr_inet_ip, split_registry_strings, valid_tether_prefix,
     };
     use std::io;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -2104,15 +2248,51 @@ mod tests {
     #[test]
     fn missing_captured_gateway_blocks_journal_completion() {
         let captured = IpAddr::V4(Ipv4Addr::new(192, 168, 42, 129));
-        assert!(captured_gateway_is_available(captured, &[captured]));
-        assert!(!captured_gateway_is_available(
-            captured,
-            &[IpAddr::V4(Ipv4Addr::new(192, 168, 42, 1))],
-        ));
-        assert!(captured_gateway_is_available(
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            &[],
-        ));
+        let other = IpAddr::V4(Ipv4Addr::new(192, 168, 42, 1));
+        assert_eq!(
+            classify_captured_gateway(captured, &[captured], &[]),
+            CapturedGateway::Available
+        );
+        assert_eq!(
+            classify_captured_gateway(captured, &[other], &[]),
+            CapturedGateway::Unconfirmed
+        );
+        assert_eq!(
+            classify_captured_gateway(captured, &[], &[]),
+            CapturedGateway::Unconfirmed
+        );
+        assert_eq!(
+            classify_captured_gateway(IpAddr::V4(Ipv4Addr::UNSPECIFIED), &[], &[]),
+            CapturedGateway::Available
+        );
+    }
+
+    #[test]
+    fn deleted_route_is_confirmed_through_the_configured_gateway() {
+        // The policy deleted the default route, so the routed list is empty,
+        // but the DHCP lease still names the captured gateway.
+        let captured = IpAddr::V4(Ipv4Addr::new(10, 33, 198, 131));
+        assert_eq!(
+            classify_captured_gateway(captured, &[], &[captured]),
+            CapturedGateway::Available
+        );
+    }
+
+    #[test]
+    fn a_new_tether_lease_makes_the_captured_route_stale() {
+        let captured = IpAddr::V4(Ipv4Addr::new(10, 253, 30, 194));
+        let current = IpAddr::V4(Ipv4Addr::new(10, 33, 198, 131));
+        assert_eq!(
+            classify_captured_gateway(captured, &[], &[current]),
+            CapturedGateway::Stale
+        );
+    }
+
+    #[test]
+    fn registry_multi_strings_split_on_nul() {
+        let wide: Vec<u16> = "10.0.0.1\0fe80::1\0\0".encode_utf16().collect();
+        assert_eq!(split_registry_strings(&wide), vec!["10.0.0.1", "fe80::1"]);
+        assert!(split_registry_strings(&[0, 0]).is_empty());
     }
 
     #[test]
@@ -2313,6 +2493,21 @@ mod tests {
         assert!(same_adapter_instance(&expected, &current));
         current.luid ^= 1;
         assert!(!same_adapter_instance(&expected, &current));
+    }
+
+    #[test]
+    fn recovery_survives_a_randomized_tether_mac() {
+        let expected = sample_policy().adapter;
+        let mut current = expected.clone();
+        current.physical_address = vec![0x56, 0xb6, 0x80, 0x26, 0x57, 0xb4];
+        current.interface_index ^= 1;
+        assert!(!same_adapter_instance(&expected, &current));
+        assert!(same_recovery_adapter(&expected, &current));
+        current.luid ^= 1;
+        assert!(!same_recovery_adapter(&expected, &current));
+        current = expected.clone();
+        current.adapter_name.push('x');
+        assert!(!same_recovery_adapter(&expected, &current));
     }
 
     #[test]
