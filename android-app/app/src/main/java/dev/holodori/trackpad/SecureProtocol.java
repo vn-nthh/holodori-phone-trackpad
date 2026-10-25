@@ -15,7 +15,7 @@ import javax.crypto.BadPaddingException;
 import javax.crypto.ShortBufferException;
 
 /** Byte-exact protocol-v5 framing and post-Noise record protection. */
-final class V5Protocol {
+final class SecureProtocol {
     static final int VERSION = 5;
     static final int PORT = 42_825;
     static final int MAX_DATAGRAM_SIZE = 1_200;
@@ -84,7 +84,7 @@ final class V5Protocol {
         }
     }
 
-    private V5Protocol() {
+    private SecureProtocol() {
     }
 
     static byte[] encodePairEnvelope(
@@ -288,7 +288,7 @@ final class V5Protocol {
             if (pair == null) throw new ProtocolException("missing Noise split ciphers");
             sender = pair.getSender();
             receiver = pair.getReceiver();
-            connectionId = V5Protocol.connectionId(handshakeHash);
+            connectionId = SecureProtocol.connectionId(handshakeHash);
         }
 
         Channel(CipherState sender, CipherState receiver, long connectionId) {

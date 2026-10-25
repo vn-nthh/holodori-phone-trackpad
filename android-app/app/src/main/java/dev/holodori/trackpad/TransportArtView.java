@@ -36,7 +36,7 @@ final class TransportArtView extends View {
     private final ValueAnimator loop = ValueAnimator.ofFloat(0f, 1f);
     private ValueAnimator blendAnimator;
 
-    private V5Protocol.TransportKind transport = V5Protocol.TransportKind.USB;
+    private SecureProtocol.TransportKind transport = SecureProtocol.TransportKind.USB;
     private State state = State.IDLE;
     /** 0 = USB cable fully shown, 1 = Wi-Fi arcs fully shown. */
     private float blend;
@@ -66,9 +66,9 @@ final class TransportArtView extends View {
         setContentDescription("Phone and PC link");
     }
 
-    void setTransport(V5Protocol.TransportKind kind, boolean animate) {
-        if (kind == null) kind = V5Protocol.TransportKind.USB;
-        float target = kind == V5Protocol.TransportKind.WIFI ? 1f : 0f;
+    void setTransport(SecureProtocol.TransportKind kind, boolean animate) {
+        if (kind == null) kind = SecureProtocol.TransportKind.USB;
+        float target = kind == SecureProtocol.TransportKind.WIFI ? 1f : 0f;
         boolean settled = blendAnimator == null || !blendAnimator.isRunning();
         if (kind == transport && blend == target && settled) return;
         transport = kind;
@@ -87,7 +87,7 @@ final class TransportArtView extends View {
         blendAnimator.start();
     }
 
-    V5Protocol.TransportKind transport() {
+    SecureProtocol.TransportKind transport() {
         return transport;
     }
 

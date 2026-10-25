@@ -140,7 +140,7 @@ echo "== Building native-host (release) =="
     cargo test --locked --all-targets
     cargo clippy --locked --all-targets -- -D warnings
     cargo test --locked --release --lib network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame -- --ignored --exact
-    cargo test --locked --release --lib v5_host::gameplay_tests::production_loopback_latency -- --ignored --exact --nocapture --test-threads=1
+    cargo test --locked --release --lib secure_host::gameplay_tests::production_loopback_latency -- --ignored --exact --nocapture --test-threads=1
     cargo build --locked --release
 )
 

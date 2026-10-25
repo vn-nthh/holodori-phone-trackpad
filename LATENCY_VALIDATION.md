@@ -79,7 +79,7 @@ corrupt-plus-redundant recovery, 0.0152 ms one-copy-loss delivery and 2.0979 ms
 both-copy-loss repair. Commands:
 
 ```powershell
-cargo test --release --lib v5_host::gameplay_tests::production_loopback_latency -- --ignored --exact --nocapture --test-threads=1
+cargo test --release --lib secure_host::gameplay_tests::production_loopback_latency -- --ignored --exact --nocapture --test-threads=1
 cargo test --release --lib network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame -- --ignored --exact --nocapture --test-threads=1
 python -m unittest discover -s tools -p 'test_*.py' -v
 ```
@@ -173,7 +173,7 @@ that constructing disabled metrics allocates nothing.
 Run the V5 timing check without competing builds, from `native-host`:
 
 ```sh
-cargo test --release --lib v5_host::gameplay_tests::production_loopback_latency -- --ignored --exact --nocapture --test-threads=1
+cargo test --release --lib secure_host::gameplay_tests::production_loopback_latency -- --ignored --exact --nocapture --test-threads=1
 ```
 
 Run the Android device check from `android-app` with a connected device:

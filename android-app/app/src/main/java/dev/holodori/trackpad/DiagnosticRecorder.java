@@ -6,7 +6,7 @@ import java.io.PrintWriter;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Numeric flight recorder. No Android APIs, logging, allocation or new locks on publication.
- * Queue-domain producers already hold V5Transport.queueLock; writer/control have separate rings.
+ * Queue-domain producers already hold SecureTransport.queueLock; writer/control have separate rings.
  * Only the diagnostic worker reads rings or analyzes events. Report I/O is after producer exit.
  */
 final class DiagnosticRecorder {

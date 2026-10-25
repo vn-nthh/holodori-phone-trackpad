@@ -6,9 +6,9 @@ pub mod metrics;
 pub mod network;
 pub mod platform;
 pub mod protocol;
+pub mod secure;
+pub mod secure_host;
 pub mod tether;
-pub mod v5;
-pub mod v5_host;
 
 #[cfg(test)]
 mod allocation_check;

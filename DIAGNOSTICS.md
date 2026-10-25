@@ -45,7 +45,7 @@ python tools/generate_diagnostic_examples.py --java-home .android-sdk/jdk17/jdk-
 ## Pipeline audit and ownership
 
 The audit covered `TrackpadView`, `TouchTransport`, both Android transports,
-`V5SendQueue`, `V5NetworkBinding`, V5 encryption/control handling, Rust datagram
+`SendQueue`, `NetworkBinding`, V5 encryption/control handling, Rust datagram
 receive/authentication, `OrderedFrames`, `input::commit_ready`, keyboard planning
 and partial native submission, the touch sink, the controller/report lifecycle,
 and pairing quality reporting.

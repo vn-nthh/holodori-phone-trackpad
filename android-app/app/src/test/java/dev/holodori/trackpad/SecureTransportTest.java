@@ -6,12 +6,12 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
-public final class V5TransportTest {
+public final class SecureTransportTest {
     @Test
     public void gameplayBacklogExpiresAtSixtyFourMilliseconds() {
         long queued = 1_000_000_000L;
-        assertFalse(V5Transport.gameplayBacklogExpired(queued, queued + 63_999_999L));
-        assertTrue(V5Transport.gameplayBacklogExpired(queued, queued + 64_000_000L));
+        assertFalse(SecureTransport.gameplayBacklogExpired(queued, queued + 63_999_999L));
+        assertTrue(SecureTransport.gameplayBacklogExpired(queued, queued + 64_000_000L));
     }
 
     @Test
@@ -20,7 +20,7 @@ public final class V5TransportTest {
                 100_000_000L, 100_000_000L};
         long interval = 4_000_000L;
         for (long next : expected) {
-            interval = V5Transport.nextRememberedRetry(interval);
+            interval = SecureTransport.nextRememberedRetry(interval);
             assertEquals(next, interval);
         }
     }

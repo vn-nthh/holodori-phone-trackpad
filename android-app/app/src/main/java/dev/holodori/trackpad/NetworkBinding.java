@@ -30,9 +30,9 @@ import java.util.Objects;
 import java.util.Set;
 
 /** One explicitly selected Android USB-tether or physical Wi-Fi UDP path. */
-final class V5NetworkBinding implements AutoCloseable {
+final class NetworkBinding implements AutoCloseable {
     private final ConnectivityManager connectivityManager;
-    private final V5Protocol.TransportKind transport;
+    private final SecureProtocol.TransportKind transport;
     private final Network androidNetwork;
     private final String interfaceName;
     private final List<String> localFingerprint;
@@ -43,9 +43,9 @@ final class V5NetworkBinding implements AutoCloseable {
 
     private volatile InetSocketAddress peer;
 
-    private V5NetworkBinding(
+    private NetworkBinding(
             ConnectivityManager connectivityManager,
-            V5Protocol.TransportKind transport,
+            SecureProtocol.TransportKind transport,
             Network androidNetwork,
             String interfaceName,
             List<String> localFingerprint,
@@ -65,14 +65,14 @@ final class V5NetworkBinding implements AutoCloseable {
         this.wifiLock = wifiLock;
     }
 
-    static V5NetworkBinding open(Context context, V5Protocol.TransportKind transport)
+    static NetworkBinding open(Context context, SecureProtocol.TransportKind transport)
             throws IOException {
         Context application = context.getApplicationContext();
         Context owner = application == null ? context : application;
         ConnectivityManager manager =
                 (ConnectivityManager) owner.getSystemService(Context.CONNECTIVITY_SERVICE);
         if (manager == null) throw new IOException("Android network service is unavailable");
-        return transport == V5Protocol.TransportKind.WIFI
+        return transport == SecureProtocol.TransportKind.WIFI
                 ? openWifi(owner, manager)
                 : openUsb(manager);
     }
@@ -83,7 +83,7 @@ final class V5NetworkBinding implements AutoCloseable {
 
     // Called only by the diagnostic worker. Held does not establish driver support.
     int diagnosticWifiLockHeld() {
-        if (transport != V5Protocol.TransportKind.WIFI) return -1;
+        if (transport != SecureProtocol.TransportKind.WIFI) return -1;
         try { return wifiLock != null && wifiLock.isHeld() ? 1 : 0; }
         catch (RuntimeException unavailable) { return -1; }
     }
@@ -91,7 +91,7 @@ final class V5NetworkBinding implements AutoCloseable {
     String diagnosticInterface() { return interfaceName; }
 
     void diagnosticSignal(long[] row) {
-        if (transport != V5Protocol.TransportKind.WIFI || androidNetwork == null
+        if (transport != SecureProtocol.TransportKind.WIFI || androidNetwork == null
                 || Build.VERSION.SDK_INT < 29) return;
         NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(androidNetwork);
         if (capabilities == null || !(capabilities.getTransportInfo() instanceof android.net.wifi.WifiInfo)) return;
@@ -147,7 +147,7 @@ final class V5NetworkBinding implements AutoCloseable {
             socket.send(packet);
         }
         for (InetAddress destination : destinations) {
-            packet.setSocketAddress(new InetSocketAddress(destination, V5Protocol.PORT));
+            packet.setSocketAddress(new InetSocketAddress(destination, SecureProtocol.PORT));
             socket.send(packet);
             socket.send(packet);
         }
@@ -169,7 +169,7 @@ final class V5NetworkBinding implements AutoCloseable {
 
     boolean revalidate() {
         try {
-            if (transport == V5Protocol.TransportKind.WIFI) {
+            if (transport == SecureProtocol.TransportKind.WIFI) {
                 NetworkCapabilities capabilities =
                         connectivityManager.getNetworkCapabilities(androidNetwork);
                 LinkProperties properties = connectivityManager.getLinkProperties(androidNetwork);
@@ -189,7 +189,7 @@ final class V5NetworkBinding implements AutoCloseable {
     }
 
     String transportLabel() {
-        return transport == V5Protocol.TransportKind.WIFI ? "Wi-Fi / local network" : "USB tethering";
+        return transport == SecureProtocol.TransportKind.WIFI ? "Wi-Fi / local network" : "USB tethering";
     }
 
     @Override
@@ -200,7 +200,7 @@ final class V5NetworkBinding implements AutoCloseable {
 
     private boolean isOnSelectedSubnet(InetSocketAddress source) {
         if (source == null || source.isUnresolved()
-                || source.getPort() != V5Protocol.PORT
+                || source.getPort() != SecureProtocol.PORT
                 || !(source.getAddress() instanceof Inet4Address)) {
             return false;
         }
@@ -210,7 +210,7 @@ final class V5NetworkBinding implements AutoCloseable {
         return false;
     }
 
-    private static V5NetworkBinding openWifi(Context context, ConnectivityManager manager)
+    private static NetworkBinding openWifi(Context context, ConnectivityManager manager)
             throws IOException {
         Network selected = selectWifiNetwork(manager);
         if (selected == null) {
@@ -247,9 +247,9 @@ final class V5NetworkBinding implements AutoCloseable {
             // Pair's quality probes and Start use the same radio policy. Ownership
             // follows this binding, including idle gaps and failed/replaced sessions.
             wifiLock = acquireLowLatencyWifiLock(context);
-            V5NetworkBinding binding = new V5NetworkBinding(
+            NetworkBinding binding = new NetworkBinding(
                     manager,
-                    V5Protocol.TransportKind.WIFI,
+                    SecureProtocol.TransportKind.WIFI,
                     selected,
                     properties.getInterfaceName(),
                     wifiFingerprint(properties),
@@ -313,7 +313,7 @@ final class V5NetworkBinding implements AutoCloseable {
         }
     }
 
-    private static V5NetworkBinding openUsb(ConnectivityManager manager) throws IOException {
+    private static NetworkBinding openUsb(ConnectivityManager manager) throws IOException {
         Candidate candidate = findUsbCandidate(manager);
         if (candidate == null) {
             throw new IOException("Enable Android USB tethering and connect the cable");
@@ -328,9 +328,9 @@ final class V5NetworkBinding implements AutoCloseable {
             socket.setSoTimeout(4);
             requestGameplayTrafficClass(socket);
             success = true;
-            return new V5NetworkBinding(
+            return new NetworkBinding(
                     manager,
-                    V5Protocol.TransportKind.USB,
+                    SecureProtocol.TransportKind.USB,
                     candidate.androidNetwork,
                     candidate.interfaceName,
                     candidate.localFingerprint,

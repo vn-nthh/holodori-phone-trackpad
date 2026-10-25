@@ -4,10 +4,10 @@ use crate::protocol::{
     ACTION_CANCEL, ACTION_DOWN, ACTION_MOVE, ACTION_UP, FRAME_FLAG_LOCKED,
     FRAME_FLAG_SESSION_START, MAX_CONTACTS,
 };
-use crate::v5::{CONTACT_SIZE, TOUCH_PAYLOAD_HEADER_SIZE};
+use crate::secure::{CONTACT_SIZE, TOUCH_PAYLOAD_HEADER_SIZE};
 use std::mem::ManuallyDrop;
 
-/// Android's `V5SendQueue.REPAIR_NANOS`.
+/// Android's `SendQueue.REPAIR_NANOS`.
 const ANDROID_REPAIR_INTERVAL: Duration = Duration::from_millis(2);
 
 struct Phone {
@@ -24,7 +24,7 @@ impl Phone {
         session: u64,
         sequence: u64,
         payload: &[u8],
-    ) -> Result<(), HostV5Error> {
+    ) -> Result<(), SecureHostError> {
         let length = self.cipher.seal_into(
             Direction::PhoneToHost,
             kind,
@@ -89,7 +89,7 @@ fn touch_payload(action: u8, event_nanos: u64) -> [u8; TOUCH_PAYLOAD_HEADER_SIZE
     bytes
 }
 
-fn pair() -> (V5Connection, Phone) {
+fn pair() -> (SecureConnection, Phone) {
     let epoch = Instant::now();
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let phone_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -111,7 +111,7 @@ fn pair() -> (V5Connection, Phone) {
     phone.read_message(&bytes[..n], &mut payload).unwrap();
     let host_cipher = RecordCipher::from_handshake(&mut host, true).unwrap();
     let phone_cipher = RecordCipher::from_handshake(&mut phone, false).unwrap();
-    let connection = V5Connection::new(
+    let connection = SecureConnection::new(
         socket,
         phone_socket.local_addr().unwrap(),
         NetworkBinding::Loopback,
@@ -173,17 +173,17 @@ impl InputSink for MeasuredSink {
 }
 
 fn start(
-    connection: V5Connection,
+    connection: SecureConnection,
     sink: MeasuredSink,
-) -> thread::JoinHandle<(MeasuredSink, Result<(), HostV5Error>)> {
+) -> thread::JoinHandle<(MeasuredSink, Result<(), SecureHostError>)> {
     start_with_metrics(connection, sink, false)
 }
 
 fn start_with_metrics(
-    mut connection: V5Connection,
+    mut connection: SecureConnection,
     mut sink: MeasuredSink,
     diagnostics: bool,
-) -> thread::JoinHandle<(MeasuredSink, Result<(), HostV5Error>)> {
+) -> thread::JoinHandle<(MeasuredSink, Result<(), SecureHostError>)> {
     thread::spawn(move || {
         let result = serve_gameplay(
             &mut connection,
@@ -270,7 +270,7 @@ fn gameplay_state() -> GameplayState {
 
 fn sealed_frame(
     phone: &mut Phone,
-    connection: &mut V5Connection,
+    connection: &mut SecureConnection,
     sequence: u64,
     action: u8,
 ) -> TouchFrame {
@@ -293,7 +293,7 @@ fn sealed_frame(
         .unwrap();
     decode_touch_payload(
         &header,
-        &phone.bytes[RECORD_HEADER_SIZE..length - crate::v5::TAG_SIZE],
+        &phone.bytes[RECORD_HEADER_SIZE..length - crate::secure::TAG_SIZE],
     )
     .unwrap()
 }
@@ -455,7 +455,7 @@ fn authenticated_pings_cannot_sustain_uncommitted_held_input() {
     }
     let (sink, result) = worker.join().unwrap();
     assert!(
-        matches!(result, Err(HostV5Error::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+        matches!(result, Err(SecureHostError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
     );
     assert!(!sink.has_active_input());
 }
@@ -496,7 +496,7 @@ fn changing_gameplay_session_requires_fresh_authentication() {
         .send(PHONE_TOUCH, 10, 0, &payload[..TOUCH_PAYLOAD_HEADER_SIZE])
         .unwrap();
     let (sink, result) = worker.join().unwrap();
-    assert!(matches!(result, Err(HostV5Error::Authentication(_))));
+    assert!(matches!(result, Err(SecureHostError::Authentication(_))));
     assert_eq!(sink.sequences, [0]);
 }
 
@@ -567,7 +567,7 @@ fn authenticated_receive_commit_and_ack_allocate_nothing_after_setup() {
             .unwrap();
         let frame = decode_touch_payload(
             &header,
-            &phone.bytes[RECORD_HEADER_SIZE..length - crate::v5::TAG_SIZE],
+            &phone.bytes[RECORD_HEADER_SIZE..length - crate::secure::TAG_SIZE],
         )
         .unwrap();
         process_gameplay_frame(
@@ -727,7 +727,7 @@ fn production_loopback_latency() {
                 }
                 if fault.ends_with("both-lost") {
                     // Real OS scheduling instead of a busy spin. Android's actual repair
-                    // selector is covered separately by V5SendQueueTest/device validation.
+                    // selector is covered separately by SendQueueTest/device validation.
                     let due =
                         phone.epoch + Duration::from_nanos(event_nanos) + Duration::from_millis(2);
                     if let Some(wait) = due.checked_duration_since(Instant::now()) {

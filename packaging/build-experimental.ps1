@@ -54,7 +54,7 @@ try {
         throw "Protocol-v4 loopback recovery check failed."
     }
     cargo test --locked --release --lib `
-        v5_host::gameplay_tests::production_loopback_latency `
+        secure_host::gameplay_tests::production_loopback_latency `
         -- --ignored --exact --nocapture --test-threads=1
     if ($LASTEXITCODE -ne 0) {
         throw "Protocol-v5 loopback recovery check failed."

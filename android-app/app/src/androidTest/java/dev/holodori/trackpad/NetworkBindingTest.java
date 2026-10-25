@@ -13,7 +13,7 @@ import static org.junit.Assert.*;
 import static org.junit.Assume.assumeTrue;
 
 /** Run on Android 10+ connected to a private Wi-Fi subnet; no gameplay is sent. */
-public final class V5NetworkBindingTest {
+public final class NetworkBindingTest {
     @Test
     public void replacementBindingOwnsItsWifiLockIndependently() throws Exception {
         assumeTrue(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q);
@@ -30,17 +30,17 @@ public final class V5NetworkBindingTest {
         }
         assumeTrue("Connect the test phone to Wi-Fi", wifiAvailable);
 
-        V5NetworkBinding first = V5NetworkBinding.open(context, V5Protocol.TransportKind.WIFI);
-        V5NetworkBinding replacement = null;
+        NetworkBinding first = NetworkBinding.open(context, SecureProtocol.TransportKind.WIFI);
+        NetworkBinding replacement = null;
         WifiManager.WifiLock firstLock = null;
         WifiManager.WifiLock replacementLock = null;
         try {
-            Field field = V5NetworkBinding.class.getDeclaredField("wifiLock");
+            Field field = NetworkBinding.class.getDeclaredField("wifiLock");
             field.setAccessible(true);
             firstLock = (WifiManager.WifiLock) field.get(first);
             assertNotNull(firstLock);
             assertTrue(firstLock.isHeld());
-            replacement = V5NetworkBinding.open(context, V5Protocol.TransportKind.WIFI);
+            replacement = NetworkBinding.open(context, SecureProtocol.TransportKind.WIFI);
             replacementLock = (WifiManager.WifiLock) field.get(replacement);
             assertNotNull(replacementLock);
             assertTrue(replacementLock.isHeld());

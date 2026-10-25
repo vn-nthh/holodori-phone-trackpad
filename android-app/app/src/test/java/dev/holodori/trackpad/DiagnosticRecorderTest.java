@@ -70,8 +70,8 @@ public final class DiagnosticRecorderTest {
     }
 
     @Test public void actualQueueRepairsHaveAccurateCountAndDeadlineLateness() {
-        V5SendQueue queue = new V5SendQueue(64, 64);
-        V5SendQueue.Frame frame = queue.add(1, 44, 1);
+        SendQueue queue = new SendQueue(64, 64);
+        SendQueue.Frame frame = queue.add(1, 44, 1);
         queue.next(100, 64);
         queue.next(200, 64);
         queue.next(2_100_200, 64);

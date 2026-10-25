@@ -20,16 +20,17 @@ use holodori_native_host::protocol::{
     CONTROL_ACK, CONTROL_HELLO, FrameParser, OrderedFrames, ProtocolError, TouchFrame,
     encode_control,
 };
+use holodori_native_host::secure::TransportKind;
+use holodori_native_host::secure_host::{
+    PairCommand, PairEvent, SecureConnection, SecureHostError, accept_remembered, pair,
+    serve_gameplay,
+};
 #[cfg(windows)]
 use holodori_native_host::tether_policy::{
     RecoveryOutcome, TetherRoutePolicy, recover_orphaned_policy,
 };
 #[cfg(windows)]
 use holodori_native_host::touch::{PROBE_WINDOW_TITLE, TouchInjector, TouchTarget};
-use holodori_native_host::v5::TransportKind;
-use holodori_native_host::v5_host::{
-    HostV5Error, PairCommand, PairEvent, V5Connection, accept_remembered, pair, serve_gameplay,
-};
 
 // Touch mode is Windows-only (it drives Windows Touch injection). On other
 // platforms there is no probe window to attach to, so this is just a stable
@@ -432,7 +433,7 @@ fn run_pairing_mode(options: &Options) -> Result<(), Box<dyn Error>> {
     });
     match result {
         Ok(()) => Ok(()),
-        Err(HostV5Error::Cancelled) if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) => {
+        Err(SecureHostError::Cancelled) if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) => {
             status.publish(HostPhase::Stopping);
             Ok(())
         }
@@ -494,8 +495,8 @@ fn run_v5_controller(options: &Options) -> Result<(), Box<dyn Error>> {
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut connection = match accept_remembered(transport, options.udp_port, deadline) {
             Ok(connection) => connection,
-            Err(HostV5Error::TimedOut(_)) => continue,
-            Err(HostV5Error::NotPaired) => {
+            Err(SecureHostError::TimedOut(_)) => continue,
+            Err(SecureHostError::NotPaired) => {
                 return Err("no paired phone; use Pair before Start".into());
             }
             Err(error) => {
@@ -607,7 +608,7 @@ fn install_pair_command_thread() -> io::Result<Receiver<PairCommand>> {
 
 #[cfg(target_os = "linux")]
 fn verify_v5_local_only(
-    connection: &V5Connection,
+    connection: &SecureConnection,
     local_only_tether: bool,
 ) -> Result<(), Box<dyn Error>> {
     if !local_only_tether {
@@ -627,7 +628,7 @@ fn verify_v5_local_only(
 
 #[cfg(not(target_os = "linux"))]
 fn verify_v5_local_only(
-    _connection: &V5Connection,
+    _connection: &SecureConnection,
     _local_only_tether: bool,
 ) -> Result<(), Box<dyn Error>> {
     Ok(())

@@ -45,13 +45,13 @@ final class SetupView extends FrameLayout {
     }
 
     static final class Selection {
-        final V5Protocol.TransportKind transport;
+        final SecureProtocol.TransportKind transport;
         final boolean legacyV4;
         final boolean thumbMode;
         final float thumbGap;
 
         Selection(
-                V5Protocol.TransportKind transport,
+                SecureProtocol.TransportKind transport,
                 boolean legacyV4,
                 boolean thumbMode,
                 float thumbGap
@@ -118,7 +118,7 @@ final class SetupView extends FrameLayout {
     private boolean choosingTransport;
     private PairStage pairStage = PairStage.START;
     private String pairDetailText = "";
-    private V5Protocol.TransportKind transport;
+    private SecureProtocol.TransportKind transport;
 
     SetupView(Context context, Listener listener) {
         super(context);
@@ -127,8 +127,8 @@ final class SetupView extends FrameLayout {
         setBackgroundColor(Palette.BG);
 
         String savedTransport = preferences.getString("v5_transport", null);
-        if ("wifi".equals(savedTransport)) transport = V5Protocol.TransportKind.WIFI;
-        else if ("usb".equals(savedTransport)) transport = V5Protocol.TransportKind.USB;
+        if ("wifi".equals(savedTransport)) transport = SecureProtocol.TransportKind.WIFI;
+        else if ("usb".equals(savedTransport)) transport = SecureProtocol.TransportKind.USB;
 
         LinearLayout column = new LinearLayout(context);
         column.setOrientation(LinearLayout.VERTICAL);
@@ -166,11 +166,11 @@ final class SetupView extends FrameLayout {
         cards.setOrientation(LinearLayout.HORIZONTAL);
         cards.setGravity(Gravity.CENTER);
         cards.addView(
-                transportCard(V5Protocol.TransportKind.USB, "USB cable"),
+                transportCard(SecureProtocol.TransportKind.USB, "USB cable"),
                 cardParams()
         );
         cards.addView(
-                transportCard(V5Protocol.TransportKind.WIFI, "Wi-Fi"),
+                transportCard(SecureProtocol.TransportKind.WIFI, "Wi-Fi"),
                 cardParams()
         );
         LinearLayout.LayoutParams cardsParams = wrap();
@@ -395,10 +395,10 @@ final class SetupView extends FrameLayout {
     // --- MainActivity API ---------------------------------------------------
 
     Selection selection() {
-        V5Protocol.TransportKind kind = transport == null ? V5Protocol.TransportKind.USB : transport;
+        SecureProtocol.TransportKind kind = transport == null ? SecureProtocol.TransportKind.USB : transport;
         return new Selection(
                 kind,
-                legacySwitch.isChecked() && kind == V5Protocol.TransportKind.USB,
+                legacySwitch.isChecked() && kind == SecureProtocol.TransportKind.USB,
                 thumbSwitch.isChecked(),
                 selectedGap()
         );
@@ -529,12 +529,12 @@ final class SetupView extends FrameLayout {
     }
 
     private boolean pairingSkipped() {
-        return transport == V5Protocol.TransportKind.USB && legacySwitch.isChecked();
+        return transport == SecureProtocol.TransportKind.USB && legacySwitch.isChecked();
     }
 
     private void render() {
         Screen screen = currentScreen();
-        boolean usb = transport != V5Protocol.TransportKind.WIFI;
+        boolean usb = transport != SecureProtocol.TransportKind.WIFI;
 
         connectScreen.setVisibility(screen == Screen.CONNECT ? VISIBLE : GONE);
         pairScreen.setVisibility(screen == Screen.PAIR ? VISIBLE : GONE);
@@ -607,7 +607,7 @@ final class SetupView extends FrameLayout {
         if (transport != null) {
             editor.putString(
                     "v5_transport",
-                    transport == V5Protocol.TransportKind.WIFI ? "wifi" : "usb"
+                    transport == SecureProtocol.TransportKind.WIFI ? "wifi" : "usb"
             );
         }
         editor.apply();
@@ -635,7 +635,7 @@ final class SetupView extends FrameLayout {
 
     // --- Widgets -------------------------------------------------------------
 
-    private View transportCard(V5Protocol.TransportKind kind, String label) {
+    private View transportCard(SecureProtocol.TransportKind kind, String label) {
         Context context = getContext();
         LinearLayout card = new LinearLayout(context);
         card.setOrientation(LinearLayout.VERTICAL);

@@ -25,25 +25,25 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-public final class V5ProtocolTest {
+public final class SecureProtocolTest {
     private static final String XX_NAME = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
     private static final String IK_NAME = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 
     @Test
     public void reusableControlBuffersAuthenticateBeforeReplayCommit() throws Exception {
-        try (V5Protocol.Channel channel = new V5Protocol.Channel(cipher(), cipher(), 9)) {
+        try (SecureProtocol.Channel channel = new SecureProtocol.Channel(cipher(), cipher(), 9)) {
             byte[] record = hostControl(0);
-            byte[] plaintext = new byte[V5Protocol.CONTROL_PAYLOAD_SIZE];
-            V5Protocol.RecordHeader header = new V5Protocol.RecordHeader();
+            byte[] plaintext = new byte[SecureProtocol.CONTROL_PAYLOAD_SIZE];
+            SecureProtocol.RecordHeader header = new SecureProtocol.RecordHeader();
             record[record.length - 1] ^= 1;
-            assertThrows(V5Protocol.AuthenticationException.class,
+            assertThrows(SecureProtocol.AuthenticationException.class,
                     () -> channel.openInto(record, record.length, header, plaintext));
             assertArrayEquals(new byte[plaintext.length], plaintext);
             record[record.length - 1] ^= 1;
             channel.openInto(record, record.length, header, plaintext);
             assertEquals(0, header.packetNumber);
             assertEquals(128, ByteBuffer.wrap(plaintext).order(ByteOrder.LITTLE_ENDIAN).getInt());
-            assertThrows(V5Protocol.ReplayException.class,
+            assertThrows(SecureProtocol.ReplayException.class,
                     () -> channel.openInto(record, record.length, header, plaintext));
             byte[] next = hostControl(1);
             channel.openInto(next, next.length, header, plaintext);
@@ -70,15 +70,15 @@ public final class V5ProtocolTest {
                     }
                 });
         ExecutorService workers = Executors.newFixedThreadPool(2);
-        V5Protocol.Channel channel = new V5Protocol.Channel(cipher(), receiver, 9);
+        SecureProtocol.Channel channel = new SecureProtocol.Channel(cipher(), receiver, 9);
         try {
             byte[] ack = hostControl(0);
             Future<?> receive = workers.submit(() -> {
-                channel.openInto(ack, ack.length, new V5Protocol.RecordHeader(), new byte[16]);
+                channel.openInto(ack, ack.length, new SecureProtocol.RecordHeader(), new byte[16]);
                 return null;
             });
             assertTrue(decryptStarted.await(2, TimeUnit.SECONDS));
-            Future<byte[]> send = workers.submit(() -> channel.seal(V5Protocol.PHONE_PING, 7, 0, 0, new byte[0]));
+            Future<byte[]> send = workers.submit(() -> channel.seal(SecureProtocol.PHONE_PING, 7, 0, 0, new byte[0]));
             assertEquals(64, send.get(1, TimeUnit.SECONDS).length);
             finishDecrypt.countDown();
             receive.get(2, TimeUnit.SECONDS);
@@ -98,7 +98,7 @@ public final class V5ProtocolTest {
     private static byte[] hostControl(long packetNumber) throws Exception {
         byte[] record = new byte[80];
         ByteBuffer header = ByteBuffer.wrap(record).order(ByteOrder.LITTLE_ENDIAN);
-        header.put(new byte[]{'H', 'P', 'A', '5'}).put((byte) 5).put((byte) V5Protocol.HOST_ACK);
+        header.put(new byte[]{'H', 'P', 'A', '5'}).put((byte) 5).put((byte) SecureProtocol.HOST_ACK);
         header.putShort((short) 80).putLong(9).putLong(7).putLong(packetNumber).putLong(0);
         header.putInt(0).putShort((short) 16).putShort((short) 0);
         byte[] payload = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
@@ -117,24 +117,24 @@ public final class V5ProtocolTest {
     public void pairingEnvelopeIsStrictAndRoundTrips() throws Exception {
         byte[] exchange = new byte[16];
         for (int index = 0; index < exchange.length; index++) exchange[index] = (byte) index;
-        byte[] encoded = V5Protocol.encodePairEnvelope(
-                V5Protocol.PAIR_CONTINUE,
+        byte[] encoded = SecureProtocol.encodePairEnvelope(
+                SecureProtocol.PAIR_CONTINUE,
                 exchange,
                 2,
-                V5Protocol.TransportKind.WIFI,
+                SecureProtocol.TransportKind.WIFI,
                 new byte[]{7, 8, 9}
         );
-        V5Protocol.PairEnvelope decoded = V5Protocol.decodePairEnvelope(encoded, encoded.length);
-        assertEquals(V5Protocol.PAIR_CONTINUE, decoded.kind);
+        SecureProtocol.PairEnvelope decoded = SecureProtocol.decodePairEnvelope(encoded, encoded.length);
+        assertEquals(SecureProtocol.PAIR_CONTINUE, decoded.kind);
         assertArrayEquals(exchange, decoded.exchangeId);
         assertEquals(2, decoded.step);
-        assertEquals(V5Protocol.TransportKind.WIFI, decoded.transport);
+        assertEquals(SecureProtocol.TransportKind.WIFI, decoded.transport);
         assertArrayEquals(new byte[]{7, 8, 9}, decoded.payload);
 
         encoded[6]++;
         assertThrows(
-                V5Protocol.ProtocolException.class,
-                () -> V5Protocol.decodePairEnvelope(encoded, encoded.length)
+                SecureProtocol.ProtocolException.class,
+                () -> SecureProtocol.decodePairEnvelope(encoded, encoded.length)
         );
     }
 
@@ -148,7 +148,7 @@ public final class V5ProtocolTest {
         Arrays.fill(hostRandom, (byte) 0x30);
         assertArrayEquals(
                 new int[]{2, 4, 3, 2, 1, 4, 5, 5},
-                V5Protocol.sasPattern(V5Protocol.sasDigest(
+                SecureProtocol.sasPattern(SecureProtocol.sasDigest(
                         handshakeHash,
                         phoneRandom,
                         hostRandom
@@ -158,7 +158,7 @@ public final class V5ProtocolTest {
 
     @Test
     public void replayWindowAcceptsReorderingOnlyOnce() {
-        V5Protocol.ReplayWindow replay = new V5Protocol.ReplayWindow();
+        SecureProtocol.ReplayWindow replay = new SecureProtocol.ReplayWindow();
         assertTrue(replay.wouldAccept(0));
         replay.commit(0);
         assertTrue(replay.wouldAccept(2));
@@ -182,20 +182,20 @@ public final class V5ProtocolTest {
         CipherState receiver = Noise.createCipher("ChaChaPoly");
         sender.initializeKey(sendKey, 0);
         receiver.initializeKey(receiveKey, 0);
-        V5Protocol.Channel channel = new V5Protocol.Channel(
+        SecureProtocol.Channel channel = new SecureProtocol.Channel(
                 sender,
                 receiver,
                 0x0102_0304_0506_0708L
         );
         byte[] first = channel.seal(
-                V5Protocol.PHONE_TOUCH,
+                SecureProtocol.PHONE_TOUCH,
                 9,
                 4,
                 0,
                 "same".getBytes(StandardCharsets.US_ASCII)
         );
         byte[] second = channel.seal(
-                V5Protocol.PHONE_TOUCH,
+                SecureProtocol.PHONE_TOUCH,
                 9,
                 4,
                 0,
@@ -212,7 +212,7 @@ public final class V5ProtocolTest {
         byte[] hostStatic = sequence(0x10);
         byte[] phoneStatic = sequence(0x30);
         byte[] exchange = Arrays.copyOf(sequence(0), 16);
-        byte[] prologue = V5Protocol.prologue(V5Protocol.TransportKind.WIFI, exchange);
+        byte[] prologue = SecureProtocol.prologue(SecureProtocol.TransportKind.WIFI, exchange);
         HandshakeState host = handshake(
                 XX_NAME,
                 HandshakeState.INITIATOR,
@@ -229,8 +229,8 @@ public final class V5ProtocolTest {
                 null,
                 prologue
         );
-        byte[] buffer = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
-        byte[] payload = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
+        byte[] buffer = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
+        byte[] payload = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
         int length = host.writeMessage(buffer, 0, null, 0, 0);
         assertEquals(
                 "392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1c",
@@ -259,9 +259,9 @@ public final class V5ProtocolTest {
         assertArrayEquals(host.getHandshakeHash(), phone.getHandshakeHash());
 
         byte[] xxHash = phone.getHandshakeHash().clone();
-        V5Protocol.Channel channel = new V5Protocol.Channel(phone.split(), xxHash);
+        SecureProtocol.Channel channel = new SecureProtocol.Channel(phone.split(), xxHash);
         byte[] record = channel.seal(
-                V5Protocol.PHONE_SAS_REVEAL,
+                SecureProtocol.PHONE_SAS_REVEAL,
                 0,
                 9,
                 0,
@@ -274,7 +274,7 @@ public final class V5ProtocolTest {
                 toHex(record)
         );
         byte[] secondRecord = channel.seal(
-                V5Protocol.PHONE_SAS_REVEAL,
+                SecureProtocol.PHONE_SAS_REVEAL,
                 0,
                 9,
                 0,
@@ -293,7 +293,7 @@ public final class V5ProtocolTest {
                 "d89e3bad79437dbed9f843418304f460ff05c7fe81fe4a9577a804cb9367ff66"
         );
         byte[] ikExchange = Arrays.copyOfRange(sequence(0xF0), 0, 16);
-        byte[] ikPrologue = V5Protocol.prologue(V5Protocol.TransportKind.USB, ikExchange);
+        byte[] ikPrologue = SecureProtocol.prologue(SecureProtocol.TransportKind.USB, ikExchange);
         HandshakeState ikPhone = handshake(
                 IK_NAME,
                 HandshakeState.INITIATOR,

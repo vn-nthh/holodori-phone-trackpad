@@ -19,13 +19,13 @@ import java.nio.ByteOrder;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.HashSet;
-import dev.holodori.trackpad.V5SendQueue.Frame;
+import dev.holodori.trackpad.SendQueue.Frame;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 /** Authenticated protocol-v5 transport for pairing and lossless touch input. */
-final class V5Transport implements TouchTransport {
+final class SecureTransport implements TouchTransport {
     interface PairingListener {
         void onPairingStatus(String message);
 
@@ -60,19 +60,19 @@ final class V5Transport implements TouchTransport {
     private static final int INITIAL_SEND_COPIES = 2;
     private static final int DEFAULT_HOST_WINDOW = 64;
     private static final int MAX_HOST_WINDOW = 256;
-    private static final int MAX_TOUCH_PAYLOAD = V5Protocol.TOUCH_PAYLOAD_HEADER_SIZE
-            + TouchSample.MAX_CONTACTS * V5Protocol.CONTACT_SIZE;
+    private static final int MAX_TOUCH_PAYLOAD = SecureProtocol.TOUCH_PAYLOAD_HEADER_SIZE
+            + TouchSample.MAX_CONTACTS * SecureProtocol.CONTACT_SIZE;
     private static final int WRITER_READY_TIMEOUT_MILLIS = 1_000;
 
     private final Context context;
     private final TouchTransport.Listener listener;
-    private final V5Protocol.TransportKind transport;
+    private final SecureProtocol.TransportKind transport;
     private final CredentialStore credentials;
     private final WifiManager wifiManager;
     private final SecureRandom random = new SecureRandom();
     private final Object lifecycleLock = new Object();
     private final Object queueLock = new Object();
-    private final V5SendQueue unacknowledged = new V5SendQueue(MAX_HOST_WINDOW, MAX_TOUCH_PAYLOAD);
+    private final SendQueue unacknowledged = new SendQueue(MAX_HOST_WINDOW, MAX_TOUCH_PAYLOAD);
     private final ArrayBlockingQueue<int[]> submittedPattern = new ArrayBlockingQueue<>(1);
     private final int[] retainedPointerIds = new int[TouchSample.MAX_CONTACTS];
     private final float[] retainedX = new float[TouchSample.MAX_CONTACTS];
@@ -85,8 +85,8 @@ final class V5Transport implements TouchTransport {
     private volatile int generation;
     private volatile boolean running;
     private volatile boolean pairing;
-    private volatile V5NetworkBinding binding;
-    private volatile V5Protocol.Channel channel;
+    private volatile NetworkBinding binding;
+    private volatile SecureProtocol.Channel channel;
 
     private Thread controlThread;
     private Thread writerThread;
@@ -98,11 +98,11 @@ final class V5Transport implements TouchTransport {
     private int hostLaneCount = 6;
     private long sessionId;
     private long nextSequence;
-    private long highestAcknowledged = V5Protocol.NO_ACK;
+    private long highestAcknowledged = SecureProtocol.NO_ACK;
     private long lastHeartbeatNanos;
     private long lastPingNanos;
     private long nextPingId;
-    private long lastPongId = V5Protocol.NO_ACK;
+    private long lastPongId = SecureProtocol.NO_ACK;
     private long lastIdleResponseNanos;
     private long lastHostSendNanos;
     private long lastControlReceiveNanos;
@@ -122,10 +122,10 @@ final class V5Transport implements TouchTransport {
     // no MAC retry, held to DTIM for power-saving receivers).
     private volatile InetSocketAddress lastHost;
 
-    V5Transport(
+    SecureTransport(
             Context context,
             TouchTransport.Listener listener,
-            V5Protocol.TransportKind transport
+            SecureProtocol.TransportKind transport
     ) {
         this.context = context.getApplicationContext() == null
                 ? context
@@ -225,7 +225,7 @@ final class V5Transport implements TouchTransport {
         listener.onConnectionChanged(
                 false,
                 "Searching for the paired host over "
-                        + (transport == V5Protocol.TransportKind.WIFI
+                        + (transport == SecureProtocol.TransportKind.WIFI
                         ? "Wi-Fi / local network"
                         : "USB tethering")
         );
@@ -324,8 +324,8 @@ final class V5Transport implements TouchTransport {
             return;
         }
         long sequence = nextSequence++;
-        int payloadLength = V5Protocol.TOUCH_PAYLOAD_HEADER_SIZE
-                + contactCount * V5Protocol.CONTACT_SIZE;
+        int payloadLength = SecureProtocol.TOUCH_PAYLOAD_HEADER_SIZE
+                + contactCount * SecureProtocol.CONTACT_SIZE;
         Frame pending = unacknowledged.add(sequence, payloadLength, System.nanoTime());
         ByteBuffer packet = pending.writer;
         packet.putLong(eventNanos);
@@ -362,19 +362,19 @@ final class V5Transport implements TouchTransport {
 
     private void controlLoop(int sessionGeneration) {
         try {
-            V5NetworkBinding sessionBinding = V5NetworkBinding.open(context, transport);
+            NetworkBinding sessionBinding = NetworkBinding.open(context, transport);
             if (!installBinding(sessionGeneration, sessionBinding)) return;
-            V5Protocol.Channel sessionChannel = establishRemembered(
+            SecureProtocol.Channel sessionChannel = establishRemembered(
                     sessionGeneration,
                     sessionBinding
             );
             if (!installChannel(sessionGeneration, sessionChannel)) return;
 
             long helloDeadline = System.nanoTime() + HANDSHAKE_TIMEOUT_NANOS;
-            V5Protocol.RecordHeader header = new V5Protocol.RecordHeader();
-            byte[] controlPayload = new byte[V5Protocol.CONTROL_PAYLOAD_SIZE];
+            SecureProtocol.RecordHeader header = new SecureProtocol.RecordHeader();
+            byte[] controlPayload = new byte[SecureProtocol.CONTROL_PAYLOAD_SIZE];
             ByteBuffer control = ByteBuffer.wrap(controlPayload).order(ByteOrder.LITTLE_ENDIAN);
-            byte[] receiveBytes = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
+            byte[] receiveBytes = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
             DatagramPacket incoming = new DatagramPacket(receiveBytes, receiveBytes.length);
             while (isGameplayActive(sessionGeneration) && !hostReady) {
                 if (System.nanoTime() >= helloDeadline) {
@@ -410,9 +410,9 @@ final class V5Transport implements TouchTransport {
         }
     }
 
-    private V5Protocol.Channel establishRemembered(
+    private SecureProtocol.Channel establishRemembered(
             int sessionGeneration,
-            V5NetworkBinding sessionBinding
+            NetworkBinding sessionBinding
     ) throws Exception {
         CredentialStore.Identity identity = rememberedIdentity();
         if (identity == null || !identity.hasPairedHost()) {
@@ -420,20 +420,20 @@ final class V5Transport implements TouchTransport {
         }
         HandshakeState handshake = null;
         byte[] exchangeId = new byte[16];
-        byte[] message = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
-        byte[] payload = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
+        byte[] message = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
+        byte[] payload = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
         try {
             random.nextBytes(exchangeId);
             handshake = new HandshakeState(IK_NAME, HandshakeState.INITIATOR);
             handshake.getLocalKeyPair().setPrivateKey(identity.privateKey, 0);
             handshake.getRemotePublicKey().setPublicKey(identity.pairedHostPublicKey, 0);
-            byte[] prologue = V5Protocol.prologue(transport, exchangeId);
+            byte[] prologue = SecureProtocol.prologue(transport, exchangeId);
             handshake.setPrologue(prologue, 0, prologue.length);
             Arrays.fill(prologue, (byte) 0);
             handshake.start();
             int messageLength = handshake.writeMessage(message, 0, null, 0, 0);
-            byte[] request = V5Protocol.encodePairEnvelope(
-                    V5Protocol.IK_MESSAGE_1,
+            byte[] request = SecureProtocol.encodePairEnvelope(
+                    SecureProtocol.IK_MESSAGE_1,
                     exchangeId,
                     1,
                     transport,
@@ -444,8 +444,8 @@ final class V5Transport implements TouchTransport {
             long retryInterval = REMEMBERED_FIRST_RETRY_NANOS;
             InetSocketAddress preferredHost = lastHost;
             DatagramPacket incoming = new DatagramPacket(
-                    new byte[V5Protocol.MAX_DATAGRAM_SIZE],
-                    V5Protocol.MAX_DATAGRAM_SIZE
+                    new byte[SecureProtocol.MAX_DATAGRAM_SIZE],
+                    SecureProtocol.MAX_DATAGRAM_SIZE
             );
             while (isGameplayActive(sessionGeneration) && System.nanoTime() < deadline) {
                 long now = System.nanoTime();
@@ -461,18 +461,18 @@ final class V5Transport implements TouchTransport {
                     continue;
                 }
                 InetSocketAddress source = (InetSocketAddress) incoming.getSocketAddress();
-                V5Protocol.PairEnvelope envelope;
+                SecureProtocol.PairEnvelope envelope;
                 try {
-                    envelope = V5Protocol.decodePairEnvelope(
+                    envelope = SecureProtocol.decodePairEnvelope(
                             incoming.getData(),
                             incoming.getLength()
                     );
-                } catch (V5Protocol.ProtocolException ignored) {
+                } catch (SecureProtocol.ProtocolException ignored) {
                     continue;
                 }
                 if (envelope.transport != transport
                         || !Arrays.equals(envelope.exchangeId, exchangeId)
-                        || envelope.kind != V5Protocol.IK_CONTINUE
+                        || envelope.kind != SecureProtocol.IK_CONTINUE
                         || envelope.step != 2
                         || !sessionBinding.acceptAndPin(source)) {
                     continue;
@@ -491,7 +491,7 @@ final class V5Transport implements TouchTransport {
                 CipherStatePair split = handshake.split();
                 lastHost = source;
                 try {
-                    return new V5Protocol.Channel(split, handshakeHash);
+                    return new SecureProtocol.Channel(split, handshakeHash);
                 } finally {
                     Arrays.fill(handshakeHash, (byte) 0);
                 }
@@ -507,11 +507,11 @@ final class V5Transport implements TouchTransport {
 
     private boolean receiveAuthenticated(
             int sessionGeneration,
-            V5NetworkBinding sessionBinding,
-            V5Protocol.Channel sessionChannel,
+            NetworkBinding sessionBinding,
+            SecureProtocol.Channel sessionChannel,
             byte[] bytes,
             DatagramPacket incoming,
-            V5Protocol.RecordHeader header,
+            SecureProtocol.RecordHeader header,
             byte[] plaintext
     ) throws IOException {
         incoming.setLength(bytes.length);
@@ -528,13 +528,13 @@ final class V5Transport implements TouchTransport {
             header.receivedNanos = System.nanoTime();
             sessionChannel.openInto(bytes, incoming.getLength(), header, plaintext);
             return true;
-        } catch (V5Protocol.AuthenticationException ignored) {
+        } catch (SecureProtocol.AuthenticationException ignored) {
             if (diagnostics != null) diagnostics.controlDrops.incrementAndGet(0);
             return false;
-        } catch (V5Protocol.ReplayException ignored) {
+        } catch (SecureProtocol.ReplayException ignored) {
             if (diagnostics != null) diagnostics.controlDrops.incrementAndGet(1);
             return false;
-        } catch (V5Protocol.ProtocolException ignored) {
+        } catch (SecureProtocol.ProtocolException ignored) {
             if (diagnostics != null) diagnostics.controlDrops.incrementAndGet(2);
             // Header corruption is unauthenticated until AEAD succeeds. Drop it
             // silently and never let hostile traffic sustain liveness.
@@ -544,16 +544,16 @@ final class V5Transport implements TouchTransport {
 
     private void handleHostControl(
             int sessionGeneration,
-            V5Protocol.RecordHeader header,
+            SecureProtocol.RecordHeader header,
             ByteBuffer control
     ) throws IOException {
-        if (header.messageType == V5Protocol.HOST_AUTH_ABORT) {
+        if (header.messageType == SecureProtocol.HOST_AUTH_ABORT) {
             // The host already released input; restart now rather than after
             // the 64 ms active or 2 s idle watchdog.
             throw new IOException("Host ended the authenticated session");
         }
         if (header.flags != 0
-                || header.payloadLength != V5Protocol.CONTROL_PAYLOAD_SIZE) {
+                || header.payloadLength != SecureProtocol.CONTROL_PAYLOAD_SIZE) {
             throw new IOException("Malformed authenticated host control");
         }
         control.clear();
@@ -571,9 +571,9 @@ final class V5Transport implements TouchTransport {
         synchronized (queueLock) {
             if (!isGameplayActive(sessionGeneration)) return;
             long receiveNanos = header.receivedNanos;
-            if (header.messageType == V5Protocol.HOST_HELLO) {
+            if (header.messageType == SecureProtocol.HOST_HELLO) {
                 if (header.sessionId != 0
-                        || header.logicalId != V5Protocol.NO_ACK) {
+                        || header.logicalId != SecureProtocol.NO_ACK) {
                     throw new IOException("Invalid authenticated HELLO");
                 }
                 if (!hostReady) {
@@ -584,7 +584,7 @@ final class V5Transport implements TouchTransport {
                     sessionStarted = false;
                     sessionId = nextSessionId();
                     nextSequence = 0;
-                    highestAcknowledged = V5Protocol.NO_ACK;
+                    highestAcknowledged = SecureProtocol.NO_ACK;
                     clearUnacknowledgedLocked();
                     long now = System.nanoTime();
                     enqueueFrameLocked(
@@ -615,7 +615,7 @@ final class V5Transport implements TouchTransport {
                     }
                     becameReady = true;
                 }
-            } else if (header.messageType == V5Protocol.HOST_ACK) {
+            } else if (header.messageType == SecureProtocol.HOST_ACK) {
                 if (!hostReady || header.sessionId != sessionId) {
                     throw new IOException("ACK belongs to the wrong V5 session");
                 }
@@ -623,12 +623,12 @@ final class V5Transport implements TouchTransport {
                     lastAcknowledgementProgressNanos = receiveNanos;
                     lastIdleResponseNanos = receiveNanos;
                 }
-            } else if (header.messageType == V5Protocol.HOST_PONG) {
+            } else if (header.messageType == SecureProtocol.HOST_PONG) {
                 if (!sessionStarted || header.sessionId != sessionId
                         || Long.compareUnsigned(header.logicalId, nextPingId) >= 0) {
                     throw new IOException("Invalid authenticated PONG");
                 }
-                if (lastPongId == V5Protocol.NO_ACK
+                if (lastPongId == SecureProtocol.NO_ACK
                         || Long.compareUnsigned(header.logicalId, lastPongId) > 0) {
                     lastPongId = header.logicalId;
                     lastIdleResponseNanos = receiveNanos;
@@ -645,7 +645,7 @@ final class V5Transport implements TouchTransport {
             listener.onConnectionChanged(
                     true,
                     "Authenticated V5 over "
-                            + (transport == V5Protocol.TransportKind.WIFI
+                            + (transport == SecureProtocol.TransportKind.WIFI
                             ? "Wi-Fi / local network"
                             : "USB tethering")
                             + " connected"
@@ -658,14 +658,14 @@ final class V5Transport implements TouchTransport {
         writerReady.countDown();
         byte[] attemptPayload = new byte[MAX_TOUCH_PAYLOAD];
         ByteBuffer attempt = ByteBuffer.wrap(attemptPayload).order(ByteOrder.LITTLE_ENDIAN);
-        byte[] sendBuffer = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
+        byte[] sendBuffer = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
         DatagramPacket outgoing = new DatagramPacket(sendBuffer, 0);
         boolean recordWriter = diagnostics != null && diagnostics.recorder.writer.claimed.compareAndSet(false, true);
         if (diagnostics != null && !recordWriter) diagnostics.recorder.writerCoverageUnavailable++;
         try {
             while (isGameplayActive(sessionGeneration)) {
-                V5NetworkBinding sessionBinding;
-                V5Protocol.Channel sessionChannel;
+                NetworkBinding sessionBinding;
+                SecureProtocol.Channel sessionChannel;
                 int payloadLength;
                 int messageType;
                 long frameSession;
@@ -689,19 +689,19 @@ final class V5Transport implements TouchTransport {
                         attempt.putLong(24, lastHostSendNanos);
                         attempt.putLong(32, lastControlReceiveNanos);
                         sequence = pending.sequence;
-                        messageType = V5Protocol.PHONE_TOUCH;
+                        messageType = SecureProtocol.PHONE_TOUCH;
                         queuedNanos = pending.queuedNanos;
                         ordinal = pending.sendAttempts;
                         repairLate = pending.repairLatenessNanos;
                         selectedAt = now;
                     } else if (sessionStarted && !hasActiveDataPathLocked()
                             // The host owns the session only once CANCEL commits.
-                            && highestAcknowledged != V5Protocol.NO_ACK
+                            && highestAcknowledged != SecureProtocol.NO_ACK
                             && now - lastPingNanos >= IDLE_PING_NANOS) {
                         payloadLength = 0;
                         sequence = nextPingId++;
                         lastPingNanos = now;
-                        messageType = V5Protocol.PHONE_PING;
+                        messageType = SecureProtocol.PHONE_PING;
                     } else {
                         long delay = unacknowledged.nanosUntilSend(now, hostWindow);
                         if (sessionStarted && unacknowledged.isEmpty()) {
@@ -734,7 +734,7 @@ final class V5Transport implements TouchTransport {
                                 returned, repairLate, selectedAt, Byte.toUnsignedInt(attempt.get(43)));
                     }
                 }
-                if (messageType == V5Protocol.PHONE_PING) {
+                if (messageType == SecureProtocol.PHONE_PING) {
                     sendLength = sessionChannel.sealInto(
                             messageType, frameSession, sequence, 0,
                             attemptPayload, payloadLength, sendBuffer
@@ -783,10 +783,10 @@ final class V5Transport implements TouchTransport {
     }
 
     private boolean acknowledgeLocked(long acknowledgedSequence, long receivedNanos, long ackHostSendNanos) {
-        boolean future = acknowledgedSequence != V5Protocol.NO_ACK
+        boolean future = acknowledgedSequence != SecureProtocol.NO_ACK
                 && Long.compareUnsigned(acknowledgedSequence, nextSequence) >= 0;
-        if (acknowledgedSequence == V5Protocol.NO_ACK
-                || (highestAcknowledged != V5Protocol.NO_ACK
+        if (acknowledgedSequence == SecureProtocol.NO_ACK
+                || (highestAcknowledged != SecureProtocol.NO_ACK
                 && Long.compareUnsigned(acknowledgedSequence, highestAcknowledged) <= 0)
                 || Long.compareUnsigned(acknowledgedSequence, nextSequence) >= 0) {
             diagnosticAckLocked(acknowledgedSequence, receivedNanos, future ? 2 : 0, ackHostSendNanos);
@@ -852,7 +852,7 @@ final class V5Transport implements TouchTransport {
                 checkHostTimeout(sessionGeneration);
                 long now = System.nanoTime();
                 if (now - lastInterfaceCheck >= INTERFACE_REVALIDATE_NANOS) {
-                    V5NetworkBinding current = binding;
+                    NetworkBinding current = binding;
                     if (current != null && !current.revalidate()) {
                         failGameplay(sessionGeneration, new IOException("Selected network interface changed"));
                         return;
@@ -870,11 +870,11 @@ final class V5Transport implements TouchTransport {
         CredentialStore.Identity identity = null;
         try {
             callback.onPairingStatus("Opening selected "
-                    + (transport == V5Protocol.TransportKind.WIFI
+                    + (transport == SecureProtocol.TransportKind.WIFI
                     ? "Wi-Fi / local network"
                     : "USB tether")
                     + " interface");
-            V5NetworkBinding pairBinding = V5NetworkBinding.open(context, transport);
+            NetworkBinding pairBinding = NetworkBinding.open(context, transport);
             if (!installBinding(pairGeneration, pairBinding)) return;
             identity = credentials.loadOrCreate();
             runInitialPairing(pairGeneration, pairBinding, identity, callback);
@@ -895,7 +895,7 @@ final class V5Transport implements TouchTransport {
 
     private void runInitialPairing(
             int pairGeneration,
-            V5NetworkBinding pairBinding,
+            NetworkBinding pairBinding,
             CredentialStore.Identity identity,
             PairingListener callback
     ) throws Exception {
@@ -910,33 +910,33 @@ final class V5Transport implements TouchTransport {
         int[] expectedPattern = null;
         random.nextBytes(exchangeId);
         try {
-        byte[] probe = V5Protocol.encodePairEnvelope(
-                V5Protocol.PAIR_PROBE,
+        byte[] probe = SecureProtocol.encodePairEnvelope(
+                SecureProtocol.PAIR_PROBE,
                 exchangeId,
                 0,
                 transport,
                 new byte[0]
         );
         callback.onPairingStatus("Waiting for the host Pair window");
-        V5Protocol.PairEnvelope offer = waitForPairEnvelope(
+        SecureProtocol.PairEnvelope offer = waitForPairEnvelope(
                 pairGeneration,
                 pairBinding,
                 pairingDeadline,
                 pairingDeadline,
                 exchangeId,
-                V5Protocol.PAIR_OFFER,
+                SecureProtocol.PAIR_OFFER,
                 1,
                 probe,
                 true
         );
 
         HandshakeState handshake = new HandshakeState(XX_NAME, HandshakeState.RESPONDER);
-        byte[] handshakeBuffer = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
-        byte[] payloadBuffer = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
-        V5Protocol.Channel pairChannel;
+        byte[] handshakeBuffer = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
+        byte[] payloadBuffer = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
+        SecureProtocol.Channel pairChannel;
         try {
             handshake.getLocalKeyPair().setPrivateKey(identity.privateKey, 0);
-            byte[] prologue = V5Protocol.prologue(transport, exchangeId);
+            byte[] prologue = SecureProtocol.prologue(transport, exchangeId);
             handshake.setPrologue(prologue, 0, prologue.length);
             Arrays.fill(prologue, (byte) 0);
             handshake.start();
@@ -955,21 +955,21 @@ final class V5Transport implements TouchTransport {
                     0,
                     0
             );
-            byte[] messageTwo = V5Protocol.encodePairEnvelope(
-                    V5Protocol.PAIR_CONTINUE,
+            byte[] messageTwo = SecureProtocol.encodePairEnvelope(
+                    SecureProtocol.PAIR_CONTINUE,
                     exchangeId,
                     2,
                     transport,
                     Arrays.copyOf(handshakeBuffer, messageTwoLength)
             );
             sendPlainRedundant(pairBinding, messageTwo);
-            V5Protocol.PairEnvelope messageThree = waitForPairEnvelope(
+            SecureProtocol.PairEnvelope messageThree = waitForPairEnvelope(
                     pairGeneration,
                     pairBinding,
                     pairingDeadline,
                     System.nanoTime() + HANDSHAKE_TIMEOUT_NANOS,
                     exchangeId,
-                    V5Protocol.PAIR_CONTINUE,
+                    SecureProtocol.PAIR_CONTINUE,
                     3,
                     messageTwo,
                     false
@@ -986,7 +986,7 @@ final class V5Transport implements TouchTransport {
             }
             handshake.getRemotePublicKey().getPublicKey(hostPublicKey, 0);
             handshakeHash = handshake.getHandshakeHash().clone();
-            pairChannel = new V5Protocol.Channel(handshake.split(), handshakeHash);
+            pairChannel = new SecureProtocol.Channel(handshake.split(), handshakeHash);
         } finally {
             handshake.destroy();
             Arrays.fill(handshakeBuffer, (byte) 0);
@@ -998,22 +998,22 @@ final class V5Transport implements TouchTransport {
 
         phoneRandom = new byte[32];
         random.nextBytes(phoneRandom);
-        phoneCommit = V5Protocol.sasCommit(1, handshakeHash, phoneRandom);
+        phoneCommit = SecureProtocol.sasCommit(1, handshakeHash, phoneRandom);
         sendRecordRedundant(
                 pairBinding,
                 pairChannel,
-                V5Protocol.PHONE_SAS_COMMITMENT,
+                SecureProtocol.PHONE_SAS_COMMITMENT,
                 0,
                 0,
                 phoneCommit
         );
-        V5Protocol.OpenedRecord hostCommitRecord = waitForPairRecord(
+        SecureProtocol.OpenedRecord hostCommitRecord = waitForPairRecord(
                 pairGeneration,
                 pairBinding,
                 pairChannel,
                 pairingDeadline,
-                V5Protocol.HOST_SAS_COMMITMENT,
-                V5Protocol.PHONE_SAS_COMMITMENT,
+                SecureProtocol.HOST_SAS_COMMITMENT,
+                SecureProtocol.PHONE_SAS_COMMITMENT,
                 phoneCommit
         );
         requirePairRecord(hostCommitRecord, 32);
@@ -1021,22 +1021,22 @@ final class V5Transport implements TouchTransport {
         sendRecordRedundant(
                 pairBinding,
                 pairChannel,
-                V5Protocol.PHONE_SAS_REVEAL,
+                SecureProtocol.PHONE_SAS_REVEAL,
                 0,
                 0,
                 phoneRandom
         );
-        V5Protocol.OpenedRecord hostRevealRecord = waitForPairRecord(
+        SecureProtocol.OpenedRecord hostRevealRecord = waitForPairRecord(
                 pairGeneration,
                 pairBinding,
                 pairChannel,
                 pairingDeadline,
-                V5Protocol.HOST_SAS_REVEAL,
-                V5Protocol.PHONE_SAS_REVEAL,
+                SecureProtocol.HOST_SAS_REVEAL,
+                SecureProtocol.PHONE_SAS_REVEAL,
                 phoneRandom
         );
         requirePairRecord(hostRevealRecord, 32);
-        expectedHostCommit = V5Protocol.sasCommit(
+        expectedHostCommit = SecureProtocol.sasCommit(
                 2,
                 handshakeHash,
                 hostRevealRecord.payload
@@ -1045,7 +1045,7 @@ final class V5Transport implements TouchTransport {
             sendAuthenticatedAbort(pairBinding, pairChannel, 2);
             throw new ComparisonException();
         }
-        expectedPattern = V5Protocol.sasPattern(V5Protocol.sasDigest(
+        expectedPattern = SecureProtocol.sasPattern(SecureProtocol.sasDigest(
                 handshakeHash,
                 phoneRandom,
                 hostRevealRecord.payload
@@ -1058,9 +1058,9 @@ final class V5Transport implements TouchTransport {
         boolean patternConfirmed = false;
         long lastConfirmSend = 0;
         long lastInterfaceCheck = System.nanoTime();
-        V5SendQueue repairs = new V5SendQueue(MAX_HOST_WINDOW, 32);
+        SendQueue repairs = new SendQueue(MAX_HOST_WINDOW, 32);
         HashSet<Long> qualitySeen = new HashSet<>();
-        byte[] incomingBytes = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
+        byte[] incomingBytes = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
         DatagramPacket incoming = new DatagramPacket(incomingBytes, incomingBytes.length);
         while (isPairingActive(pairGeneration) && System.nanoTime() < pairingDeadline) {
             long now = System.nanoTime();
@@ -1086,7 +1086,7 @@ final class V5Transport implements TouchTransport {
                 sendRecordRedundant(
                         pairBinding,
                         pairChannel,
-                        V5Protocol.PHONE_PAIR_CONFIRM,
+                        SecureProtocol.PHONE_PAIR_CONFIRM,
                         0,
                         0,
                         new byte[0]
@@ -1097,7 +1097,7 @@ final class V5Transport implements TouchTransport {
                 sendRecordRedundant(
                         pairBinding,
                         pairChannel,
-                        V5Protocol.PHONE_PAIR_CONFIRM,
+                        SecureProtocol.PHONE_PAIR_CONFIRM,
                         0,
                         0,
                         new byte[0]
@@ -1115,22 +1115,22 @@ final class V5Transport implements TouchTransport {
             if (!pairBinding.isPinnedPeer((InetSocketAddress) incoming.getSocketAddress())) {
                 continue;
             }
-            V5Protocol.OpenedRecord record;
+            SecureProtocol.OpenedRecord record;
             try {
                 record = pairChannel.open(incomingBytes, incoming.getLength());
-            } catch (V5Protocol.AuthenticationException
-                     | V5Protocol.ReplayException ignored) {
+            } catch (SecureProtocol.AuthenticationException
+                     | SecureProtocol.ReplayException ignored) {
                 continue;
-            } catch (V5Protocol.ProtocolException ignored) {
+            } catch (SecureProtocol.ProtocolException ignored) {
                 continue;
             }
             if (record.header.sessionId != 0) {
                 throw new IOException("Pairing record used a gameplay session");
             }
-            if (record.header.messageType == V5Protocol.HOST_QUALITY_PROBE) {
-                if (transport != V5Protocol.TransportKind.WIFI
+            if (record.header.messageType == SecureProtocol.HOST_QUALITY_PROBE) {
+                if (transport != SecureProtocol.TransportKind.WIFI
                         || record.payload.length != 8
-                        || (record.header.flags & ~V5Protocol.QUALITY_REPAIR_ONLY) != 0) {
+                        || (record.header.flags & ~SecureProtocol.QUALITY_REPAIR_ONLY) != 0) {
                     throw new IOException("Malformed authenticated quality probe");
                 }
                 long received = System.nanoTime();
@@ -1138,7 +1138,7 @@ final class V5Transport implements TouchTransport {
                 long hostSend = ByteBuffer.wrap(record.payload)
                         .order(ByteOrder.LITTLE_ENDIAN)
                         .getLong();
-                boolean repairOnly = (record.header.flags & V5Protocol.QUALITY_REPAIR_ONLY) != 0;
+                boolean repairOnly = (record.header.flags & SecureProtocol.QUALITY_REPAIR_ONLY) != 0;
                 Frame quality = repairOnly ? repairs.add(record.header.logicalId, 32, received)
                         : new Frame(32);
                 if (quality == null) throw new IOException("Quality probe queue overflowed");
@@ -1151,7 +1151,7 @@ final class V5Transport implements TouchTransport {
                 } else {
                     sendQualityReply(pairBinding, pairChannel, quality, false);
                 }
-            } else if (record.header.messageType == V5Protocol.HOST_PAIR_COMPLETE) {
+            } else if (record.header.messageType == SecureProtocol.HOST_PAIR_COMPLETE) {
                 requirePairRecord(record, 0);
                 if (!patternConfirmed) {
                     throw new IOException("Host completed pairing before phone confirmation");
@@ -1159,9 +1159,9 @@ final class V5Transport implements TouchTransport {
                 credentials.savePairedHost(hostPublicKey);
                 callback.onQuality(currentSignalSummary());
                 return;
-            } else if (record.header.messageType == V5Protocol.HOST_AUTH_ABORT) {
+            } else if (record.header.messageType == SecureProtocol.HOST_AUTH_ABORT) {
                 throw new IOException("Host cancelled pairing");
-            } else if (record.header.messageType == V5Protocol.HOST_SAS_REVEAL) {
+            } else if (record.header.messageType == SecureProtocol.HOST_SAS_REVEAL) {
                 requirePairRecord(record, 32);
             } else {
                 throw new IOException("Unexpected authenticated pairing record");
@@ -1183,9 +1183,9 @@ final class V5Transport implements TouchTransport {
         }
     }
 
-    private V5Protocol.PairEnvelope waitForPairEnvelope(
+    private SecureProtocol.PairEnvelope waitForPairEnvelope(
             int pairGeneration,
-            V5NetworkBinding pairBinding,
+            NetworkBinding pairBinding,
             long pairingDeadline,
             long stepDeadline,
             byte[] exchangeId,
@@ -1197,7 +1197,7 @@ final class V5Transport implements TouchTransport {
         long deadline = Math.min(pairingDeadline, stepDeadline);
         long nextSend = 0;
         long lastInterfaceCheck = System.nanoTime();
-        byte[] bytes = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
+        byte[] bytes = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
         DatagramPacket incoming = new DatagramPacket(bytes, bytes.length);
         while (isPairingActive(pairGeneration) && System.nanoTime() < deadline) {
             long now = System.nanoTime();
@@ -1217,10 +1217,10 @@ final class V5Transport implements TouchTransport {
                 continue;
             }
             InetSocketAddress source = (InetSocketAddress) incoming.getSocketAddress();
-            V5Protocol.PairEnvelope envelope;
+            SecureProtocol.PairEnvelope envelope;
             try {
-                envelope = V5Protocol.decodePairEnvelope(bytes, incoming.getLength());
-            } catch (V5Protocol.ProtocolException ignored) {
+                envelope = SecureProtocol.decodePairEnvelope(bytes, incoming.getLength());
+            } catch (SecureProtocol.ProtocolException ignored) {
                 continue;
             }
             if (envelope.transport != transport
@@ -1235,7 +1235,7 @@ final class V5Transport implements TouchTransport {
             } else if (!pairBinding.isPinnedPeer(source)) {
                 continue;
             }
-            if (envelope.kind == V5Protocol.PAIR_ABORT) {
+            if (envelope.kind == SecureProtocol.PAIR_ABORT) {
                 throw new IOException("Host cancelled pairing");
             }
             if (envelope.kind == expectedKind && envelope.step == expectedStep) {
@@ -1245,10 +1245,10 @@ final class V5Transport implements TouchTransport {
         throw new IOException("Noise pairing handshake timed out");
     }
 
-    private V5Protocol.OpenedRecord waitForPairRecord(
+    private SecureProtocol.OpenedRecord waitForPairRecord(
             int pairGeneration,
-            V5NetworkBinding pairBinding,
-            V5Protocol.Channel pairChannel,
+            NetworkBinding pairBinding,
+            SecureProtocol.Channel pairChannel,
             long deadline,
             int expectedType,
             int retryType,
@@ -1256,7 +1256,7 @@ final class V5Transport implements TouchTransport {
     ) throws Exception {
         long nextRetry = System.nanoTime() + APPLICATION_RETRY_NANOS;
         long lastInterfaceCheck = System.nanoTime();
-        byte[] bytes = new byte[V5Protocol.MAX_DATAGRAM_SIZE];
+        byte[] bytes = new byte[SecureProtocol.MAX_DATAGRAM_SIZE];
         DatagramPacket incoming = new DatagramPacket(bytes, bytes.length);
         while (isPairingActive(pairGeneration) && System.nanoTime() < deadline) {
             long now = System.nanoTime();
@@ -1284,16 +1284,16 @@ final class V5Transport implements TouchTransport {
             if (!pairBinding.isPinnedPeer((InetSocketAddress) incoming.getSocketAddress())) {
                 continue;
             }
-            V5Protocol.OpenedRecord record;
+            SecureProtocol.OpenedRecord record;
             try {
                 record = pairChannel.open(bytes, incoming.getLength());
-            } catch (V5Protocol.AuthenticationException
-                     | V5Protocol.ReplayException ignored) {
+            } catch (SecureProtocol.AuthenticationException
+                     | SecureProtocol.ReplayException ignored) {
                 continue;
-            } catch (V5Protocol.ProtocolException ignored) {
+            } catch (SecureProtocol.ProtocolException ignored) {
                 continue;
             }
-            if (record.header.messageType == V5Protocol.HOST_AUTH_ABORT) {
+            if (record.header.messageType == SecureProtocol.HOST_AUTH_ABORT) {
                 throw new IOException("Host cancelled pairing");
             }
             if (record.header.messageType == expectedType) return record;
@@ -1301,7 +1301,7 @@ final class V5Transport implements TouchTransport {
         throw new IOException("Authenticated pairing step timed out");
     }
 
-    private static void requireCurrentPairingBinding(V5NetworkBinding pairBinding)
+    private static void requireCurrentPairingBinding(NetworkBinding pairBinding)
             throws IOException {
         if (!pairBinding.revalidate()) {
             throw new IOException("Selected network interface changed during pairing");
@@ -1309,8 +1309,8 @@ final class V5Transport implements TouchTransport {
     }
 
     private void sendQualityReply(
-            V5NetworkBinding pairBinding,
-            V5Protocol.Channel pairChannel,
+            NetworkBinding pairBinding,
+            SecureProtocol.Channel pairChannel,
             Frame quality,
             boolean repairOnly
     ) throws Exception {
@@ -1325,7 +1325,7 @@ final class V5Transport implements TouchTransport {
         for (int copy = 0; copy < (repairOnly ? 1 : INITIAL_SEND_COPIES); copy++) {
             reply.putLong(16, System.nanoTime());
             byte[] encrypted = pairChannel.seal(
-                    V5Protocol.PHONE_QUALITY_REPLY,
+                    SecureProtocol.PHONE_QUALITY_REPLY,
                     0,
                     quality.sequence,
                     0,
@@ -1336,7 +1336,7 @@ final class V5Transport implements TouchTransport {
         Arrays.fill(payload, (byte) 0);
     }
 
-    private static void requirePairRecord(V5Protocol.OpenedRecord record, int payloadLength)
+    private static void requirePairRecord(SecureProtocol.OpenedRecord record, int payloadLength)
             throws IOException {
         if (record.header.sessionId != 0
                 || record.header.logicalId != 0
@@ -1346,15 +1346,15 @@ final class V5Transport implements TouchTransport {
         }
     }
 
-    private void sendPlainRedundant(V5NetworkBinding pairBinding, byte[] bytes)
+    private void sendPlainRedundant(NetworkBinding pairBinding, byte[] bytes)
             throws IOException {
         pairBinding.sendToPeer(bytes);
         pairBinding.sendToPeer(bytes);
     }
 
     private void sendRecordRedundant(
-            V5NetworkBinding pairBinding,
-            V5Protocol.Channel pairChannel,
+            NetworkBinding pairBinding,
+            SecureProtocol.Channel pairChannel,
             int messageType,
             long logicalId,
             long flags,
@@ -1372,8 +1372,8 @@ final class V5Transport implements TouchTransport {
     }
 
     private void sendAuthenticatedAbort(
-            V5NetworkBinding pairBinding,
-            V5Protocol.Channel pairChannel,
+            NetworkBinding pairBinding,
+            SecureProtocol.Channel pairChannel,
             int reason
     ) {
         byte[] payload = ByteBuffer.allocate(2)
@@ -1384,7 +1384,7 @@ final class V5Transport implements TouchTransport {
             sendRecordRedundant(
                     pairBinding,
                     pairChannel,
-                    V5Protocol.PHONE_AUTH_ABORT,
+                    SecureProtocol.PHONE_AUTH_ABORT,
                     0,
                     0,
                     payload
@@ -1397,14 +1397,14 @@ final class V5Transport implements TouchTransport {
     }
 
     private void sendAbortBestEffort(int reason) {
-        V5NetworkBinding currentBinding = binding;
-        V5Protocol.Channel currentChannel = channel;
+        NetworkBinding currentBinding = binding;
+        SecureProtocol.Channel currentChannel = channel;
         if (currentBinding != null && currentChannel != null) {
             sendAuthenticatedAbort(currentBinding, currentChannel, reason);
         }
     }
 
-    private boolean installBinding(int expectedGeneration, V5NetworkBinding next) {
+    private boolean installBinding(int expectedGeneration, NetworkBinding next) {
         synchronized (lifecycleLock) {
             if (!isActive(expectedGeneration)) {
                 next.close();
@@ -1415,7 +1415,7 @@ final class V5Transport implements TouchTransport {
         }
     }
 
-    private boolean installChannel(int expectedGeneration, V5Protocol.Channel next) {
+    private boolean installChannel(int expectedGeneration, SecureProtocol.Channel next) {
         synchronized (lifecycleLock) {
             if (!isActive(expectedGeneration)) {
                 next.close();
@@ -1432,7 +1432,7 @@ final class V5Transport implements TouchTransport {
     private void failGameplay(int sessionGeneration, Exception error) {
         if (!closeInternal(sessionGeneration, true, error)) return;
         listener.onConnectionChanged(false, "Authenticated "
-                + (transport == V5Protocol.TransportKind.WIFI ? "Wi-Fi" : "USB")
+                + (transport == SecureProtocol.TransportKind.WIFI ? "Wi-Fi" : "USB")
                 + " session lost; restarting");
     }
 
@@ -1488,8 +1488,8 @@ final class V5Transport implements TouchTransport {
         Thread previousWriter;
         Thread previousWatchdog;
         Thread previousPairing;
-        V5NetworkBinding previousBinding;
-        V5Protocol.Channel previousChannel;
+        NetworkBinding previousBinding;
+        SecureProtocol.Channel previousChannel;
         synchronized (lifecycleLock) {
             if (requireMatch && !isActive(expectedGeneration)) return false;
             running = false;
@@ -1554,11 +1554,11 @@ final class V5Transport implements TouchTransport {
         hostLaneCount = 6;
         sessionId = 0;
         nextSequence = 0;
-        highestAcknowledged = V5Protocol.NO_ACK;
+        highestAcknowledged = SecureProtocol.NO_ACK;
         lastHeartbeatNanos = 0;
         lastPingNanos = 0;
         nextPingId = 0;
-        lastPongId = V5Protocol.NO_ACK;
+        lastPongId = SecureProtocol.NO_ACK;
         lastIdleResponseNanos = 0;
         lastHostSendNanos = 0;
         lastControlReceiveNanos = 0;
@@ -1667,7 +1667,7 @@ final class V5Transport implements TouchTransport {
     }
 
     private SignalInfo currentSignal() {
-        if (transport != V5Protocol.TransportKind.WIFI || wifiManager == null) {
+        if (transport != SecureProtocol.TransportKind.WIFI || wifiManager == null) {
             return SignalInfo.UNAVAILABLE;
         }
         try {
@@ -1689,7 +1689,7 @@ final class V5Transport implements TouchTransport {
     private String currentSignalSummary() {
         SignalInfo signal = currentSignal();
         if (signal.level < 0) {
-            return transport == V5Protocol.TransportKind.WIFI
+            return transport == SecureProtocol.TransportKind.WIFI
                     ? "Wi-Fi signal unavailable; path timing still measured by the host"
                     : "USB selected; Wi-Fi signal measurement does not apply";
         }

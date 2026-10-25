@@ -4,7 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /** Bounded retained frames. Its owner supplies synchronization and the monotonic clock. */
-final class V5SendQueue {
+final class SendQueue {
     static final long REPAIR_NANOS = 2_000_000L;
     static final int IMMEDIATE_COPIES = 2;
 
@@ -33,7 +33,7 @@ final class V5SendQueue {
     private long repair;
     private boolean lastWasRepair;
 
-    V5SendQueue(int capacity, int payloadCapacity) {
+    SendQueue(int capacity, int payloadCapacity) {
         frames = new Frame[capacity];
         for (int index = 0; index < capacity; index++) frames[index] = new Frame(payloadCapacity);
     }

@@ -33,11 +33,10 @@ use crate::input::{
 };
 use crate::metrics::HostMetrics;
 use crate::protocol::{OrderedFrames, TouchFrame};
-use crate::v5::{PHONE_PING, PHONE_TOUCH, decode_touch_payload};
+use crate::secure::{PHONE_PING, PHONE_TOUCH, decode_touch_payload};
 
 use crate::network::{enable_receive_interface, receive_datagram};
-use crate::tether::{TetherBinding, current_tether_binding, tether_ipv4_interfaces};
-use crate::v5::{
+use crate::secure::{
     Direction, HOST_ACK, HOST_AUTH_ABORT, HOST_HELLO, HOST_PAIR_COMPLETE, HOST_PONG,
     HOST_QUALITY_PROBE, HOST_SAS_COMMITMENT, HOST_SAS_REVEAL, IK_CONTINUE, IK_MESSAGE_1,
     MAX_DATAGRAM_SIZE, NO_ACK, OpenedRecord, PAIR_ABORT, PAIR_CONTINUE, PAIR_OFFER, PAIR_PROBE,
@@ -46,6 +45,7 @@ use crate::v5::{
     TransportKind, WireError, decode_pair_envelope, decode_quality_reply, encode_control_payload,
     encode_pair_envelope, fill_random, prologue, sas_commit, sas_digest, sas_pattern,
 };
+use crate::tether::{TetherBinding, current_tether_binding, tether_ipv4_interfaces};
 
 const XX_NAME: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 const IK_NAME: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
@@ -83,7 +83,7 @@ pub fn pair(
     port: u16,
     commands: &Receiver<PairCommand>,
     mut report: impl FnMut(PairEvent),
-) -> Result<(), HostV5Error> {
+) -> Result<(), SecureHostError> {
     let deadline = Instant::now() + PAIRING_TIMEOUT;
     let mut credentials = credentials::load_or_create()?;
     let (socket, listener) = bind_socket(transport, port)?;
@@ -124,9 +124,9 @@ pub fn pair(
     handshake.read_message(message_two.payload, &mut noise_message)?;
     let remote_static: [u8; 32] = handshake
         .get_remote_static()
-        .ok_or(HostV5Error::Authentication("phone static key missing"))?
+        .ok_or(SecureHostError::Authentication("phone static key missing"))?
         .try_into()
-        .map_err(|_| HostV5Error::Authentication("phone static key has wrong length"))?;
+        .map_err(|_| SecureHostError::Authentication("phone static key has wrong length"))?;
     let message_three_length = handshake.write_message(&[], &mut noise_message)?;
     let continuation = encode_pair_envelope(
         PAIR_CONTINUE,
@@ -139,14 +139,14 @@ pub fn pair(
     let handshake_hash: [u8; 32] = handshake
         .get_handshake_hash()
         .try_into()
-        .map_err(|_| HostV5Error::Authentication("handshake hash has wrong length"))?;
+        .map_err(|_| SecureHostError::Authentication("handshake hash has wrong length"))?;
     let cipher = RecordCipher::from_handshake(&mut handshake, true)?;
 
     socket.connect(peer)?;
     socket.set_read_timeout(Some(READ_TIMEOUT))?;
     let cached_request = message_two_envelope;
     let cached_response = continuation;
-    let mut connection = V5Connection::new(
+    let mut connection = SecureConnection::new(
         socket,
         peer,
         binding,
@@ -190,7 +190,9 @@ pub fn pair(
     let expected_phone_commitment = sas_commit(1, &handshake_hash, &phone_random);
     if phone_commitment.payload.as_slice() != expected_phone_commitment {
         connection.send_abort(2)?;
-        return Err(HostV5Error::Authentication("phone SAS commitment mismatch"));
+        return Err(SecureHostError::Authentication(
+            "phone SAS commitment mismatch",
+        ));
     }
     connection.send_record_redundant(
         Direction::HostToPhone,
@@ -216,9 +218,9 @@ pub fn pair(
             Ok(PairCommand::Approve) => local_approved = true,
             Ok(PairCommand::Cancel) => {
                 connection.send_abort(1)?;
-                return Err(HostV5Error::Cancelled);
+                return Err(SecureHostError::Cancelled);
             }
-            Err(TryRecvError::Disconnected) => return Err(HostV5Error::Cancelled),
+            Err(TryRecvError::Disconnected) => return Err(SecureHostError::Cancelled),
             Err(TryRecvError::Empty) => {}
         }
 
@@ -261,7 +263,7 @@ pub fn pair(
                 PHONE_SAS_COMMITMENT => {
                     require_pair_record(&record, 32)?;
                     if record.payload != phone_commitment.payload {
-                        return Err(HostV5Error::Authentication(
+                        return Err(SecureHostError::Authentication(
                             "phone changed its SAS commitment",
                         ));
                     }
@@ -269,15 +271,17 @@ pub fn pair(
                 PHONE_SAS_REVEAL => {
                     require_pair_record(&record, 32)?;
                     if record.payload.as_slice() != phone_random {
-                        return Err(HostV5Error::Authentication("phone changed its SAS reveal"));
+                        return Err(SecureHostError::Authentication(
+                            "phone changed its SAS reveal",
+                        ));
                     }
                 }
                 PHONE_AUTH_ABORT => {
                     require_pair_abort(&record)?;
-                    return Err(HostV5Error::Cancelled);
+                    return Err(SecureHostError::Cancelled);
                 }
                 _ => {
-                    return Err(HostV5Error::Authentication(
+                    return Err(SecureHostError::Authentication(
                         "unexpected authenticated pairing record",
                     ));
                 }
@@ -328,7 +332,7 @@ pub fn pair(
         }
     }
     connection.send_abort(3)?;
-    Err(HostV5Error::TimedOut("pairing window expired"))
+    Err(SecureHostError::TimedOut("pairing window expired"))
 }
 
 fn persist_pairing_if_authorized<T>(
@@ -336,11 +340,11 @@ fn persist_pairing_if_authorized<T>(
     local_approved: bool,
     quality_done: bool,
     persist: impl FnOnce() -> Result<T, credentials::CredentialError>,
-) -> Result<Option<T>, HostV5Error> {
+) -> Result<Option<T>, SecureHostError> {
     if !remote_confirmed || !local_approved || !quality_done {
         return Ok(None);
     }
-    persist().map(Some).map_err(HostV5Error::Credentials)
+    persist().map(Some).map_err(SecureHostError::Credentials)
 }
 
 const RECEIVE_WINDOW: u32 = 128;
@@ -366,13 +370,13 @@ struct GameplayState {
 }
 
 pub fn serve_gameplay(
-    connection: &mut V5Connection,
+    connection: &mut SecureConnection,
     ordered: &mut OrderedFrames,
     sink: &mut impl InputSink,
     metrics: &mut HostMetrics,
     lane_count: u8,
     stopping: &AtomicBool,
-) -> Result<(), HostV5Error> {
+) -> Result<(), SecureHostError> {
     ordered.require_fresh_session();
     let result = serve_gameplay_inner(connection, ordered, sink, metrics, lane_count, stopping);
     // On Stop or failure, tell Android immediately instead of leaving it to
@@ -392,7 +396,7 @@ pub fn serve_gameplay(
 }
 
 fn notify_session_end(
-    connection: &mut V5Connection,
+    connection: &mut SecureConnection,
     session_id: Option<u64>,
     stopping: &AtomicBool,
 ) {
@@ -415,13 +419,13 @@ fn notify_session_end(
 }
 
 fn serve_gameplay_inner(
-    connection: &mut V5Connection,
+    connection: &mut SecureConnection,
     ordered: &mut OrderedFrames,
     sink: &mut impl InputSink,
     metrics: &mut HostMetrics,
     lane_count: u8,
     stopping: &AtomicBool,
-) -> Result<(), HostV5Error> {
+) -> Result<(), SecureHostError> {
     let mut control = GameplayState {
         last_idle_activity: Instant::now(),
         last_ping: None,
@@ -536,7 +540,7 @@ fn serve_gameplay_inner(
                 || header.payload_length != 0
                 || ordered.session_id() != Some(header.session_id)
             {
-                return Err(HostV5Error::Authentication("invalid idle ping"));
+                return Err(SecureHostError::Authentication("invalid idle ping"));
             }
             if control
                 .last_ping
@@ -588,7 +592,7 @@ fn serve_gameplay_inner(
 
 #[allow(clippy::too_many_arguments)]
 fn process_gameplay_frame(
-    connection: &mut V5Connection,
+    connection: &mut SecureConnection,
     ordered: &mut OrderedFrames,
     sink: &mut impl InputSink,
     metrics: &mut HostMetrics,
@@ -596,13 +600,13 @@ fn process_gameplay_frame(
     frame: TouchFrame,
     arrival: Instant,
     stopping: &AtomicBool,
-) -> Result<(), HostV5Error> {
+) -> Result<(), SecureHostError> {
     let incoming_session = frame.session_id;
     if ordered
         .session_id()
         .is_some_and(|session| session != incoming_session)
     {
-        return Err(HostV5Error::Authentication(
+        return Err(SecureHostError::Authentication(
             "a new gameplay session requires fresh IK",
         ));
     }
@@ -670,11 +674,11 @@ pub fn accept_remembered(
     transport: TransportKind,
     port: u16,
     deadline: Instant,
-) -> Result<V5Connection, HostV5Error> {
+) -> Result<SecureConnection, SecureHostError> {
     let credentials = credentials::load_or_create()?;
     let expected_phone = *credentials
         .paired_phone_public_key()
-        .ok_or(HostV5Error::NotPaired)?;
+        .ok_or(SecureHostError::NotPaired)?;
     let (socket, listener) = bind_socket(transport, port)?;
     let (request_bytes, request, peer, binding) =
         wait_for_envelope_owned(&socket, deadline, transport, &listener, |envelope| {
@@ -693,9 +697,11 @@ pub fn accept_remembered(
     handshake.read_message(&request.payload, &mut payload)?;
     let actual_phone = handshake
         .get_remote_static()
-        .ok_or(HostV5Error::Authentication("IK initiator identity missing"))?;
+        .ok_or(SecureHostError::Authentication(
+            "IK initiator identity missing",
+        ))?;
     if actual_phone != expected_phone {
-        return Err(HostV5Error::Authentication("unpaired phone identity"));
+        return Err(SecureHostError::Authentication("unpaired phone identity"));
     }
     let response_length = handshake.write_message(&[], &mut payload)?;
     let response = encode_pair_envelope(
@@ -709,7 +715,7 @@ pub fn accept_remembered(
     let cipher = RecordCipher::from_handshake(&mut handshake, false)?;
     socket.connect(peer)?;
     socket.set_read_timeout(Some(READ_TIMEOUT))?;
-    let connection = V5Connection::new(
+    let connection = SecureConnection::new(
         socket,
         peer,
         binding,
@@ -719,7 +725,7 @@ pub fn accept_remembered(
     Ok(connection)
 }
 
-pub struct V5Connection {
+pub struct SecureConnection {
     socket: UdpSocket,
     peer: SocketAddr,
     binding: NetworkBinding,
@@ -749,7 +755,7 @@ impl Drop for InterfaceMonitor {
     }
 }
 
-impl V5Connection {
+impl SecureConnection {
     fn new(
         socket: UdpSocket,
         peer: SocketAddr,
@@ -786,11 +792,14 @@ impl V5Connection {
         }
     }
 
-    pub fn revalidate_interface(&self) -> Result<(), HostV5Error> {
+    pub fn revalidate_interface(&self) -> Result<(), SecureHostError> {
         self.binding.revalidate(self.peer)
     }
 
-    pub fn monitor_interface(&self, interval: Duration) -> Result<InterfaceMonitor, HostV5Error> {
+    pub fn monitor_interface(
+        &self,
+        interval: Duration,
+    ) -> Result<InterfaceMonitor, SecureHostError> {
         let binding = self.binding.clone();
         let peer = self.peer;
         let changed = Arc::new(AtomicBool::new(false));
@@ -818,12 +827,12 @@ impl V5Connection {
         })
     }
 
-    pub fn set_read_timeout(&self, timeout: Duration) -> Result<(), HostV5Error> {
+    pub fn set_read_timeout(&self, timeout: Duration) -> Result<(), SecureHostError> {
         self.socket.set_read_timeout(Some(timeout))?;
         Ok(())
     }
 
-    pub fn receive_record(&mut self) -> Result<Option<OpenedRecord>, HostV5Error> {
+    pub fn receive_record(&mut self) -> Result<Option<OpenedRecord>, SecureHostError> {
         let mut bytes = [0_u8; MAX_DATAGRAM_SIZE];
         Ok(self
             .receive_record_into(&mut bytes)?
@@ -840,7 +849,7 @@ impl V5Connection {
     pub fn receive_record_into(
         &mut self,
         bytes: &mut [u8; MAX_DATAGRAM_SIZE],
-    ) -> Result<Option<(RecordHeader, Instant)>, HostV5Error> {
+    ) -> Result<Option<(RecordHeader, Instant)>, SecureHostError> {
         self.last_diagnostic_discard = None;
         let (count, peer, ingress) = match receive_datagram(&self.socket, bytes) {
             Ok(value) => value,
@@ -903,7 +912,7 @@ impl V5Connection {
         logical_id: u64,
         flags: u32,
         payload: &[u8],
-    ) -> Result<(), HostV5Error> {
+    ) -> Result<(), SecureHostError> {
         let length = self.cipher.seal_into(
             direction,
             message_type,
@@ -932,7 +941,7 @@ impl V5Connection {
         logical_id: u64,
         flags: u32,
         payload: &[u8],
-    ) -> Result<(), HostV5Error> {
+    ) -> Result<(), SecureHostError> {
         let mut delivered = false;
         let mut first_error = None;
         for _ in 0..REDUNDANT_COPIES {
@@ -954,8 +963,9 @@ impl V5Connection {
         if delivered {
             Ok(())
         } else {
-            Err(first_error
-                .unwrap_or_else(|| HostV5Error::Io(io::Error::other("v5 redundant send failed"))))
+            Err(first_error.unwrap_or_else(|| {
+                SecureHostError::Io(io::Error::other("v5 redundant send failed"))
+            }))
         }
     }
 
@@ -967,9 +977,9 @@ impl V5Connection {
         receive_window: u32,
         lane_count: u8,
         mut next_host_send_nanos: impl FnMut() -> u64,
-    ) -> Result<(), HostV5Error> {
+    ) -> Result<(), SecureHostError> {
         if !matches!(control_type, HOST_HELLO | HOST_ACK | HOST_PONG) {
-            return Err(HostV5Error::Authentication("invalid host control type"));
+            return Err(SecureHostError::Authentication("invalid host control type"));
         }
         let mut delivered = false;
         let mut first_error = None;
@@ -995,7 +1005,7 @@ impl V5Connection {
             Ok(())
         } else {
             Err(first_error.unwrap_or_else(|| {
-                HostV5Error::Io(io::Error::other("v5 redundant control send failed"))
+                SecureHostError::Io(io::Error::other("v5 redundant control send failed"))
             }))
         }
     }
@@ -1008,9 +1018,9 @@ impl V5Connection {
         receive_window: u32,
         lane_count: u8,
         host_send_nanos: u64,
-    ) -> Result<(), HostV5Error> {
+    ) -> Result<(), SecureHostError> {
         if !matches!(control_type, HOST_HELLO | HOST_ACK | HOST_PONG) {
-            return Err(HostV5Error::Authentication("invalid host control type"));
+            return Err(SecureHostError::Authentication("invalid host control type"));
         }
         let payload = encode_control_payload(receive_window, lane_count, host_send_nanos);
         self.send_record_once(
@@ -1023,7 +1033,7 @@ impl V5Connection {
         )
     }
 
-    fn send_abort(&mut self, reason: u16) -> Result<(), HostV5Error> {
+    fn send_abort(&mut self, reason: u16) -> Result<(), SecureHostError> {
         self.send_record_redundant(
             Direction::HostToPhone,
             HOST_AUTH_ABORT,
@@ -1036,19 +1046,19 @@ impl V5Connection {
 }
 
 fn wait_for_application(
-    connection: &mut V5Connection,
+    connection: &mut SecureConnection,
     deadline: Instant,
     expected_type: u8,
     retry: Option<(u8, Vec<u8>)>,
     commands: &Receiver<PairCommand>,
-) -> Result<OpenedRecord, HostV5Error> {
+) -> Result<OpenedRecord, SecureHostError> {
     let mut last_send = Instant::now();
     let mut last_interface_check = Instant::now();
     while Instant::now() < deadline {
         match commands.try_recv() {
             Ok(PairCommand::Cancel) | Err(TryRecvError::Disconnected) => {
                 connection.send_abort(1)?;
-                return Err(HostV5Error::Cancelled);
+                return Err(SecureHostError::Cancelled);
             }
             Ok(PairCommand::Approve) | Err(TryRecvError::Empty) => {}
         }
@@ -1064,7 +1074,7 @@ fn wait_for_application(
                 return Ok(record);
             }
             if record.header.message_type == PHONE_AUTH_ABORT {
-                return Err(HostV5Error::Cancelled);
+                return Err(SecureHostError::Cancelled);
             }
         }
         if let Some((message_type, payload)) = retry.as_ref()
@@ -1082,25 +1092,30 @@ fn wait_for_application(
         }
     }
     connection.send_abort(3)?;
-    Err(HostV5Error::TimedOut("authenticated pairing step expired"))
+    Err(SecureHostError::TimedOut(
+        "authenticated pairing step expired",
+    ))
 }
 
-fn require_pair_record(record: &OpenedRecord, payload_length: usize) -> Result<(), HostV5Error> {
+fn require_pair_record(
+    record: &OpenedRecord,
+    payload_length: usize,
+) -> Result<(), SecureHostError> {
     if record.header.session_id != 0
         || record.header.flags != 0
         || record.header.logical_id != 0
         || record.payload.len() != payload_length
     {
-        return Err(HostV5Error::Authentication("malformed pairing control"));
+        return Err(SecureHostError::Authentication("malformed pairing control"));
     }
     Ok(())
 }
 
-fn require_pair_abort(record: &OpenedRecord) -> Result<(), HostV5Error> {
+fn require_pair_abort(record: &OpenedRecord) -> Result<(), SecureHostError> {
     require_pair_record(record, 2)?;
     let reason = u16::from_le_bytes([record.payload[0], record.payload[1]]);
     if !(1..=4).contains(&reason) {
-        return Err(HostV5Error::Authentication(
+        return Err(SecureHostError::Authentication(
             "malformed authenticated pairing abort",
         ));
     }
@@ -1117,7 +1132,7 @@ struct ListenerInterface {
 fn bind_socket(
     transport: TransportKind,
     port: u16,
-) -> Result<(UdpSocket, ListenerInterface), HostV5Error> {
+) -> Result<(UdpSocket, ListenerInterface), SecureHostError> {
     let listener = select_listener_interface(transport)?;
     let socket = bind_listener_socket(&listener, port)?;
     Ok((socket, listener))
@@ -1134,7 +1149,9 @@ fn bind_listener_socket(listener: &ListenerInterface, port: u16) -> io::Result<U
     Ok(socket)
 }
 
-fn select_listener_interface(transport: TransportKind) -> Result<ListenerInterface, HostV5Error> {
+fn select_listener_interface(
+    transport: TransportKind,
+) -> Result<ListenerInterface, SecureHostError> {
     let interfaces = get_if_addrs()?;
     let tether = tether_ipv4_interfaces()?;
     let mut candidates = Vec::new();
@@ -1172,7 +1189,7 @@ fn select_listener_interface(transport: TransportKind) -> Result<ListenerInterfa
     }
     match candidates.as_slice() {
         [listener] => Ok(listener.clone()),
-        [] => Err(HostV5Error::Interface(match transport {
+        [] => Err(SecureHostError::Interface(match transport {
             TransportKind::Usb => {
                 "no active Android USB-tether IPv4 interface is available".to_owned()
             }
@@ -1180,7 +1197,7 @@ fn select_listener_interface(transport: TransportKind) -> Result<ListenerInterfa
                 "no eligible private local-network IPv4 interface is available".to_owned()
             }
         })),
-        _ => Err(HostV5Error::Interface(match transport {
+        _ => Err(SecureHostError::Interface(match transport {
             TransportKind::Usb => {
                 "multiple Android USB-tether interfaces are active; leave only the selected phone connected"
                     .to_owned()
@@ -1317,13 +1334,13 @@ fn wait_for_envelope_owned(
     transport: TransportKind,
     listener: &ListenerInterface,
     predicate: impl Fn(&OwnedEnvelope) -> bool,
-) -> Result<(Vec<u8>, OwnedEnvelope, SocketAddr, NetworkBinding), HostV5Error> {
+) -> Result<(Vec<u8>, OwnedEnvelope, SocketAddr, NetworkBinding), SecureHostError> {
     let mut bytes = [0_u8; MAX_DATAGRAM_SIZE];
     let mut last_interface_check = Instant::now();
     while Instant::now() < deadline {
         if last_interface_check.elapsed() >= INTERFACE_REVALIDATE {
             if select_listener_interface(transport)? != *listener {
-                return Err(HostV5Error::Interface(
+                return Err(SecureHostError::Interface(
                     "selected discovery interface changed".to_owned(),
                 ));
             }
@@ -1363,7 +1380,7 @@ fn wait_for_envelope_owned(
         };
         return Ok((raw, envelope, peer, binding));
     }
-    Err(HostV5Error::TimedOut(
+    Err(SecureHostError::TimedOut(
         "no phone found on the selected interface",
     ))
 }
@@ -1383,7 +1400,7 @@ fn wait_for_handshake_step(
     peer: SocketAddr,
     binding: &NetworkBinding,
     step: HandshakeStep<'_>,
-) -> Result<Vec<u8>, HostV5Error> {
+) -> Result<Vec<u8>, SecureHostError> {
     let mut bytes = [0_u8; MAX_DATAGRAM_SIZE];
     let mut last_interface_check = Instant::now();
     while Instant::now() < step.deadline {
@@ -1427,10 +1444,10 @@ fn wait_for_handshake_step(
             return Ok(raw.to_vec());
         }
         if envelope.kind == PAIR_ABORT {
-            return Err(HostV5Error::Cancelled);
+            return Err(SecureHostError::Cancelled);
         }
     }
-    Err(HostV5Error::TimedOut("Noise handshake step expired"))
+    Err(SecureHostError::TimedOut("Noise handshake step expired"))
 }
 
 fn build_handshake(
@@ -1439,10 +1456,10 @@ fn build_handshake(
     local_private: &[u8; 32],
     remote_public: Option<&[u8; 32]>,
     handshake_prologue: &[u8],
-) -> Result<HandshakeState, HostV5Error> {
+) -> Result<HandshakeState, SecureHostError> {
     let params: NoiseParams = name
         .parse()
-        .map_err(|_| HostV5Error::Authentication("invalid Noise parameters"))?;
+        .map_err(|_| SecureHostError::Authentication("invalid Noise parameters"))?;
     let mut builder = Builder::new(params)
         .local_private_key(local_private)?
         .prologue(handshake_prologue)?;
@@ -1460,7 +1477,7 @@ fn send_plain_redundant(
     socket: &UdpSocket,
     bytes: &[u8],
     peer: SocketAddr,
-) -> Result<(), HostV5Error> {
+) -> Result<(), SecureHostError> {
     for _ in 0..REDUNDANT_COPIES {
         let sent = socket.send_to(bytes, peer)?;
         if sent != bytes.len() {
@@ -1470,7 +1487,7 @@ fn send_plain_redundant(
     Ok(())
 }
 
-fn send_plain_connected_redundant(socket: &UdpSocket, bytes: &[u8]) -> Result<(), HostV5Error> {
+fn send_plain_connected_redundant(socket: &UdpSocket, bytes: &[u8]) -> Result<(), SecureHostError> {
     for _ in 0..REDUNDANT_COPIES {
         let sent = socket.send(bytes)?;
         if sent != bytes.len() {
@@ -1481,11 +1498,11 @@ fn send_plain_connected_redundant(socket: &UdpSocket, bytes: &[u8]) -> Result<()
 }
 
 fn send_quality_probe(
-    connection: &mut V5Connection,
+    connection: &mut SecureConnection,
     probe_id: u64,
     flags: u32,
     started: Instant,
-) -> Result<(), HostV5Error> {
+) -> Result<(), SecureHostError> {
     let mut delivered = false;
     let mut first_error = None;
     for _ in 0..REDUNDANT_COPIES {
@@ -1508,8 +1525,9 @@ fn send_quality_probe(
     if delivered {
         Ok(())
     } else {
-        Err(first_error
-            .unwrap_or_else(|| HostV5Error::Io(io::Error::other("v5 quality probe send failed"))))
+        Err(first_error.unwrap_or_else(|| {
+            SecureHostError::Io(io::Error::other("v5 quality probe send failed"))
+        }))
     }
 }
 
@@ -1534,16 +1552,16 @@ impl NetworkBinding {
         peer: SocketAddr,
         transport: TransportKind,
         listener: &ListenerInterface,
-    ) -> Result<Self, HostV5Error> {
+    ) -> Result<Self, SecureHostError> {
         match transport {
             TransportKind::Usb => {
                 let binding = current_tether_binding(peer)?.ok_or_else(|| {
-                    HostV5Error::Interface(
+                    SecureHostError::Interface(
                         "phone is not on a confirmed Android USB-tether interface".to_owned(),
                     )
                 })?;
                 if binding.interface_index() != listener.index {
-                    return Err(HostV5Error::Interface(
+                    return Err(SecureHostError::Interface(
                         "USB probe arrived outside the selected tether interface".to_owned(),
                     ));
                 }
@@ -1555,7 +1573,7 @@ impl NetworkBinding {
             TransportKind::Wifi => {
                 let binding = wifi_binding(peer)?;
                 if !binding.matches_listener(listener) {
-                    return Err(HostV5Error::Interface(
+                    return Err(SecureHostError::Interface(
                         "local-network probe route does not match the selected interface"
                             .to_owned(),
                     ));
@@ -1565,7 +1583,7 @@ impl NetworkBinding {
         }
     }
 
-    fn revalidate(&self, peer: SocketAddr) -> Result<(), HostV5Error> {
+    fn revalidate(&self, peer: SocketAddr) -> Result<(), SecureHostError> {
         match self {
             #[cfg(test)]
             Self::Loopback => Ok(()),
@@ -1575,7 +1593,7 @@ impl NetworkBinding {
                 if current.contains(&(listener.local, listener.index)) {
                     Ok(())
                 } else {
-                    Err(HostV5Error::Interface(
+                    Err(SecureHostError::Interface(
                         "selected USB-tether address or interface changed".to_owned(),
                     ))
                 }
@@ -1600,7 +1618,7 @@ impl NetworkBinding {
                     {
                         Ok(())
                     }
-                    _ => Err(HostV5Error::Interface(
+                    _ => Err(SecureHostError::Interface(
                         "selected local-network interface changed".to_owned(),
                     )),
                 }
@@ -1633,21 +1651,21 @@ impl NetworkBinding {
     }
 }
 
-fn wifi_binding(peer: SocketAddr) -> Result<NetworkBinding, HostV5Error> {
+fn wifi_binding(peer: SocketAddr) -> Result<NetworkBinding, SecureHostError> {
     let IpAddr::V4(peer_ip) = peer.ip() else {
-        return Err(HostV5Error::Interface(
+        return Err(SecureHostError::Interface(
             "v5 discovery requires IPv4".to_owned(),
         ));
     };
     if !private_ipv4(peer_ip) {
-        return Err(HostV5Error::Interface(
+        return Err(SecureHostError::Interface(
             "Wi-Fi peer is outside private local address space".to_owned(),
         ));
     }
     let route = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     route.connect(peer)?;
     let IpAddr::V4(local) = route.local_addr()?.ip() else {
-        return Err(HostV5Error::Interface(
+        return Err(SecureHostError::Interface(
             "selected route is not IPv4".to_owned(),
         ));
     };
@@ -1673,7 +1691,7 @@ fn wifi_binding(peer: SocketAddr) -> Result<NetworkBinding, HostV5Error> {
         }
     }
     if matches.len() != 1 {
-        return Err(HostV5Error::Interface(
+        return Err(SecureHostError::Interface(
             "local-network route is missing or ambiguous; disconnect VPN/extra adapters".to_owned(),
         ));
     }
@@ -1735,7 +1753,7 @@ struct QualityStats {
 }
 
 impl QualityStats {
-    fn observe(&mut self, reply: crate::v5::QualityReply, received_nanos: u64) {
+    fn observe(&mut self, reply: crate::secure::QualityReply, received_nanos: u64) {
         if !self.sent.contains(&reply.probe_id) {
             return;
         }
@@ -1855,7 +1873,7 @@ fn duration_nanos(duration: Duration) -> u64 {
 }
 
 #[derive(Debug)]
-pub enum HostV5Error {
+pub enum SecureHostError {
     Io(io::Error),
     Wire(WireError),
     Noise(snow::Error),
@@ -1867,7 +1885,7 @@ pub enum HostV5Error {
     Cancelled,
 }
 
-impl std::fmt::Display for HostV5Error {
+impl std::fmt::Display for SecureHostError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "v5 network: {error}"),
@@ -1885,27 +1903,27 @@ impl std::fmt::Display for HostV5Error {
     }
 }
 
-impl std::error::Error for HostV5Error {}
+impl std::error::Error for SecureHostError {}
 
-impl From<io::Error> for HostV5Error {
+impl From<io::Error> for SecureHostError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
     }
 }
 
-impl From<WireError> for HostV5Error {
+impl From<WireError> for SecureHostError {
     fn from(value: WireError) -> Self {
         Self::Wire(value)
     }
 }
 
-impl From<snow::Error> for HostV5Error {
+impl From<snow::Error> for SecureHostError {
     fn from(value: snow::Error) -> Self {
         Self::Noise(value)
     }
 }
 
-impl From<credentials::CredentialError> for HostV5Error {
+impl From<credentials::CredentialError> for SecureHostError {
     fn from(value: credentials::CredentialError) -> Self {
         Self::Credentials(value)
     }
@@ -1953,7 +1971,7 @@ mod tests {
     #[test]
     fn published_protocol_vectors_are_stable() {
         let exchange_id: [u8; 16] = std::array::from_fn(|index| index as u8);
-        let handshake_prologue = crate::v5::prologue(TransportKind::Wifi, exchange_id);
+        let handshake_prologue = crate::secure::prologue(TransportKind::Wifi, exchange_id);
         let host_static = sequence(0x10);
         let phone_static = sequence(0x30);
         let host_ephemeral = sequence(0x50);
@@ -2031,9 +2049,9 @@ mod tests {
 
         let phone_random = sequence(0xa0);
         let host_random = sequence(0xc0);
-        let phone_commit = crate::v5::sas_commit(1, &hash, &phone_random);
-        let host_commit = crate::v5::sas_commit(2, &hash, &host_random);
-        let digest = crate::v5::sas_digest(&hash, &phone_random, &host_random);
+        let phone_commit = crate::secure::sas_commit(1, &hash, &phone_random);
+        let host_commit = crate::secure::sas_commit(2, &hash, &host_random);
+        let digest = crate::secure::sas_digest(&hash, &phone_random, &host_random);
         assert_eq!(
             hex(&phone_commit),
             "ea96f02ca5508df65cbe4c43e2b03fc4684bb9be33411f3aaa38edc625c112ca"
@@ -2046,7 +2064,7 @@ mod tests {
             hex(&digest),
             "95fedb94b066e0ec093efcd8026c8a8d82200248804fa15a8f372d1fc42bbea7"
         );
-        assert_eq!(crate::v5::sas_pattern(digest), [6, 3, 6, 4, 2, 5, 5, 6]);
+        assert_eq!(crate::secure::sas_pattern(digest), [6, 3, 6, 4, 2, 5, 5, 6]);
 
         let mut phone_cipher = RecordCipher::from_handshake(&mut phone, false).unwrap();
         let record = phone_cipher
@@ -2073,7 +2091,7 @@ mod tests {
         );
 
         let ik_exchange: [u8; 16] = std::array::from_fn(|index| 0xf0 + index as u8);
-        let ik_prologue = crate::v5::prologue(TransportKind::Usb, ik_exchange);
+        let ik_prologue = crate::secure::prologue(TransportKind::Usb, ik_exchange);
         let ik_params: NoiseParams = IK_NAME.parse().unwrap();
         let mut ik_phone = Builder::new(ik_params.clone())
             .local_private_key(&phone_static)
@@ -2137,7 +2155,7 @@ mod tests {
         let mut quality = QualityStats::default();
         quality.sent.insert(7);
         quality.observe(
-            crate::v5::QualityReply {
+            crate::secure::QualityReply {
                 probe_id: 7,
                 host_send_nanos: 1_000_000,
                 phone_receive_nanos: 10_000_000,
@@ -2189,12 +2207,12 @@ mod tests {
     #[test]
     fn split_connection_id_matches_direct_hashing() {
         assert_eq!(
-            crate::v5::connection_id(&[4; 32]),
-            crate::v5::connection_id(&[4; 32])
+            crate::secure::connection_id(&[4; 32]),
+            crate::secure::connection_id(&[4; 32])
         );
         assert_ne!(
-            crate::v5::connection_id(&[4; 32]),
-            crate::v5::connection_id(&[5; 32])
+            crate::secure::connection_id(&[4; 32]),
+            crate::secure::connection_id(&[5; 32])
         );
     }
 }

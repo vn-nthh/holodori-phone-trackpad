@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicLongArray;
  */
 final class DiagnosticWorker {
     interface BindingSource {
-        V5NetworkBinding current();
+        NetworkBinding current();
     }
 
     private static final String TAG = "HolodoriUDP5";
@@ -32,12 +32,12 @@ final class DiagnosticWorker {
     final AtomicLongArray controlDrops = new AtomicLongArray(3);
     private final AtomicInteger producers = new AtomicInteger();
     private final Context context;
-    private final V5Protocol.TransportKind transport;
+    private final SecureProtocol.TransportKind transport;
     private final BindingSource binding;
     private Thread thread;
     private volatile boolean stopping;
 
-    DiagnosticWorker(Context context, V5Protocol.TransportKind transport, BindingSource binding) {
+    DiagnosticWorker(Context context, SecureProtocol.TransportKind transport, BindingSource binding) {
         this.context = context;
         this.transport = transport;
         this.binding = binding;
@@ -86,7 +86,7 @@ final class DiagnosticWorker {
                 long now = System.nanoTime();
                 if (now >= nextEnvironment) {
                     nextEnvironment = now + ENVIRONMENT_INTERVAL_NANOS;
-                    V5NetworkBinding current = binding.current();
+                    NetworkBinding current = binding.current();
                     Arrays.fill(environment, -1L);
                     environment[0] = DiagnosticRecorder.ENVIRONMENT;
                     environment[1] = now;

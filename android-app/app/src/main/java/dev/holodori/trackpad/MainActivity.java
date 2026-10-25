@@ -70,7 +70,7 @@ public final class MainActivity extends Activity implements
 
     @Override
     public void onBackPressed() {
-        if (playing || transport instanceof V5Transport) {
+        if (playing || transport instanceof SecureTransport) {
             stopCurrent();
             showSetup();
             return;
@@ -107,15 +107,15 @@ public final class MainActivity extends Activity implements
     public void onPairRequested(SetupView.Selection selection) {
         stopCurrent();
         setupView.startPairing();
-        V5Transport v5 = new V5Transport(this, this, selection.transport);
+        SecureTransport v5 = new SecureTransport(this, this, selection.transport);
         transport = v5;
         v5.startPairing(pairingListenerFor(v5));
     }
 
     @Override
     public void onPairCancelled() {
-        if (transport instanceof V5Transport) {
-            ((V5Transport) transport).cancelPairing();
+        if (transport instanceof SecureTransport) {
+            ((SecureTransport) transport).cancelPairing();
         }
         transport = null;
         setupView.finishPairing(false, "Pairing cancelled");
@@ -126,7 +126,7 @@ public final class MainActivity extends Activity implements
         stopCurrent();
         transport = selection.legacyV4
                 ? new UdpTransport(this, this)
-                : new V5Transport(this, this, selection.transport);
+                : new SecureTransport(this, this, selection.transport);
         trackpadView = new TrackpadView(
                 this,
                 transport,
@@ -153,8 +153,8 @@ public final class MainActivity extends Activity implements
 
     @Override
     public void onPatternEntered(int[] lanes) {
-        if (!(transport instanceof V5Transport)
-                || !((V5Transport) transport).submitPairingPattern(lanes)) {
+        if (!(transport instanceof SecureTransport)
+                || !((SecureTransport) transport).submitPairingPattern(lanes)) {
             setupView.finishPairing(false, "Pairing attempt is no longer active");
         }
     }
@@ -192,8 +192,8 @@ public final class MainActivity extends Activity implements
         });
     }
 
-    private V5Transport.PairingListener pairingListenerFor(V5Transport owner) {
-        return new V5Transport.PairingListener() {
+    private SecureTransport.PairingListener pairingListenerFor(SecureTransport owner) {
+        return new SecureTransport.PairingListener() {
             private void update(Runnable action) {
                 runOnUiThread(() -> {
                     if (transport == owner && setupView != null) action.run();

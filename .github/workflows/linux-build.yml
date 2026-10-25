@@ -93,7 +93,7 @@ jobs:
             network::tests::loopback_fault_recovery_stays_inside_one_120_hz_frame \
             -- --ignored --exact
           cargo test --locked --release --manifest-path native-host/Cargo.toml --lib \
-            v5_host::gameplay_tests::production_loopback_latency \
+            secure_host::gameplay_tests::production_loopback_latency \
             -- --ignored --exact --nocapture --test-threads=1
 
       # This step (and every Rust step below it) is NOT redundant with
