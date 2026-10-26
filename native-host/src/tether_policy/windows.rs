@@ -419,20 +419,10 @@ fn capture_family(
             policy.family == family && same_recovery_adapter(&policy.adapter, &adapter)
         })
         .collect();
-    match recover_policies(policies, recover_policy, remove_policy_value)? {
-        RecoveryOutcome::NothingToDo | RecoveryOutcome::Restored { .. } => {}
-        RecoveryOutcome::Deferred { .. } => {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "the tether adapter disconnected during recovery; reconnect it before enabling local-only tethering",
-            ));
-        }
-        RecoveryOutcome::OwnerStillRunning => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "another tether route policy owner is still running",
-            ));
-        }
+    let outcome = recover_policies(policies, recover_policy, remove_policy_value)?;
+    let family_bound = || Ok(interface_row_for_adapter(&adapter, family)?.is_some());
+    if capture_after_recovery(outcome, family_bound)? == CaptureStep::Skip {
+        return Ok(None);
     }
     require_binding_adapter(binding)?;
     let Some(interface) = interface_row_for_adapter(&adapter, family)? else {
@@ -458,6 +448,36 @@ fn capture_family(
         default_routes,
         persisted_name,
     }))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CaptureStep {
+    Capture,
+    Skip,
+}
+
+/// Decide whether a family can be captured after finishing its old journals.
+/// The journals were matched to the present adapter, so a deferral means the
+/// adapter currently has no interface for this family (for example IPv6 was
+/// unbound after an earlier session). There is nothing to capture or mutate
+/// for that family; skip it and keep its journal for when the family returns
+/// instead of refusing to protect the families that are bound.
+fn capture_after_recovery(
+    outcome: RecoveryOutcome,
+    family_bound: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<CaptureStep> {
+    match outcome {
+        RecoveryOutcome::NothingToDo | RecoveryOutcome::Restored { .. } => Ok(CaptureStep::Capture),
+        RecoveryOutcome::Deferred { .. } if !family_bound()? => Ok(CaptureStep::Skip),
+        RecoveryOutcome::Deferred { .. } => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "the tether adapter changed during route recovery; reconnect it before enabling local-only tethering",
+        )),
+        RecoveryOutcome::OwnerStillRunning => Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "another tether route policy owner is still running",
+        )),
+    }
 }
 
 fn apply_snapshot(snapshot: &InterfaceSnapshot) -> io::Result<()> {
@@ -2120,10 +2140,10 @@ unsafe fn ansi_string(pointer: windows_sys::core::PSTR) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterIdentity, CapturedGateway, IPV4, IPV6, PersistedPolicy, PersistedRoute,
+        AdapterIdentity, CaptureStep, CapturedGateway, IPV4, IPV6, PersistedPolicy, PersistedRoute,
         PolicyRecovery, ProcessOwner, RecoveryOutcome, TetherBinding, TetherPrefix, TetherSnapshot,
-        classify_captured_gateway, current_process_owner, decode_policy, encode_policy,
-        interface_identity_matches, is_tether_adapter, missing_original_indices,
+        capture_after_recovery, classify_captured_gateway, current_process_owner, decode_policy,
+        encode_policy, interface_identity_matches, is_tether_adapter, missing_original_indices,
         prepare_interface_row_for_set, recover_policies, recover_policy, restore_route_row,
         rollback_suffix, same_adapter_instance, same_multiset, same_prefix, same_recovery_adapter,
         should_restore_owned_flag, sockaddr_inet_ip, split_registry_strings, valid_tether_prefix,
@@ -2415,6 +2435,42 @@ mod tests {
         .unwrap();
         assert_eq!(outcome, RecoveryOutcome::Restored { snapshots: 1 });
         assert_eq!(removed, ["connected", "disconnected"]);
+    }
+
+    #[test]
+    fn deferred_journal_for_an_unbound_family_skips_only_that_family() {
+        let deferred = RecoveryOutcome::Deferred {
+            restored: 0,
+            pending: 1,
+        };
+        assert_eq!(
+            capture_after_recovery(deferred, || Ok(false)).unwrap(),
+            CaptureStep::Skip
+        );
+        assert_eq!(
+            capture_after_recovery(deferred, || Ok(true))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            capture_after_recovery(RecoveryOutcome::NothingToDo, || panic!("not consulted"))
+                .unwrap(),
+            CaptureStep::Capture
+        );
+        assert_eq!(
+            capture_after_recovery(RecoveryOutcome::Restored { snapshots: 1 }, || {
+                panic!("not consulted")
+            })
+            .unwrap(),
+            CaptureStep::Capture
+        );
+        assert_eq!(
+            capture_after_recovery(RecoveryOutcome::OwnerStillRunning, || Ok(false))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
     }
 
     #[test]
