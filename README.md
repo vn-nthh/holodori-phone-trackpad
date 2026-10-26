@@ -14,26 +14,29 @@ into lane keys. The default keys are `S D F J K L`.
 
 ## Download
 
-The stable version is **v0.5.1**, with authenticated USB/Wi-Fi sessions,
+The stable version is **v0.5.2**, with authenticated USB/Wi-Fi sessions,
 pairing, thumb mode, lower-latency scheduling, optional pressure calibration,
-and session diagnostics.
+session diagnostics, faster recovery after a dropout, and optional same-lane
+tap spacing.
 Install the phone and host from the same release.
 
-Starting with v0.5.1-alpha2, the portable Windows ZIP contains only the Windows
-app and its supporting files. Download the Android APK separately from the same
-release. Microsoft Store distribution uses MSIX with Microsoft's free package
-signing after certification; see the [Store packaging guide](packaging/MICROSOFT_STORE.md).
+The portable Windows ZIP contains only the Windows app and its supporting
+files. Download the Android APK separately from the same release. Microsoft
+Store distribution uses MSIX with Microsoft's free package signing after
+certification; see the [Store packaging guide](packaging/MICROSOFT_STORE.md).
 
-- [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-windows-x64.zip)
+- [Windows app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.2/Doritrack-v0.5.2-windows-x64.zip)
 - Linux app: a ready-made download is not available yet. See the
   [Linux setup guide](LINUX_SETUP.md) if you want to build and use it now.
-- [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-android.apk)
-- [Release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.1)
+- [Android app](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.2/Doritrack-v0.5.2-android.apk)
+- [Release notes](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.2)
 
-**Upgrading from an alpha or v0.4.1:** the Android app now uses a persistent
-private release key. Uninstall the old APK once, install v0.5.1, and pair again.
-Uninstalling clears the phone app's settings and pairing. Future releases using
-this key can update normally.
+**Upgrading from v0.5.0 or newer:** install the new APK over the old one. It
+keeps the phone app's settings and pairing.
+
+**Upgrading from a v0.5.0 alpha or v0.4.x:** those builds used a different
+signing key. Uninstall the old APK once, install v0.5.2, and pair again.
+Uninstalling clears the phone app's settings and pairing.
 
 You need:
 
@@ -85,7 +88,8 @@ usually under **Network**, **Connections**, **Hotspot**, or **Tethering**.
   play area; the nearest edge lane stays held.
 - Slides pass through every crossed lane in order.
 - Multiple fingers can hold different lanes at the same time.
-- A disconnect releases held keys instead of leaving them stuck.
+- A disconnect releases held keys instead of leaving them stuck. If the
+  controller stops or crashes, the PC app releases all six lane keys.
 - Lane keys can be changed in the app.
 
 ## How the connection works
@@ -126,11 +130,18 @@ Test custom keys in Notepad before opening the game. On Windows the launcher
 always asks for administrator access when it opens, so it can send keys to a
 game that runs as administrator.
 
-### Stop the PC from using the phone's internet
+### Separate fast same-lane taps (beta)
+
+Turn on **Preferences > Separate fast same-lane taps (beta)** if a fast re-tap
+on one lane is sometimes missed. Key changes on one lane that would reach
+Windows at the same instant are spaced by 2 ms, so the game sees each release
+and press. Slides and taps on different lanes are never delayed, and a tap is
+delayed by at most about 6 ms. The option is off by default.
+
+### Don't use the phone's internet
 
 USB tethering can make the PC use the phone as an internet connection. Turn on
-**Stop the PC from using the phone's internet** if you only want the local
-phone-to-PC link.
+**Don't use the phone's internet** if you only want the local phone-to-PC link.
 
 The app restores the setting when you stop. If the app was interrupted, open it
 again and follow the recovery message before playing.
@@ -151,15 +162,14 @@ The status line distinguishes **Waiting**, **Phone connected**,
 and the controller is waiting for a fresh phone session; you do not need to
 press Start again.
 
-### Save latency report when stopped
+### Save a latency report when stopping
 
-Leave this checked if you want a report after playing. After **Stop**, use
-**Settings > Open report folder**. Starting with v0.5.1-alpha2, portable Windows
-reports use `%LOCALAPPDATA%\Doritrack\Logs`; Store MSIX reports use
+Leave this on if you want a report after playing. After **Stop**, use
+**Preferences > Open report folder**. Portable Windows reports use `%LOCALAPPDATA%\Doritrack\Logs`; Store MSIX reports use
 `%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs`.
 Reports survive app updates. Copy Store reports elsewhere before an app reset or
-uninstall if you want to keep them. Older releases keep their reports under
-`Windows\Logs` in the extracted folder. Linux locations are listed in the
+uninstall if you want to keep them. Releases before v0.5.1-alpha2 keep their reports
+under `Windows\Logs` in the extracted folder. Linux locations are listed in the
 [Linux setup guide](LINUX_SETUP.md#latency-reports). The app writes the report
 only after you press **Stop**, not while you are playing.
 
@@ -219,11 +229,23 @@ policy messages.
 The launcher runs as administrator on Windows for exactly this case. If you
 declined the elevation prompt, close the launcher and open it again.
 
+### A fast re-tap on one lane is missed
+
+Turn on **Preferences > Separate fast same-lane taps (beta)** on the PC and try
+again. Please report whether fast same-lane patterns register better with the
+option on or off.
+
+### Antivirus flags the controller
+
+Some antivirus products, including Microsoft Defender's machine-learning
+detection, may flag the unsigned controller executable. Compare the download's
+SHA-256 with the one on the release page or in the zip's `SHA256SUMS.txt`.
+
 ### The Android app will not install
 
-Older releases use a different signing key. Uninstall the old Holodori
-controller app once, install v0.5.0, then pair again. This clears the phone
-app's settings and pairing.
+Releases before v0.5.0 use a different signing key. Uninstall the old Holodori
+controller app once, install the current release, then pair again. This clears
+the phone app's settings and pairing.
 
 ## For developers
 

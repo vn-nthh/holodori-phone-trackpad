@@ -10,20 +10,23 @@ Android スマホを、Windows 上の [hololive Dreams (holodori)](https://store
 
 ## ダウンロード
 
-安定版は **v0.5.1** です。
+安定版は **v0.5.2** です。
 
-認証付き USB/Wi-Fi 接続、ペアリング、親指モード、遅延の改善に加え、
-任意の筆圧キャリブレーションとセッション診断を含みます。
+認証付き USB/Wi-Fi 接続、ペアリング、親指モード、遅延の改善、
+任意の筆圧キャリブレーションとセッション診断に加え、切断後の高速な復帰と、
+任意の同一レーン連打の間隔調整を含みます。
 スマホと PC には、同じリリースのアプリをインストールしてください。
 
-- [Windows アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-windows-x64.zip)
-- [Android アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.1/Doritrack-v0.5.1-android.apk)
-- [リリースノート](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.1)
+- [Windows アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.2/Doritrack-v0.5.2-windows-x64.zip)
+- [Android アプリ](https://github.com/vn-nthh/holodori-phone-trackpad/releases/download/v0.5.2/Doritrack-v0.5.2-android.apk)
+- [リリースノート](https://github.com/vn-nthh/holodori-phone-trackpad/releases/tag/v0.5.2)
 
-**アルファ版・v0.4.1 からの更新:** Android の署名鍵が専用のリリース鍵に変わりました。
-旧 APK を一度アンインストールし、v0.5.1 をインストールして再ペアリングしてください。
+**v0.5.0 以降からの更新:** 新しい APK を上書きインストールしてください。
+スマホ側の設定とペアリングはそのまま残ります。
+
+**v0.5.0 のアルファ版・v0.4.x からの更新:** 署名鍵が異なります。
+旧 APK を一度アンインストールし、v0.5.2 をインストールして再ペアリングしてください。
 アンインストールするとスマホ側の設定とペアリングが消去されます。
-今後、同じ鍵で署名したリリースには通常どおり更新できます。
 
 必要なもの:
 
@@ -53,6 +56,7 @@ USB テザリングの設定名と場所は機種によって違います。だ�
 - スライドは通過したレーンを順に入力します。
 - 複数の指で別レーンを同時にホールドできます。
 - 切断時は押しっぱなしのキーを解放するので、キーが固まりません。
+  コントローラーが停止またはクラッシュした場合も、PC アプリが 6 レーンのキーをすべて解放します。
 - レーンキーは Windows アプリで変更できます。
 
 ## 接続の仕組み
@@ -75,9 +79,13 @@ USB テザリングがスマホと PC のあいだに小さなネットワーク
 
 ゲームを開く前に、メモ帳でカスタムキーを試してください。Windows ランチャーは起動時に管理者権限を求めるため、管理者として動くゲームにも入力できます。
 
+### 同一レーンの速い連打を分ける(ベータ)
+
+同じレーンの速い連打がときどき抜ける場合は、**Preferences > Separate fast same-lane taps (beta)** をオンにしてください。同じレーンのキー変化が Windows に同時に届きそうなときに 2 ミリ秒の間隔を空け、ゲームが離しと押しをそれぞれ認識できるようにします。スライドや別レーンのタップは遅らせません。タップの遅れは最大でも約 6 ミリ秒です。デフォルトはオフです。
+
 ### PC がスマホのインターネットを使わないようにする
 
-USB テザリングだと、PC がスマホをインターネット接続として使うことがあります。スマホと PC のローカル接続だけ欲しいときは **Stop the PC from using the phone's internet** をオンにしてください。
+USB テザリングだと、PC がスマホをインターネット接続として使うことがあります。スマホと PC のローカル接続だけ欲しいときは **Don't use the phone's internet** をオンにしてください。
 
 ランチャーは起動時に管理者権限を求めます。Stop すると元のネットワーク設定に戻ります。ルート変更前に復旧用スナップショットも保存するため、異常終了した場合は次回起動時に復元します。
 
@@ -87,7 +95,7 @@ USB テザリングだと、PC がスマホをインターネット接続とし�
 
 ### 停止時にレイテンシレポートを保存する
 
-プレイ後にレポートが欲しい場合はこのチェックを付けたままにしてください。v0.5.1-alpha2 以降は **Stop** の後、設定の **Open report folder** から開けます。ポータブル版は `%LOCALAPPDATA%\Doritrack\Logs`、Store の MSIX 版は `%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs` に保存されます。更新後も残りますが、MSIX 版のリセットやアンインストール前には必要なレポートを別の場所へコピーしてください。以前のバージョンのレポートは展開先の `Windows\Logs` に残ります。プレイ中はレポートを書きません。
+プレイ後にレポートが欲しい場合は **Save a latency report when stopping** をオンのままにしてください。**Stop** の後、**Preferences > Open report folder** から開けます。ポータブル版は `%LOCALAPPDATA%\Doritrack\Logs`、Store の MSIX 版は `%LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalState\Logs` に保存されます。更新後も残りますが、MSIX 版のリセットやアンインストール前には必要なレポートを別の場所へコピーしてください。v0.5.1-alpha2 より前のバージョンのレポートは展開先の `Windows\Logs` に残ります。プレイ中はレポートを書きません。
 
 ## トラブルシューティング
 
@@ -109,9 +117,17 @@ USB テザリングだと、PC がスマホをインターネット接続とし�
 
 ゲームを管理者として動かしている場合は、コントローラーも管理者として再起動してください。
 
+### 同じレーンの速い連打が抜ける
+
+PC の **Preferences > Separate fast same-lane taps (beta)** をオンにして試してください。オンとオフのどちらで速い同一レーンの譜面が認識されやすいか、報告していただけると助かります。
+
+### ウイルス対策ソフトがコントローラーを検出する
+
+Microsoft Defender の機械学習による検出を含め、一部のウイルス対策ソフトは署名のないコントローラーの実行ファイルを検出することがあります。ダウンロードしたファイルの SHA-256 を、リリースページまたは ZIP 内の `SHA256SUMS.txt` の値と比べてください。
+
 ### Android が APK のインストールを拒否する
 
-旧リリースとは署名鍵が異なります。古い Holodori コントローラーアプリを一度アンインストールし、v0.5.0 をインストールして再ペアリングしてください。スマホ側の設定とペアリングは消去されます。
+v0.5.0 より前のリリースとは署名鍵が異なります。古い Holodori コントローラーアプリを一度アンインストールし、最新リリースをインストールして再ペアリングしてください。スマホ側の設定とペアリングは消去されます。
 
 ## 開発者向け
 
